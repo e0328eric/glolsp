@@ -1,0 +1,89 @@
+//! Translate byte offsets to the UTF-16 positions required by LSP.
+#import "Strings";
+#import "String_Builder";
+#load "protocol.glo";
+
+#public {
+    Text_Position :: struct { line: ssize; character: ssize; }
+
+    position_at :: (source: string, offset: ssize) -> Text_Position {
+        result: Text_Position;
+        cursor: ssize = 0;
+        while cursor < source.count && cursor < offset {
+            if source[cursor] == #char "\r" || source[cursor] == #char "\n" {
+                next := cursor + 1;
+                if source[cursor] == #char "\r" && next < source.count &&
+                   source[next] == #char "\n" next += 1;
+                // Neither byte inside CRLF advances to the following line.
+                if next > offset break;
+                result.line += 1;
+                result.character = 0;
+                cursor = next;
+            } else if #pattern .Some(decoded) = source.decode_at(cursor) {
+                // A byte offset inside a UTF-8 scalar rounds down to its
+                // boundary instead of jumping past the requested offset.
+                if decoded.next > offset break;
+                result.character += 1;
+                if cast(u32)decoded.rune > 65535 result.character += 1;
+                cursor = decoded.next;
+            } else {
+                cursor += 1;
+                result.character += 1;
+            }
+        }
+        return result;
+    }
+
+    offset_at :: (source: string, line: ssize, character: ssize) -> ssize {
+        if line < 0 || character < 0 return -1;
+        cursor: ssize = 0;
+        current: ssize = 0;
+        while current < line && cursor < source.count {
+            if source[cursor] == #char "\r" || source[cursor] == #char "\n" {
+                if source[cursor] == #char "\r" && cursor + 1 < source.count &&
+                   source[cursor + 1] == #char "\n" cursor += 1;
+                current += 1;
+            }
+            cursor += 1;
+        }
+        if current != line return -1;
+        column: ssize = 0;
+        while cursor < source.count && source[cursor] != #char "\r" &&
+              source[cursor] != #char "\n" && column < character {
+            width: ssize = 1;
+            next := cursor + 1;
+            if #pattern .Some(decoded) = source.decode_at(cursor) {
+                next = decoded.next;
+                if cast(u32)decoded.rune > 65535 width = 2;
+            }
+            if column + width > character return -1;
+            cursor = next;
+            column += width;
+        }
+        return cursor;
+    }
+
+    json_offset :: (source: string, value: ?*Json) -> ssize {
+        return offset_at(
+            source,
+            json_integer(json_field(value, "line")),
+            json_integer(json_field(value, "character")),
+        );
+    }
+
+    write_position :: (out: *String_Builder, position: Text_Position) {
+        out.write_string("{\"line\":");
+        write_json_integer(out, position.line);
+        out.write_string(",\"character\":");
+        write_json_integer(out, position.character);
+        out.write_byte(#char "}");
+    }
+
+    write_range :: (out: *String_Builder, source: string, start: ssize, end: ssize) {
+        out.write_string("{\"start\":");
+        write_position(out, position_at(source, start));
+        out.write_string(",\"end\":");
+        write_position(out, position_at(source, end));
+        out.write_byte(#char "}");
+    }
+}

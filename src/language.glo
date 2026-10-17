@@ -1,0 +1,599 @@
+// Source analysis deliberately borrows the document text. Keep that text alive
+// until the analysis is destroyed; all offsets are UTF-8 byte offsets.
+#import "Strings/Utf8";
+#import "Unicode";
+
+#public Language_Token :: struct {
+    start: ssize;
+    end: ssize;
+    kind: s32; // identifier, number, string, comment, keyword, punctuation, directive
+    matching: ssize = -1;
+    scope: ssize = -1;
+}
+
+#public Language_Symbol :: struct {
+    name: string;
+    detail: string;
+    documentation: string;
+    start: ssize;
+    end: ssize;
+    selection_start: ssize;
+    selection_end: ssize;
+    kind: s32;
+    scope_start: ssize;
+    scope_end: ssize;
+}
+
+#public Language_Diagnostic :: struct {
+    start: ssize;
+    end: ssize;
+    message: string;
+    severity: s32 = 1;
+}
+
+#public Language_Analysis :: struct {
+    tokens: [..]Language_Token;
+    symbols: [..]Language_Symbol;
+    diagnostics: [..]Language_Diagnostic;
+}
+
+// Keep editor features in sync with checker/types.rs in the compiler. Matrix
+// and Simd are built-in type constructors; integer widths are recognized below.
+#public language_builtin_types :: .[
+    "bool", "s8", "s16", "s32", "s64", "s128", "ssize",
+    "u8", "u16", "u32", "u64", "u128", "usize",
+    "f16", "f32", "f64", "f80", "f128", "c32", "c64", "c128", "c160", "c256",
+    "rune", "string", "string16", "cstring", "cstring16", "void", "type", "any",
+    "Code", "Pattern", "Namespace", "Library", "label", "Matrix", "Simd", "#Never",
+    "int8_t", "int16_t", "int32_t", "int64_t", "__int128",
+    "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+];
+
+#public language_integer_type :: (name: string) -> bool {
+    if name.count < 2 return false;
+    if name[0] != #char "s" && name[0] != #char "i" && name[0] != #char "u" return false;
+    if name.count > 2 && name[1] == #char "0" return false;
+    width: ssize = 0;
+    for at: 1..name.count {
+        byte := name[at];
+        if byte < #char "0" || byte > #char "9" return false;
+        width = width * 10 + cast(ssize)(byte - #char "0");
+        if width > 65535 return false;
+    }
+    return width > 0;
+}
+
+#public language_builtin_type :: (name: string) -> bool {
+    for builtin: language_builtin_types if name == builtin return true;
+    return language_integer_type(name);
+}
+
+#public language_is_keyword :: (name: string) -> bool {
+    if name == {
+        case "if", "ifx", "else", "while", "for", "return", "break", "continue",
+             "struct", "union", "case", "enum", "using", "defer", "context", "cast",
+             "acast", "where", "noalias";
+            return true;
+        else; return false;
+    }
+}
+
+#public language_keyword_detail :: (name: string) -> string {
+    if name == {
+        case "struct"; return "Declares a structure with named fields.";
+        case "union"; return "Declares a union of variants.";
+        case "enum"; return "Declares an enumeration.";
+        case "if"; return "Conditional statement or pattern match.";
+        case "ifx"; return "Conditional expression.";
+        case "for"; return "Iterates over a range or collection.";
+        case "while"; return "Repeats a block while its condition holds.";
+        case "return"; return "Returns from the current procedure.";
+        case "defer"; return "Runs a statement when the current scope exits.";
+        case "using"; return "Makes members available in the current scope.";
+        case "cast"; return "Converts a value to an explicit type.";
+        case "acast"; return "Converts a value to the expected type.";
+        case "where"; return "Constrains a polymorphic declaration.";
+        case "context"; return "Accesses or changes the implicit execution context.";
+        case "noalias"; return "Declares that pointer arguments do not alias.";
+        case "break"; return "Exits the current loop.";
+        case "continue"; return "Starts the next iteration of the current loop.";
+        case "else"; return "Fallback branch of a conditional.";
+        case "case"; return "Branch of a pattern match.";
+        else; return "";
+    }
+}
+
+language_byte :: (source: string, at: ssize) -> u8 {
+    if at < 0 || at >= source.count return 0;
+    return source.bytes()[at];
+}
+
+language_letter_at :: (source: string, at: ssize, first: bool) -> bool {
+    byte := language_byte(source, at);
+    if byte == #char "_" || (byte >= #char "A" && byte <= #char "Z") ||
+       (byte >= #char "a" && byte <= #char "z") return true;
+    if !first && byte >= #char "0" && byte <= #char "9" return true;
+    if byte < 16#80 return false;
+    if #pattern .Some(codepoint) = source.rune_at(at) {
+        scalar := cast(u32)codepoint;
+        if first return scalar.is_unicode_alpha();
+        return scalar.is_unicode_alphanumeric();
+    }
+    return false;
+}
+
+language_next :: (source: string, at: ssize) -> ssize {
+    next := at + 1;
+    while next < source.count && language_byte(source, next) >= 16#80 &&
+          language_byte(source, next) < 16#c0 next += 1;
+    return next;
+}
+
+#public language_identifier_valid :: (name: string) -> bool {
+    if name.count == 0 || language_is_keyword(name) || !language_letter_at(name, 0, true)
+        return false;
+    at := language_next(name, 0);
+    while at < name.count {
+        if !language_letter_at(name, at, false) return false;
+        at = language_next(name, at);
+    }
+    return true;
+}
+
+language_add_diagnostic :: (
+    analysis: *Language_Analysis, start: ssize, end: ssize, message: string,
+) {
+    analysis.diagnostics.push(.{ .start = start, .end = end, .message = message });
+}
+
+language_number_end :: (source: string, start: ssize) -> ssize {
+    at := start + 1;
+    while at < source.count {
+        byte := language_byte(source, at);
+        if byte == {
+            case #char "0"..=#char "9", #char "A"..=#char "Z", #char "a"..=#char "z",
+                 #char "_", #char "#";
+                at += 1;
+            case #char ".";
+                next := language_byte(source, at + 1);
+                if next < #char "0" || next > #char "9" break;
+                at += 1;
+            case #char "+", #char "-";
+                previous := language_byte(source, at - 1);
+                if previous != #char "e" && previous != #char "E" break;
+                at += 1;
+            else; break;
+        }
+    }
+    return at;
+}
+
+language_operator_byte :: (byte: u8) -> bool {
+    if byte == {
+        case #char "+", #char "-", #char "*", #char "/", #char "<", #char ">",
+             #char "!", #char "=", #char "&", #char "|", #char "%", #char "^",
+             #char "~", #char "@";
+            return true;
+        else; return false;
+    }
+}
+
+language_lex :: (source: string, analysis: *Language_Analysis) {
+    at: ssize = 0;
+    while at < source.count {
+        byte := language_byte(source, at);
+        start := at;
+        kind: s32 = 6;
+        next := language_byte(source, at + 1);
+        if (byte == #char "c" || byte == #char "b") && next == #char "\"" {
+            at += 1;
+            byte = #char "\"";
+        }
+        if byte == {
+            case #char " ", #char "\t", #char "\n", #char "\r";
+                at += 1;
+                continue;
+            case #char "/";
+                at += 1;
+                if next == #char "/" {
+                    at += 1;
+                    while at < source.count && language_byte(source, at) != #char "\n" at += 1;
+                    kind = 4;
+                } else if next == #char "*" {
+                    at += 1;
+                    depth: ssize = 1;
+                    while at < source.count && depth > 0 {
+                        current := language_byte(source, at);
+                        following := language_byte(source, at + 1);
+                        if current == #char "/" && following == #char "*" {
+                            depth += 1;
+                            at += 2;
+                        } else if current == #char "*" && following == #char "/" {
+                            depth -= 1;
+                            at += 2;
+                        } else at += 1;
+                    }
+                    if depth > 0 language_add_diagnostic(
+                        analysis, start, at, "Unterminated block comment.");
+                    kind = 4;
+                } else while language_operator_byte(language_byte(source, at)) at += 1;
+            case #char "\\";
+                at += 1;
+                if next == #char "\\" {
+                    at += 1;
+                    while at < source.count && language_byte(source, at) != #char "\n" at += 1;
+                    kind = 3;
+                }
+            case #char "\"";
+                at += 1;
+                closed := false;
+                while at < source.count {
+                    current := language_byte(source, at);
+                    if current == {
+                        case #char "\"";
+                            at += 1;
+                            closed = true;
+                            break;
+                        case #char "\\";
+                            if at + 1 < source.count at += 2;
+                            else at += 1;
+                        else; at += 1;
+                    }
+                }
+                if !closed language_add_diagnostic(
+                    analysis, start, at, "Unterminated string literal.");
+                kind = 3;
+            case #char "#";
+                at += 1;
+                while at < source.count && language_letter_at(source, at, false)
+                    at = language_next(source, at);
+                if at == start + 1 language_add_diagnostic(
+                    analysis, start, at, "Expected a directive name after '#'.");
+                kind = 7;
+            case #char "'";
+                at += 1;
+                if language_letter_at(source, at, true) {
+                    while at < source.count && language_letter_at(source, at, false)
+                        at = language_next(source, at);
+                    // A leading apostrophe followed by an identifier is a label.
+                    if language_byte(source, at) == #char "'" at += 1;
+                } else {
+                    while at < source.count && language_byte(source, at) != #char "\n" &&
+                          language_byte(source, at) != #char "'" at += 1;
+                    if language_byte(source, at) == #char "'" at += 1;
+                    else language_add_diagnostic(
+                        analysis, start, at, "Unterminated quoted operator name.");
+                }
+            case #char "`";
+                at += 1;
+                if language_byte(source, at) == #char "`" at += 1;
+                while at < source.count && language_letter_at(source, at, false)
+                    at = language_next(source, at);
+            case #char "0"..=#char "9";
+                at = language_number_end(source, at);
+                kind = 2;
+            case #char ":";
+                at += 1;
+                if next == #char ":" {
+                    at += 1;
+                    current := language_byte(source, at);
+                    if current == #char ":" || current == #char "=" at += 1;
+                } else if next == #char "=" at += 1;
+            case #char "-";
+                at += 1;
+                while language_operator_byte(language_byte(source, at)) at += 1;
+            case #char "?"; at += 1;
+            case #char ",";
+                at += 1;
+                if next == #char "," at += 1;
+            case #char "."; {
+                at += 1;
+                if next == #char "." {
+                    at += 1;
+                    current := language_byte(source, at);
+                    if current == #char "." || current == #char "=" at += 1;
+                }
+            }
+            case #char "+", #char "*", #char "<", #char ">", #char "!",
+                 #char "=", #char "&", #char "|", #char "%", #char "^",
+                 #char "~", #char "@"; {
+                at += 1;
+                if (byte != #char "*" && byte != #char "&") ||
+                   language_byte(source, start - 1) != #char "."
+                    while language_operator_byte(language_byte(source, at)) at += 1;
+            }
+            else;
+                if language_letter_at(source, at, true) {
+                    at = language_next(source, at);
+                    while at < source.count && language_letter_at(source, at, false)
+                        at = language_next(source, at);
+                    kind = 1;
+                    if language_is_keyword(source.substring(start, at)) kind = 5;
+                } else at += 1;
+        }
+        analysis.tokens.push(.{ .start = start, .end = at, .kind = kind });
+    }
+}
+
+language_token_text :: (
+    source: string, analysis: *const Language_Analysis, index: ssize,
+) -> string {
+    if index < 0 || index >= analysis.tokens.count return "";
+    token := analysis.tokens[index];
+    return source.substring(token.start, token.end);
+}
+
+language_next_code :: (analysis: *const Language_Analysis, index: ssize) -> ssize {
+    next := index + 1;
+    while next < analysis.tokens.count && analysis.tokens[next].kind == 4 next += 1;
+    return next;
+}
+
+language_previous_code :: (analysis: *const Language_Analysis, index: ssize) -> ssize {
+    previous := index - 1;
+    while previous >= 0 && analysis.tokens[previous].kind == 4 previous -= 1;
+    return previous;
+}
+
+language_match_delimiters :: (source: string, analysis: *Language_Analysis) {
+    stack: [..]ssize;
+    scope: ssize = -1;
+    for i: 0..analysis.tokens.count {
+        analysis.tokens[i].scope = scope;
+        if analysis.tokens[i].kind != 6 continue;
+        text := language_token_text(source, analysis, i);
+        if text == "(" || text == "[" || text == "{" {
+            stack.push(i);
+            if text == "{" {
+                // Visibility groups do not introduce a lexical scope. Inherent
+                // method groups retain their enclosing type scope instead.
+                previous := language_previous_code(analysis, i);
+                if language_token_text(source, analysis, previous) == ")" &&
+                   analysis.tokens[previous].matching >= 0 {
+                    matching := analysis.tokens[previous].matching;
+                    previous = language_previous_code(analysis, matching);
+                }
+                visibility := language_token_text(source, analysis, previous);
+                before := language_previous_code(analysis, previous);
+                transparent := (visibility == "#public" || visibility == "#private") &&
+                    language_token_text(source, analysis, before) != ":::";
+                if !transparent scope = i;
+            }
+        } else if text == ")" || text == "]" || text == "}" {
+            expected := "(";
+            if text == "]" expected = "[";
+            if text == "}" expected = "{";
+            if stack.count > 0 &&
+               language_token_text(source, analysis, stack[stack.count - 1]) == expected {
+                open := stack[stack.count - 1];
+                stack.count -= 1;
+                analysis.tokens[i].matching = open;
+                analysis.tokens[open].matching = i;
+                if text == "}" scope = analysis.tokens[open].scope;
+            } else {
+                token := analysis.tokens[i];
+                language_add_diagnostic(
+                    analysis, token.start, token.end, "Unmatched closing delimiter.");
+            }
+        }
+    }
+    for open: stack {
+        token := analysis.tokens[open];
+        language_add_diagnostic(analysis, token.start, token.end, "Unclosed delimiter.");
+    }
+}
+
+language_documentation :: (source: string, start: ssize) -> string {
+    end := start;
+    while end > 0 && language_byte(source, end - 1) != #char "\n" {
+        byte := language_byte(source, end - 1);
+        if byte != #char " " && byte != #char "\t" return "";
+        end -= 1;
+    }
+    if end == 0 return "";
+    end -= 1;
+    begin := end;
+    documentation_start: ssize = -1;
+    while begin > 0 {
+        line_end := begin;
+        while begin > 0 && language_byte(source, begin - 1) != #char "\n" begin -= 1;
+        line := source.substring(begin, line_end).trim();
+        if !line.starts_with("///") break;
+        documentation_start = begin;
+        if begin == 0 break;
+        begin -= 1;
+    }
+    if documentation_start < 0 return "";
+    return source.substring(documentation_start, end).trim();
+}
+
+language_declarations :: (source: string, analysis: *Language_Analysis) {
+    for i: 0..analysis.tokens.count {
+        token := analysis.tokens[i];
+        if token.kind != 1 continue;
+        if language_token_text(source, analysis, i) == "_" continue;
+        separator := language_next_code(analysis, i);
+        separator_text := language_token_text(source, analysis, separator);
+        aggregate_kind: s32 = 0;
+        if token.scope >= 0 {
+            enclosing := analysis.tokens[token.scope];
+            if enclosing.matching >= 0 {
+                enclosing_end := analysis.tokens[enclosing.matching].end;
+                for parent: analysis.symbols {
+                    if (parent.kind == 23 || parent.kind == 10 || parent.kind == 11) &&
+                       parent.end == enclosing_end
+                        aggregate_kind = parent.kind;
+                }
+            }
+        }
+        enum_member := aggregate_kind == 10 &&
+            (separator_text == ";" || separator_text == "::" || separator_text == "=");
+        if !enum_member && separator_text != ":" && separator_text != "::" &&
+           separator_text != ":=" && separator_text != "::=" continue;
+        previous := language_previous_code(analysis, i);
+        if language_token_text(source, analysis, previous) == "." continue;
+        // Named arguments inside a procedure *type* describe the type; they
+        // do not introduce bindings in the enclosing procedure's body.
+        type_parameter := false;
+        enclosing_cursor := i - 1;
+        while enclosing_cursor >= 0 {
+            enclosing_token := analysis.tokens[enclosing_cursor];
+            if enclosing_token.end < token.start && enclosing_token.scope != token.scope break;
+            if language_token_text(source, analysis, enclosing_cursor) == "(" &&
+               enclosing_token.matching > i {
+                before_open := language_previous_code(analysis, enclosing_cursor);
+                if language_token_text(source, analysis, before_open) == ":" type_parameter = true;
+                break;
+            }
+            enclosing_cursor -= 1;
+        }
+        if type_parameter continue;
+        right := language_next_code(analysis, separator);
+        right_text := language_token_text(source, analysis, right);
+        kind: s32 = 13;
+        if separator_text == "::" kind = 14;
+        if aggregate_kind == 23 && separator_text == ":" kind = 8;
+        if enum_member kind = 22;
+        if #partial right_text == {
+            case "struct", "union"; kind = 23;
+            case "enum"; kind = 10;
+            case "typeclass"; kind = 11;
+            case "#import"; kind = 2;
+        }
+        header_end := token.end;
+        declaration_end := token.end;
+        cursor := right;
+        if enum_member && separator_text == ";" cursor = separator;
+        while cursor < analysis.tokens.count {
+            current := analysis.tokens[cursor];
+            text := language_token_text(source, analysis, cursor);
+            if current.kind == 4 { cursor += 1; continue; }
+            if separator_text == ":" && (text == ":" || text == "::") kind = 14;
+            if text == ";" || text == "," || text == ")" || text == "}" {
+                header_end = current.start;
+                declaration_end = current.start;
+                if text == ";" declaration_end = current.end;
+                break;
+            }
+            if text == "{" {
+                header_end = current.start;
+                declaration_end = source.count;
+                if current.matching >= 0 declaration_end = analysis.tokens[current.matching].end;
+                break;
+            }
+            header_end = current.end;
+            declaration_end = current.end;
+            if (text == "(" || text == "[") && current.matching >= 0 cursor = current.matching;
+            cursor += 1;
+        }
+        if right_text == "(" && right < analysis.tokens.count &&
+           analysis.tokens[right].matching >= 0 {
+            close := analysis.tokens[right].matching;
+            after := language_next_code(analysis, close);
+            after_text := language_token_text(source, analysis, after);
+            if after_text == "->" || after_text == "{" ||
+               (after < analysis.tokens.count && analysis.tokens[after].kind == 7) kind = 12;
+        }
+        scope_start: ssize = 0;
+        scope_end := source.count;
+        if token.scope >= 0 {
+            scope_token := analysis.tokens[token.scope];
+            scope_start = scope_token.start;
+            if scope_token.matching >= 0 scope_end = analysis.tokens[scope_token.matching].end;
+        }
+        if language_token_text(source, analysis, previous) == "for" {
+            scope_start = token.start;
+            scope_end = declaration_end;
+        }
+        // Parameter bindings live in the procedure, including its signature.
+        for parent: analysis.symbols {
+            if parent.kind == 12 && token.start > parent.selection_end && token.start < parent.end {
+                if token.start < parent.start + parent.detail.count {
+                    scope_start = parent.start;
+                    scope_end = parent.end;
+                }
+            }
+        }
+        documentation_start := token.start;
+        modifier := previous;
+        if language_token_text(source, analysis, modifier) == ")" &&
+           analysis.tokens[modifier].matching >= 0
+            modifier = language_previous_code(analysis, analysis.tokens[modifier].matching);
+        modifier_text := language_token_text(source, analysis, modifier);
+        if modifier_text == "#public" || modifier_text == "#private"
+            documentation_start = analysis.tokens[modifier].start;
+        analysis.symbols.push(.{
+            .name = source.substring(token.start, token.end),
+            .detail = source.substring(token.start, header_end).trim(),
+            .documentation = language_documentation(source, documentation_start),
+            .start = token.start, .end = declaration_end,
+            .selection_start = token.start, .selection_end = token.end,
+            .kind = kind, .scope_start = scope_start, .scope_end = scope_end,
+        });
+    }
+}
+
+/// Returns an analysis owning its arrays and borrowing all text from source.
+#public #memory { reads(source), noescape(source) }
+tokenize_language :: (source: string) -> Language_Analysis {
+    analysis: Language_Analysis;
+    language_lex(source, &analysis);
+    language_match_delimiters(source, &analysis);
+    return analysis;
+}
+
+/// Compatibility analysis for callers that do not require the syntax tree.
+#public
+analyze_language :: (source: string) -> Language_Analysis {
+    analysis := tokenize_language(source);
+    language_declarations(source, &analysis);
+    return analysis;
+}
+
+#public destroy_language :: (analysis: *Language_Analysis) {
+    analysis.tokens.free();
+    analysis.symbols.free();
+    analysis.diagnostics.free();
+}
+
+/// Returns the token index at a byte offset, or -1 outside a token.
+#public language_token_at :: (analysis: *const Language_Analysis, offset: ssize) -> ssize {
+    low: ssize = 0;
+    high := analysis.tokens.count;
+    while low < high {
+        middle := low + (high - low) / 2;
+        token := analysis.tokens[middle];
+        if offset < token.start high = middle;
+        else if offset >= token.end low = middle + 1;
+        else return middle;
+    }
+    return -1;
+}
+
+/// Resolves an identifier to its nearest enclosing declaration scope.
+#public language_symbol_at :: (
+    analysis: *const Language_Analysis, source: string, offset: ssize,
+) -> ssize {
+    index := language_token_at(analysis, offset);
+    if index < 0 || analysis.tokens[index].kind != 1 return -1;
+    previous := language_previous_code(analysis, index);
+    if language_token_text(source, analysis, previous) == "." return -1;
+    name := language_token_text(source, analysis, index);
+    best: ssize = -1;
+    best_scope := source.count + 1;
+    for i: 0..analysis.symbols.count {
+        symbol := analysis.symbols[i];
+        if symbol.name != name continue;
+        if offset >= symbol.selection_start && offset < symbol.selection_end return i;
+        if offset < symbol.scope_start || offset > symbol.scope_end continue;
+        if symbol.kind == 13 && symbol.scope_start > 0 && symbol.selection_start > offset continue;
+        span := symbol.scope_end - symbol.scope_start;
+        if span < best_scope || (span == best_scope && best >= 0 &&
+            symbol.selection_start <= offset &&
+            symbol.selection_start > analysis.symbols[best].selection_start) {
+            best = i;
+            best_scope = span;
+        }
+    }
+    return best;
+}

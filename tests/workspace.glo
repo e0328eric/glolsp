@@ -1,0 +1,141 @@
+//! Filesystem and overlay regression tests; this suite never executes source files.
+#load "../src/workspace.glo";
+#import "Io";
+#import "File_System/File";
+#import "File_System/Directory";
+#import "Os";
+
+workspace_test_write :: (path: string, source: string) {
+    result := write_file(path, source);
+    #assert result.is_ok();
+}
+
+workspace_test_uri :: () {
+    path := workspace_uri_to_path("file:///tmp/a%20b%23%25%ED%95%9C%EA%B8%80.glo");
+    defer path.free();
+    #assert path == "/tmp/a b#%한글.glo";
+    uri := workspace_path_to_uri(path);
+    defer uri.free();
+    #assert uri == "file:///tmp/a%20b%23%25%ED%95%9C%EA%B8%80.glo";
+    local := workspace_uri_to_path("file://localhost/tmp/a.glo");
+    defer local.free();
+    #assert local == "/tmp/a.glo";
+    windows := workspace_path_to_uri("C:\\Temp\\a b.glo");
+    defer windows.free();
+    #assert windows == "file:///C:/Temp/a%20b.glo";
+    windows_path := workspace_uri_to_path(windows);
+    defer windows_path.free();
+    #assert windows_path == "C:/Temp/a b.glo";
+    verbatim := workspace_path_to_uri("\\\\?\\C:\\Temp\\a b.glo");
+    defer verbatim.free();
+    #assert verbatim == "file:///C:/Temp/a%20b.glo";
+    unc := workspace_path_to_uri("\\\\server\\share\\file.glo");
+    defer unc.free();
+    #assert unc == "file://server/share/file.glo";
+    for malformed: .["file:///a%", "file:///a%GG", "file:///a%00", "https://a/a.glo"] {
+        invalid := workspace_uri_to_path(malformed);
+        defer invalid.free();
+        #assert invalid.count == 0;
+    }
+}
+
+main :: () {
+    workspace_test_uri();
+    root :: "build/workspace-fixtures";
+    _ := remove_all(root);
+    created := create_directory("build/workspace-fixtures/modules/Shapes", .make_parent = true);
+    #assert created.is_ok();
+    defer { _ := remove_all(root); }
+    main_path :: "build/workspace-fixtures/main.glo";
+    part_path :: "build/workspace-fixtures/part.glo";
+    main_source :: "#load \"part.glo\";\n#import \"Shapes\";\n";
+    workspace_test_write(main_path, main_source);
+    workspace_test_write(part_path, "#load \"main.glo\";\n#public value :: 1;\n");
+    workspace_test_write("build/workspace-fixtures/modules/Shapes/module.glo",
+        "#public Point :: struct { x: s32; y: s32; }\n");
+    workspace: Workspace;
+    defer workspace_destroy(&workspace);
+    workspace_init(&workspace);
+    prelude_files := workspace.files.count;
+    #assert workspace.prelude >= 0;
+    workspace_add_import_path(&workspace, "build/workspace-fixtures/modules");
+    index := workspace_load(&workspace, main_path);
+    #assert index >= 0;
+    #assert workspace.files.count == prelude_files + 3;
+    #assert workspace.files[index].imports.count == 2;
+    part := workspace.files[index].imports[0].target;
+    shapes := workspace.files[index].imports[1].target;
+    #assert part >= 0 && shapes >= 0;
+    #assert workspace.files[part].imports[0].target == index;
+    initial_parses := workspace.parse_count;
+    #assert workspace_load(&workspace, main_path) == index;
+    #assert workspace.parse_count == initial_parses;
+    part_uri := workspace_path_to_uri(part_path);
+    defer part_uri.free();
+    #assert workspace_open(&workspace, part_uri, "#public value :: 2;", 1) == part;
+    #assert workspace.parse_count == initial_parses + 1;
+    #assert workspace.files[part].open;
+    borrowed_uri := workspace.files[part].uri;
+    #assert workspace_open(&workspace, borrowed_uri, "#public value :: 2;", 1) == part;
+    #assert workspace.parse_count == initial_parses + 1;
+    #assert workspace_change(&workspace, part, "#public value :: 3;", 2);
+    #assert !workspace_change(&workspace, part, "stale", 1);
+    #assert workspace.files[part].source == "#public value :: 3;";
+    workspace_test_write(part_path, "#public value :: 4;");
+    workspace_watch(&workspace, part_uri);
+    #assert workspace.files[part].source == "#public value :: 3;";
+    workspace_close(&workspace, part);
+    #assert !workspace.files[part].open;
+    #assert workspace.files[part].source == "#public value :: 4;";
+    workspace_test_write(part_path, "#public value :: 5;");
+    workspace_watch(&workspace, part_uri);
+    #assert workspace.files[part].source == "#public value :: 5;";
+    removed := os_fs_remove_path(part_path);
+    #assert removed;
+    workspace_watch(&workspace, part_uri);
+    #assert !workspace.files[part].active;
+    #assert workspace.files[index].imports[0].target == -1;
+    #assert workspace_open(&workspace, part_uri, "#public value :: 6;", 3) == part;
+    #assert workspace.files[part].active;
+    #assert workspace.files[index].imports[0].target == part;
+    workspace_close(&workspace, part);
+    #assert !workspace.files[part].active;
+    root_uri := workspace_path_to_uri(root);
+    defer root_uri.free();
+    workspace_add_root(&workspace, root_uri);
+    #assert workspace.roots.count == 1;
+    workspace_scan_root(&workspace, root_uri);
+    #assert workspace.files.count == prelude_files + 3;
+    #assert workspace_file_relevant(&workspace, index);
+    workspace_remove_root(&workspace, root_uri);
+    #assert workspace.roots.count == 0;
+    #assert !workspace_file_relevant(&workspace, index);
+    #assert workspace.files[index].active;
+    workspace_destroy(&workspace);
+    workspace_destroy(&workspace);
+    workspace_test_write("build/workspace-fixtures/modules/Shapes.glo", "#public Other :: 1;");
+    ambiguous: Workspace;
+    defer workspace_destroy(&ambiguous);
+    workspace_add_import_path(&ambiguous, "build/workspace-fixtures/modules");
+    ambiguous_file := workspace_open(&ambiguous, "untitled:ambiguous.glo",
+        "#import \"Shapes\";", 1);
+    #assert ambiguous.files[ambiguous_file].imports[0].target == -1;
+    #assert ambiguous.files[ambiguous_file].imports[0].ambiguous;
+    workspace_test_write("build/workspace-fixtures/modules/Root_Module.glo",
+        "#public Root_Value :: 1;");
+    dynamic: Workspace;
+    defer workspace_destroy(&dynamic);
+    caller := workspace_open(&dynamic, "untitled:roots.glo", "#import \"Root_Module\";", 1);
+    #assert dynamic.files[caller].imports[0].target == -1;
+    module_root := workspace_path_to_uri("build/workspace-fixtures/modules");
+    defer module_root.free();
+    workspace_add_root(&dynamic, module_root);
+    #assert dynamic.files[caller].imports[0].target >= 0;
+    workspace_remove_root(&dynamic, module_root);
+    #assert dynamic.files[caller].imports[0].target == -1;
+    removed_generation := dynamic.generation;
+    workspace_add_root(&dynamic, module_root);
+    #assert dynamic.files[caller].imports[0].target >= 0;
+    #assert dynamic.generation > removed_generation;
+    print("workspace tests passed\n");
+}

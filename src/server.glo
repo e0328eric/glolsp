@@ -1,0 +1,637 @@
+//! Stdio transport, editor overlays, and requests against a semantic workspace.
+#import "Io";
+#import "File_System/File";
+#import "File_System/Types";
+#import "Serialization/Json";
+#import "Serialization/Core";
+#import "String_Builder";
+#import "Strings";
+#import "Context";
+#load "protocol.glo";
+#load "positions.glo";
+#load "model.glo";
+#load "workspace.glo";
+#load "analysis.glo";
+#load "ide.glo";
+#load "highlight.glo";
+#load "layout.glo";
+
+INITIALIZE_RESULT :: #string,oneline
+    \\{"capabilities":{
+    \\    "positionEncoding":"utf-16",
+    \\    "textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},
+    \\    "completionProvider":{"triggerCharacters":[".","#"]},
+    \\    "hoverProvider":true,"definitionProvider":true,"declarationProvider":true,
+    \\    "typeDefinitionProvider":true,
+    \\    "referencesProvider":true,"documentHighlightProvider":true,
+    \\    "documentSymbolProvider":true,"workspaceSymbolProvider":true,
+    \\    "renameProvider":{"prepareProvider":true},"foldingRangeProvider":true,
+    \\    "signatureHelpProvider":{"triggerCharacters":["(",","]},
+    \\    "inlayHintProvider":true,"selectionRangeProvider":true,
+    \\    "documentLinkProvider":{},"documentFormattingProvider":true,
+    \\    "codeActionProvider":{"codeActionKinds":["quickfix"]},
+    \\    "diagnosticProvider":{"interFileDependencies":true,"workspaceDiagnostics":false},
+    \\    "workspace":{"workspaceFolders":{"supported":true,"changeNotifications":true}},
+    \\    "semanticTokensProvider":{
+    \\        "legend":{
+    \\            "tokenTypes":["namespace","type","function","variable","parameter",
+    \\                "property","keyword","comment","string","number","operator","macro"],
+    \\            "tokenModifiers":["declaration","readonly"]
+    \\        },"full":true
+    \\    }
+    \\},"serverInfo":{"name":"glolsp","version":"0.2.0"}}
+;
+
+Server :: struct {
+    workspace: Workspace;
+    initialized: bool;
+    shutdown: bool;
+    hierarchical_symbols: bool;
+    folding_line_only: bool;
+    scan_roots: bool = true;
+    register_watchers: bool;
+}
+
+Server ::: instance Drop {
+    Error :: #Never;
+    drop :: (server: *#Self_Type) -> #Never!void {
+        workspace_destroy(&server.workspace);
+        return .Ok;
+    }
+}
+
+server_write_diagnostic :: (
+    out: *String_Builder,
+    source: string,
+    diagnostic: Language_Diagnostic,
+) {
+    out.write_string("{\"range\":");
+    write_range(out, source, diagnostic.start, diagnostic.end);
+    out.write_string(",\"severity\":");
+    write_json_integer(out, cast(ssize)diagnostic.severity);
+    out.write_string(",\"source\":\"glolsp\",\"message\":");
+    write_json_string(out, diagnostic.message);
+    out.write_byte(#char "}");
+}
+
+server_write_diagnostics :: (out: *String_Builder, workspace: *Workspace, index: ssize) {
+    count: ssize = 0;
+    out.write_byte(#char "[");
+    for diagnostic: workspace.files[index].syntax.language.diagnostics {
+        if count > 0 out.write_byte(#char ",");
+        count += 1;
+        server_write_diagnostic(out, workspace.files[index].source, diagnostic);
+    }
+    for diagnostic: workspace.files[index].semantic.diagnostics {
+        if count > 0 out.write_byte(#char ",");
+        count += 1;
+        server_write_diagnostic(out, workspace.files[index].source, diagnostic);
+    }
+    out.write_byte(#char "]");
+}
+
+server_publish :: (server: *Server, output: *File, index: ssize, clear: bool = false) {
+    out: String_Builder;
+    out.write_string("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",");
+    out.write_string("\"params\":{\"uri\":");
+    write_json_string(&out, server.workspace.files[index].uri);
+    out.write_string(",\"version\":");
+    write_json_integer(&out, server.workspace.files[index].version);
+    out.write_string(",\"diagnostics\":");
+    if clear out.write_string("[]");
+    else server_write_diagnostics(&out, &server.workspace, index);
+    out.write_string("}}");
+    _ := rpc_send(output, out.to_string());
+}
+
+server_publish_open :: (server: *Server, output: *File) {
+    analyze_workspace(&server.workspace);
+    for i: 0..server.workspace.files.count {
+        if server.workspace.files[i].open server_publish(server, output, i);
+    }
+}
+
+server_did_open :: (server: *Server, output: *File, params: ?*Json) {
+    item := json_field(params, "textDocument");
+    uri := json_text(json_field(item, "uri"));
+    text := json_field(item, "text");
+    version := json_field(item, "version");
+    if uri.count == 0 || !json_is_text(text) || !json_is_integer(version) return;
+    if workspace_open(&server.workspace, uri, json_text(text), json_integer(version)) < 0 return;
+    server_publish_open(server, output);
+}
+
+server_did_change :: (server: *Server, output: *File, params: ?*Json) {
+    item := json_field(params, "textDocument");
+    index := workspace_find(&server.workspace, json_text(json_field(item, "uri")));
+    if index < 0 || !server.workspace.files[index].open return;
+    version := json_field(item, "version");
+    if !json_is_integer(version) || json_integer(version) <= server.workspace.files[index].version
+        return;
+    if #pattern.Some(changes) = json_array(json_field(params, "contentChanges")) {
+        staged := server.workspace.files[index].source.clone();
+        defer staged.free();
+        for i: 0..changes.*.count {
+            change: ?*Json = .Some(&changes.*[i]);
+            text_value := json_field(change, "text");
+            if !json_is_text(text_value) return;
+            text := json_text(text_value);
+            if !text.bytes().utf8_is_valid() return;
+            start: ssize = 0;
+            end := staged.count;
+            range := json_field(change, "range");
+            if #pattern.Some(range_pointer) = range {
+                start = json_offset(staged, json_field(range, "start"));
+                end = json_offset(staged, json_field(range, "end"));
+                if start < 0 || end < start return;
+            }
+            if staged.count - (end - start) + text.count > MAX_MESSAGE_BYTES return;
+            next: String_Builder;
+            next.write_string(staged[..start]);
+            next.write_string(text);
+            next.write_string(staged[end..]);
+            staged.free();
+            staged = next.into_string();
+        }
+        if workspace_change(
+            &server.workspace,
+            index,
+            staged,
+            json_integer(version)
+        ) server_publish_open(server, output);
+    }
+}
+
+server_initialize_workspace :: (server: *Server, params: ?*Json) {
+    options := json_field(params, "initializationOptions");
+    if json_is_text(json_field(options, "stdPath"))
+        workspace_set_std_path(&server.workspace, json_text(json_field(options, "stdPath")));
+    server.scan_roots = json_boolean(json_field(options, "scanWorkspace"), true);
+    limit := json_integer(json_field(options, "maxFiles"));
+    if limit > 0 server.workspace.file_limit = limit;
+    if #pattern.Some(paths) = json_array(json_field(options, "importPaths")) {
+        for i: 0..paths.*.count {
+            path: ?*Json = .Some(&paths.*[i]);
+            if json_is_text(path) workspace_add_import_path(&server.workspace, json_text(path));
+        }
+    }
+    if #pattern.Some(folders) = json_array(json_field(params, "workspaceFolders")) {
+        for i: 0..folders.*.count {
+            folder: ?*Json = .Some(&folders.*[i]);
+            workspace_add_root(&server.workspace, json_text(json_field(folder, "uri")));
+        }
+    } else if json_is_text(json_field(params, "rootUri"))
+        workspace_add_root(&server.workspace, json_text(json_field(params, "rootUri")));
+}
+
+server_scan_roots :: (server: *Server) {
+    if !server.scan_roots return;
+    count := server.workspace.roots.count;
+    for i: 0..count {
+        uri := workspace_path_to_uri(server.workspace.roots[i]);
+        defer uri.free();
+        workspace_scan_root(&server.workspace, uri);
+    }
+}
+
+server_notification :: (server: *Server, output: *File, method: string, params: ?*Json) {
+    if #partial method == {
+        case "initialized";
+        server_scan_roots(server);
+        if server.register_watchers {
+            registration :: #string,oneline
+                \\{"jsonrpc":"2.0","id":"glolsp-watch","method":"client/registerCapability",
+                \\"params":{"registrations":[{"id":"glolsp-glo-files",
+                \\"method":"workspace/didChangeWatchedFiles","registerOptions":{
+                \\"watchers":[{"globPattern":"**/*.glo","kind":7}]}}]}}
+            ;
+            _ := rpc_send(output, registration);
+        }
+        case "textDocument/didOpen";
+        server_did_open(server, output, params);
+        case "textDocument/didChange";
+        server_did_change(server, output, params);
+        case "textDocument/didClose";
+        item := json_field(params, "textDocument");
+        index := workspace_find(&server.workspace, json_text(json_field(item, "uri")));
+        if index >= 0 {
+            server_publish(server, output, index, true);
+            workspace_close(&server.workspace, index);
+            server_publish_open(server, output);
+        }
+        case "textDocument/didSave";
+        server_publish_open(server, output);
+        case "workspace/didChangeWatchedFiles";
+        if #pattern.Some(changes) = json_array(json_field(params, "changes")) {
+            for i: 0..changes.*.count {
+                item: ?*Json = .Some(&changes.*[i]);
+                workspace_watch(&server.workspace, json_text(json_field(item, "uri")));
+            }
+            server_publish_open(server, output);
+        }
+        case "workspace/didChangeWorkspaceFolders";
+        event := json_field(params, "event");
+        if #pattern.Some(removed) = json_array(json_field(event, "removed")) {
+            for i: 0..removed.*.count {
+                item: ?*Json = .Some(&removed.*[i]);
+                workspace_remove_root(&server.workspace, json_text(json_field(item, "uri")));
+            }
+        }
+        if #pattern.Some(added) = json_array(json_field(event, "added")) {
+            for i: 0..added.*.count {
+                item: ?*Json = .Some(&added.*[i]);
+                uri := json_text(json_field(item, "uri"));
+                workspace_add_root(&server.workspace, uri);
+                if server.scan_roots workspace_scan_root(&server.workspace, uri);
+            }
+        }
+    }
+}
+
+server_write_folding :: (out: *String_Builder, document: *Source_File, line_only: bool) {
+    out.write_byte(#char "[");
+    count: ssize = 0;
+    for i: 0..document.syntax.language.tokens.count {
+        token := document.syntax.language.tokens[i];
+        end := token.end;
+        if token.kind != 4 {
+            if token.matching <= i continue;
+            end = document.syntax.language.tokens[token.matching].end;
+        }
+        start_position := position_at(document.source, token.start);
+        end_position := position_at(document.source, end);
+        if end_position.line <= start_position.line continue;
+        if count > 0 out.write_byte(#char ",");
+        count += 1;
+        out.write_string("{\"startLine\":");
+        write_json_integer(out, start_position.line);
+        if !line_only {
+            out.write_string(",\"startCharacter\":");
+            write_json_integer(out, start_position.character);
+        }
+        out.write_string(",\"endLine\":");
+        write_json_integer(out, end_position.line);
+        if !line_only {
+            out.write_string(",\"endCharacter\":");
+            write_json_integer(out, end_position.character);
+        }
+        if token.kind == 4 out.write_string(",\"kind\":\"comment\"");
+        out.write_byte(#char "}");
+    }
+    out.write_byte(#char "]");
+}
+
+server_method_known :: (method: string) -> bool {
+    if method == {
+        case "workspace/symbol", "textDocument/documentSymbol", "textDocument/completion",
+             "textDocument/hover", "textDocument/definition", "textDocument/declaration",
+            "textDocument/typeDefinition",
+            "textDocument/references", "textDocument/documentHighlight",
+            "textDocument/prepareRename", "textDocument/rename", "textDocument/foldingRange",
+            "textDocument/semanticTokens/full", "textDocument/signatureHelp",
+            "textDocument/inlayHint", "textDocument/selectionRange", "textDocument/documentLink",
+            "textDocument/formatting", "textDocument/codeAction", "textDocument/diagnostic";
+        return true;
+        else;
+        return false;
+    }
+}
+
+server_workspace_symbol_file :: (workspace: *Workspace, file: ssize) -> bool {
+    if !workspace.files[file].active || !workspace.files[file].relevant return false;
+    if workspace.files[file].open return true;
+    standard := workspace.std_path;
+    path := workspace.files[file].path;
+    in_standard := standard.count > 0 && path.starts_with(standard) &&
+        (path.count == standard.count || path[standard.count] == #char "/");
+    if !in_standard return true;
+    for root: workspace.roots {
+        if path.starts_with(root) &&
+           (path.count == root.count || path[root.count] == #char "/") return true;
+    }
+    return false;
+}
+
+server_document_request :: (
+    server: *Server,
+    output: *File,
+    id: ?*Json,
+    params: ?*Json,
+    method: string,
+    file: ssize,
+) {
+    workspace := &server.workspace;
+    analyze_workspace(workspace);
+    out: String_Builder;
+    source := workspace.files[file].source;
+    if method == {
+        case "textDocument/documentSymbol";
+        out.write_byte(#char "[");
+        count: ssize = 0;
+        ide_write_symbols(&out, workspace, file, "", server.hierarchical_symbols, &count);
+        out.write_byte(#char "]");
+        case "textDocument/foldingRange";
+        server_write_folding(&out, &workspace.files[file], server.folding_line_only);
+        case "textDocument/semanticTokens/full";
+        write_resolved_semantic_tokens(&out, workspace, file);
+        case "textDocument/documentLink";
+        ide_write_links(&out, workspace, file);
+        case "textDocument/diagnostic";
+        out.write_string("{\"kind\":\"full\",\"items\":");
+        server_write_diagnostics(&out, workspace, file);
+        out.write_byte(#char "}");
+        case "textDocument/formatting";
+        options := json_field(params, "options");
+        layout_write_edits(
+            &out,
+            source,
+            json_integer(json_field(options, "tabSize"), 4),
+            json_boolean(json_field(options, "insertSpaces"), true)
+        );
+        case "textDocument/inlayHint";
+        range := json_field(params, "range");
+        start := json_offset(source, json_field(range, "start"));
+        end := json_offset(source, json_field(range, "end"));
+        if start < 0 || end < start {
+            _ := rpc_error(output, id, -32602, "Invalid inlay hint range.");
+            return;
+        }
+        ide_write_inlay_hints(&out, workspace, file, start, end);
+        case "textDocument/selectionRange";
+        if #pattern .None = json_array(json_field(params, "positions")) {
+            _ := rpc_error(output, id, -32602, "Selection positions must be an array.");
+            return;
+        }
+        out.write_byte(#char "[");
+        if #pattern.Some(positions) = json_array(json_field(params, "positions")) {
+            for i: 0..positions.*.count {
+                offset := json_offset(source, .Some(&positions.*[i]));
+                if offset < 0 {
+                    _ := rpc_error(output, id, -32602, "Invalid selection position.");
+                    return;
+                }
+                if i > 0 out.write_byte(#char ",");
+                ide_write_selection(&out, workspace, file, offset);
+            }
+        }
+        out.write_byte(#char "]");
+        case "textDocument/codeAction";
+        range := json_field(params, "range");
+        start := json_offset(source, json_field(range, "start"));
+        end := json_offset(source, json_field(range, "end"));
+        if start < 0 || end < start {
+            _ := rpc_error(output, id, -32602, "Invalid code action range.");
+            return;
+        }
+        ide_write_code_actions(&out, workspace, file, range);
+        else;
+        offset := json_offset(source, json_field(params, "position"));
+        if offset < 0 {
+            _ := rpc_error(output, id, -32602, "Invalid UTF-16 document position.");
+            return;
+        }
+        symbol := analysis_symbol_at(workspace, file, offset);
+        if method == {
+            case "textDocument/completion";
+            ide_write_completion(&out, workspace, file, offset);
+            case "textDocument/hover";
+            ide_write_hover(&out, workspace, file, offset);
+            case "textDocument/definition", "textDocument/declaration";
+            if symbol.file >= 0 && symbol.symbol >= 0 ide_write_location(&out, workspace, symbol);
+            else out.write_string("null");
+            case "textDocument/typeDefinition";
+            ty := analysis_type(workspace, symbol);
+            while ty > 0 && ty < workspace.types.count &&
+                  (workspace.types[ty].kind == .Pointer ||
+                   workspace.types[ty].kind == .Array_Type)
+                ty = workspace.types[ty].element;
+            if ty > 0 && ty < workspace.types.count &&
+               workspace.types[ty].symbol.symbol >= 0
+                ide_write_location(&out, workspace, workspace.types[ty].symbol);
+            else out.write_string("null");
+            case "textDocument/references", "textDocument/documentHighlight";
+            local_file: ssize = -1;
+            highlight := method == "textDocument/documentHighlight";
+            if highlight local_file = file;
+            include_declaration := highlight ||
+                json_boolean(json_field(json_field(params, "context"), "includeDeclaration"));
+            ide_write_references(
+                &out,
+                workspace,
+                symbol,
+                include_declaration,
+                local_file,
+                highlight
+            );
+            case "textDocument/signatureHelp";
+            ide_write_signature_help(&out, workspace, file, offset);
+            case "textDocument/prepareRename";
+            token := language_token_at(&workspace.files[file].syntax.language, offset);
+            if symbol.symbol < 0 || token < 0 out.write_string("null");
+            else {
+                span := workspace.files[file].syntax.language.tokens[token];
+                out.write_string("{\"range\":");
+                write_range(&out, source, span.start, span.end);
+                out.write_string(",\"placeholder\":");
+                write_json_string(
+                    &out,
+                    workspace.files[symbol.file].syntax.symbols[symbol.symbol].name
+                );
+                out.write_byte(#char "}");
+            }
+            case "textDocument/rename";
+            {
+                name := json_text(json_field(params, "newName"));
+                if symbol.symbol < 0 || !language_identifier_valid(name) {
+                    _ := rpc_error(output, id, -32602, "A valid declared name is required.");
+                    return;
+                }
+                if ide_rename_conflicts(workspace, symbol, name) {
+                    _ := rpc_error(output, id, -32602, "New name conflicts with a declaration.");
+                    return;
+                }
+                ide_write_rename(&out, workspace, symbol, name);
+            }
+            else;
+            _ := rpc_error(output, id, -32601, "Method not found.");
+            return;
+        }
+    }
+    _ := rpc_response(output, id, out.to_string());
+}
+
+// 0: continue; 1: successful exit; 2: unsuccessful exit.
+server_process :: (server: *Server, output: *File, message: *Json) -> s32 {
+    root: ?*Json = .Some(message);
+    id := json_field(root, "id");
+    method_value := json_field(root, "method");
+    // Responses to server requests, such as file watcher registration, carry
+    // an id and a result/error instead of a method.
+    if #pattern.Some(response_id) = id {
+        if !json_is_text(method_value) {
+            if #pattern.Some(result) = json_field(root, "result") return 0;
+            if #pattern.Some(error) = json_field(root, "error") return 0;
+        }
+    }
+    if !json_is_object(root) || json_text(json_field(root, "jsonrpc")) != "2.0" ||
+        !json_is_text(method_value) {
+        _ := rpc_error(output, .None, -32600, "Invalid JSON-RPC request.");
+        return 0;
+    }
+    request := false;
+    if #pattern.Some(pointer) = id {
+        request = true;
+        valid_id := json_is_text(id) || json_is_integer(id);
+        if #partial pointer.* == {
+            case .unit;
+            valid_id = true;
+        }
+        if !valid_id {
+            _ := rpc_error(output, .None, -32600, "Invalid request id.");
+            return 0;
+        }
+    }
+    method := json_text(method_value);
+    if method == "exit" && !request {
+        if server.shutdown return 1;
+        return 2;
+    }
+    if !server.initialized && method != "initialize" {
+        if request _ := rpc_error(output, id, -32002, "Server has not been initialized.");
+        return 0;
+    }
+    if server.shutdown {
+        if request _ := rpc_error(output, id, -32600, "Server is shutting down.");
+        return 0;
+    }
+    params := json_field(root, "params");
+    if method == "initialize" {
+        if !request return 0;
+        if server.initialized {
+            _ := rpc_error(output, id, -32600, "Server is already initialized.");
+            return 0;
+        }
+        if !json_is_object(params) {
+            _ := rpc_error(output, id, -32602, "Initialize params must be an object.");
+            return 0;
+        }
+        server_initialize_workspace(server, params);
+        server.initialized = true;
+        text := json_field(json_field(params, "capabilities"), "textDocument");
+        workspace_capabilities := json_field(json_field(params, "capabilities"), "workspace");
+        server.register_watchers =
+            json_boolean(
+                json_field(
+                    json_field(workspace_capabilities, "didChangeWatchedFiles"),
+                    "dynamicRegistration"
+                )
+            );
+        server.hierarchical_symbols =
+            json_boolean(
+                json_field(json_field(text, "documentSymbol"), "hierarchicalDocumentSymbolSupport")
+            );
+        server.folding_line_only =
+            json_boolean(json_field(json_field(text, "foldingRange"), "lineFoldingOnly"));
+        _ := rpc_response(output, id, INITIALIZE_RESULT);
+        return 0;
+    }
+    if method == "shutdown" && request {
+        server.shutdown = true;
+        _ := rpc_response(output, id, "null");
+        return 0;
+    }
+    if !request {
+        server_notification(server, output, method, params);
+        return 0;
+    }
+    if !server_method_known(method) {
+        _ := rpc_error(output, id, -32601, "Method not found.");
+        return 0;
+    }
+    if !json_is_object(params) {
+        _ := rpc_error(output, id, -32602, "Params must be an object.");
+        return 0;
+    }
+    if method == "workspace/symbol" {
+        if !json_is_text(json_field(params, "query")) {
+            _ := rpc_error(output, id, -32602, "A symbol query is required.");
+            return 0;
+        }
+        analyze_workspace(&server.workspace);
+        out: String_Builder;
+        out.write_byte(#char "[");
+        count: ssize = 0;
+        for file: 0..server.workspace.files.count {
+            if !server_workspace_symbol_file(&server.workspace, file) continue;
+            ide_write_symbols(
+                &out,
+                &server.workspace,
+                file,
+                json_text(json_field(params, "query")),
+                false,
+                &count
+            );
+        }
+        out.write_byte(#char "]");
+        _ := rpc_response(output, id, out.to_string());
+        return 0;
+    }
+    item := json_field(params, "textDocument");
+    file := workspace_find(&server.workspace, json_text(json_field(item, "uri")));
+    if file < 0 || !server.workspace.files[file].active {
+        _ := rpc_error(output, id, -32602, "Document is unavailable.");
+        return 0;
+    }
+    server_document_request(server, output, id, params, method, file);
+    return 0;
+}
+
+#public run_language_server :: () -> s32 {
+    arguments := get_cmdline_args();
+    for i: 1..arguments.count {
+        if arguments[i] == {
+            case "--help", "-h";
+            print("glolsp 0.2.0 - Glosso language server\nusage: glolsp [--stdio]\n");
+            return 0;
+            case "--version";
+            print("glolsp 0.2.0\n");
+            return 0;
+            case "--stdio";
+            continue;
+            else;
+            error_output := File.stderr();
+            #on_drop_error(error_output, error) {}
+            _ := error_output.write("glolsp: unsupported argument (use --help)\n");
+            return 1;
+        }
+    }
+    input := File.stdin();
+    #on_drop_error(input, error) {}
+    output := File.stdout();
+    #on_drop_error(output, error) {}
+    server: Server;
+    workspace_init(&server.workspace);
+    while true {
+        // Request-local path conversion and formatting use temporary storage.
+        // Persistent workspace data owns heap buffers or views of owned source.
+        reset_temporary_storage();
+        frame := rpc_read_frame(&input);
+        defer frame.body.free();
+        if frame.status <= 0 {
+            if frame.status == 0 && server.shutdown return 0;
+            return 1;
+        }
+        if !frame.body.bytes().utf8_is_valid() {
+            _ := rpc_error(&output, .None, -32700, "Message is not valid UTF-8.");
+            continue;
+        }
+        if Serialization_Document.json_document_from_string(frame.body) == {
+            case .Err;
+            if !rpc_error(&output, .None, -32700, "Invalid JSON.") return 1;
+            case .Ok(message);
+            status := server_process(&server, &output, &message.root);
+            if status == 1 return 0;
+            if status == 2 return 1;
+        }
+    }
+}

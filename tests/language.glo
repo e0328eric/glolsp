@@ -1,0 +1,110 @@
+// Run with: glosso tests/language.glo --run
+#load "../src/language.glo";
+#import "Io";
+#import "Strings/Utf8";
+
+find_text :: (text: string, needle: string, from: ssize = 0) -> ssize {
+    at := from;
+    while at + needle.count <= text.count {
+        if text.substring(at, at + needle.count) == needle return at;
+        at += 1;
+    }
+    return -1;
+}
+
+symbol_named :: (analysis: *const Language_Analysis, name: string) -> ssize {
+    for i: 0..analysis.symbols.count if analysis.symbols[i].name == name return i;
+    return -1;
+}
+
+main :: () {
+    source := #string
+        \\// File introduction.
+        \\#public {
+        \\/// Describes the answer.
+        \\answer :: (value: ssize) -> ssize {
+        \\    before := value;
+        \\    { value := 2; before = value; }
+        \\    before = value;
+        \\    return before;
+        \\}
+        \\}
+        \\Color :: enum { Red; Green :: 5; Blue; }
+        \\Point :: struct { x: ssize; y: ssize; }
+        \\main :: () {
+        \\    answer(1);
+        \\    later;
+        \\    later := 3;
+        \\    value := 4;
+        \\    object.value;
+        \\    한글 := 5;
+        \\    한글;
+        \\}
+        \\/* nested /* comment */ works */
+    ;
+    analysis := analyze_language(source);
+    #assert analysis.diagnostics.count == 0;
+    answer := symbol_named(&analysis, "answer");
+    parameter := symbol_named(&analysis, "value");
+    #assert answer >= 0 && parameter >= 0;
+    #assert analysis.symbols[answer].documentation == "/// Describes the answer.";
+    #assert language_symbol_at(&analysis, source, find_text(source, "answer(1)")) == answer;
+    inner_reference := find_text(source, "before = value;") + 9;
+    outer_reference := find_text(source, "before = value;", inner_reference + 1) + 9;
+    #assert language_symbol_at(&analysis, source, inner_reference) != parameter;
+    #assert language_symbol_at(&analysis, source, outer_reference) == parameter;
+    #assert language_symbol_at(&analysis, source, find_text(source, "later;")) == -1;
+    #assert language_symbol_at(&analysis, source, find_text(source, "object.value") + 7) == -1;
+    #assert analysis.symbols[symbol_named(&analysis, "Red")].kind == 22;
+    #assert analysis.symbols[symbol_named(&analysis, "Green")].kind == 22;
+    #assert analysis.symbols[symbol_named(&analysis, "x")].kind == 8;
+    korean := symbol_named(&analysis, "한글");
+    #assert language_symbol_at(&analysis, source, find_text(source, "한글;")) == korean;
+    #assert language_identifier_valid("한글2");
+    #assert !language_identifier_valid("2name");
+    #assert !language_identifier_valid("if");
+    #assert !language_identifier_valid("a b");
+    destroy_language(&analysis);
+
+    methods_source := #string
+        \\Thing :: struct { field: ssize; }
+        \\Thing ::: #public {
+        \\    /// A method with a borrowed argument.
+        \\    read :: (argument: ssize) -> ssize { return argument; }
+        \\}
+        \\/// A public helper.
+        \\#public helper :: (flag: bool, count: ssize) -> ssize { return count; }
+        \\invoke :: (callback: (described: ssize) -> ssize) -> ssize { return callback(1); }
+        \\main :: () {
+        \\    helper(.flag = true, .count = 3);
+        \\    for index: 0..3 { helper(true, index); }
+        \\    index;
+        \\}
+    ;
+    methods := analyze_language(methods_source);
+    #assert methods.diagnostics.count == 0;
+    read := symbol_named(&methods, "read");
+    argument := symbol_named(&methods, "argument");
+    helper := symbol_named(&methods, "helper");
+    count := symbol_named(&methods, "count");
+    #assert read >= 0 && argument >= 0 && helper >= 0 && count >= 0;
+    #assert methods.symbols[argument].scope_start == methods.symbols[read].start;
+    #assert methods.symbols[count].scope_start == methods.symbols[helper].start;
+    #assert methods.symbols[helper].documentation == "/// A public helper.";
+    argument_reference := find_text(methods_source, "return argument") + 7;
+    helper_reference := find_text(methods_source, "helper(.flag");
+    #assert language_symbol_at(&methods, methods_source, argument_reference) == argument;
+    #assert language_symbol_at(&methods, methods_source, helper_reference) == helper;
+    #assert language_symbol_at(&methods, methods_source, find_text(methods_source, "index;")) == -1;
+    #assert symbol_named(&methods, "described") == -1;
+    #assert methods.symbols.count == 11;
+    destroy_language(&methods);
+
+    strings := analyze_language("text :: \"{ not syntax }\";\nraw :: \\\\ )] {\n");
+    #assert strings.diagnostics.count == 0;
+    destroy_language(&strings);
+    invalid := analyze_language("main :: () { /* never closes");
+    #assert invalid.diagnostics.count == 2;
+    destroy_language(&invalid);
+    print("language analysis passed\n");
+}

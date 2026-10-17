@@ -1,0 +1,694 @@
+//! Editor features operate on resolved declarations and workspace snapshots.
+#load "model.glo";
+#load "workspace.glo";
+#load "analysis.glo";
+#load "protocol.glo";
+#load "positions.glo";
+#import "String_Builder";
+#import "Strings";
+#import "Format";
+#import "File_System/Path";
+
+ide_valid_symbol :: (workspace: *Workspace, id: Symbol_Id) -> bool {
+    return id.file >= 0 && id.file < workspace.files.count && id.symbol >= 0 && id.symbol <
+        workspace.files[id.file].syntax.symbols.count;
+}
+
+ide_symbol_source :: (workspace: *Workspace, id: Symbol_Id) -> string {
+    if !ide_valid_symbol(workspace, id) return "";
+    return workspace.files[id.file].source;
+}
+
+#public ide_write_location :: (out: *String_Builder, workspace: *Workspace, id: Symbol_Id) {
+    symbol := workspace.files[id.file].syntax.symbols[id.symbol];
+    ide_write_occurrence(out, workspace, id.file, symbol.selection_start, symbol.selection_end);
+}
+
+ide_write_occurrence :: (
+    out: *String_Builder,
+    workspace: *Workspace,
+    file: ssize,
+    start: ssize,
+    end: ssize,
+) {
+    out.write_string("{\"uri\":");
+    write_json_string(out, workspace.files[file].uri);
+    out.write_string(",\"range\":");
+    write_range(out, workspace.files[file].source, start, end);
+    out.write_byte(#char "}");
+}
+
+#public ide_write_hover :: (
+    out: *String_Builder,
+    workspace: *Workspace,
+    file: ssize,
+    offset: ssize,
+) {
+    id := analysis_symbol_at(workspace, file, offset);
+    if !ide_valid_symbol(workspace, id) {
+        out.write_string("null");
+        return;
+    }
+    symbol := workspace.files[id.file].syntax.symbols[id.symbol];
+    signature: String_Builder;
+    if symbol.type_node < 0 && symbol.kind == 13 {
+        signature.write_string(symbol.name);
+        signature.write_string(": ");
+        analysis_write_type(&signature, workspace, analysis_type(workspace, id));
+    } else signature.write_string(symbol.detail);
+    out.write_string("{\"contents\":[{\"language\":\"glosso\",\"value\":");
+    write_json_string(out, signature.to_string());
+    out.write_byte(#char "}");
+    if symbol.documentation.count > 0 {
+        out.write_string(",{\"language\":\"text\",\"value\":");
+        write_json_string(out, symbol.documentation);
+        out.write_byte(#char "}");
+    }
+    out.write_string("],\"range\":");
+    syntax := &workspace.files[file].syntax;
+    token_index := language_token_at(&syntax.language, offset);
+    if token_index >= 0 {
+        token := syntax.language.tokens[token_index];
+        write_range(out, workspace.files[file].source, token.start, token.end);
+    } else write_range(out, workspace.files[file].source, offset, offset);
+    out.write_byte(#char "}");
+}
+
+#public ide_write_references :: (
+    out: *String_Builder,
+    workspace: *Workspace,
+    id: Symbol_Id,
+    include_declaration: bool,
+    local_file: ssize = -1,
+    highlight: bool = false,
+) {
+    out.write_byte(#char "[");
+    count: ssize = 0;
+    if ide_valid_symbol(workspace, id) {
+        declaration := workspace.files[id.file].syntax.symbols[id.symbol];
+        for file: 0..workspace.files.count {
+            if !workspace.files[file].active || !workspace.files[file].relevant ||
+                (local_file >= 0 && file != local_file) continue;
+            for token: 0..workspace.files[file].semantic.bindings.count {
+                bound := workspace.files[file].semantic.bindings[token];
+                if !analysis_same_symbol(bound, id) continue;
+                span := workspace.files[file].syntax.language.tokens[token];
+                is_declaration := file == id.file && span.start == declaration.selection_start;
+                if !include_declaration && is_declaration continue;
+                if count > 0 out.write_byte(#char ",");
+                count += 1;
+                if highlight {
+                    out.write_string("{\"kind\":1,\"range\":");
+                    write_range(out, workspace.files[file].source, span.start, span.end);
+                    out.write_byte(#char "}");
+                } else ide_write_occurrence(out, workspace, file, span.start, span.end);
+            }
+        }
+    }
+    out.write_byte(#char "]");
+}
+
+#public ide_rename_conflicts :: (workspace: *Workspace, id: Symbol_Id, name: string) -> bool {
+    if !ide_valid_symbol(workspace, id) return true;
+    original := workspace.files[id.file].syntax.symbols[id.symbol];
+    if name == original.name return false;
+    for other: workspace.files[id.file].syntax.symbols {
+        if other.name == name && other.scope == original.scope return true;
+    }
+    for file: 0..workspace.files.count {
+        if !workspace.files[file].relevant continue;
+        for token: 0..workspace.files[file].semantic.bindings.count {
+            if !analysis_same_symbol(workspace.files[file].semantic.bindings[token], id) continue;
+            offset := workspace.files[file].syntax.language.tokens[token].start;
+            visible := analysis_visible_symbols(workspace, file, offset);
+            for candidate: visible {
+                if analysis_same_symbol(candidate, id) continue;
+                if workspace.files[candidate.file].syntax.symbols[candidate.symbol].name == name
+                    return true;
+            }
+        }
+    }
+    return false;
+}
+
+#public ide_write_rename :: (
+    out: *String_Builder,
+    workspace: *Workspace,
+    id: Symbol_Id,
+    name: string,
+) {
+    out.write_string("{\"changes\":{");
+    documents: ssize = 0;
+    for file: 0..workspace.files.count {
+        if !workspace.files[file].relevant continue;
+        count: ssize = 0;
+        for token: 0..workspace.files[file].semantic.bindings.count {
+            if !analysis_same_symbol(workspace.files[file].semantic.bindings[token], id) continue;
+            if count == 0 {
+                if documents > 0 out.write_byte(#char ",");
+                documents += 1;
+                write_json_string(out, workspace.files[file].uri);
+                out.write_string(":[");
+            } else out.write_byte(#char ",");
+            count += 1;
+            span := workspace.files[file].syntax.language.tokens[token];
+            out.write_string("{\"range\":");
+            write_range(out, workspace.files[file].source, span.start, span.end);
+            out.write_string(",\"newText\":");
+            write_json_string(out, name);
+            out.write_byte(#char "}");
+        }
+        if count > 0 out.write_byte(#char "]");
+    }
+    out.write_string("}}");
+}
+
+#public ide_write_symbols :: (
+    out: *String_Builder,
+    workspace: *Workspace,
+    file: ssize,
+    query: string,
+    hierarchical: bool,
+    count: *ssize,
+) {
+    for symbol: workspace.files[file].syntax.symbols {
+        if symbol.name == "_" continue;
+        if query.count > 0 && !symbol.name.contains(query) continue;
+        if count.* >= 500 return;
+        if count.* > 0 out.write_byte(#char ",");
+        count.* += 1;
+        out.write_string("{\"name\":");
+        write_json_string(out, symbol.name);
+        out.write_string(",\"kind\":");
+        write_json_integer(out, cast(ssize)symbol.kind);
+        if hierarchical {
+            out.write_string(",\"detail\":");
+            write_json_string(out, symbol.detail);
+            out.write_string(",\"range\":");
+            write_range(out, workspace.files[file].source, symbol.start, symbol.end);
+            out.write_string(",\"selectionRange\":");
+            write_range(
+                out,
+                workspace.files[file].source,
+                symbol.selection_start,
+                symbol.selection_end
+            );
+        } else {
+            out.write_string(",\"location\":");
+            ide_write_occurrence(
+                out,
+                workspace,
+                file,
+                symbol.selection_start,
+                symbol.selection_end
+            );
+        }
+        out.write_byte(#char "}");
+    }
+}
+
+ide_completion_kind :: (kind: s32) -> ssize {
+    if kind == {
+        case 2;
+        return 9;
+        case 12;
+        return 3;
+        case 23;
+        return 22;
+        case 10;
+        return 13;
+        case 14;
+        return 21;
+        case 8;
+        return 5;
+        case 22;
+        return 20;
+        else;
+        return 6;
+    }
+}
+
+ide_completion_item :: (
+    out: *String_Builder,
+    source: string,
+    start: ssize,
+    end: ssize,
+    label: string,
+    detail: string,
+    kind: ssize,
+    count: *ssize,
+) {
+    if count.* > 0 out.write_byte(#char ",");
+    count.* += 1;
+    out.write_string("{\"label\":");
+    write_json_string(out, label);
+    out.write_string(",\"detail\":");
+    write_json_string(out, detail);
+    out.write_string(",\"kind\":");
+    write_json_integer(out, kind);
+    out.write_string(",\"textEdit\":{\"range\":");
+    write_range(out, source, start, end);
+    out.write_string(",\"newText\":");
+    write_json_string(out, label);
+    out.write_string("}}");
+}
+
+#public ide_write_completion :: (
+    out: *String_Builder,
+    workspace: *Workspace,
+    file: ssize,
+    offset: ssize,
+) {
+    syntax := &workspace.files[file].syntax;
+    source := workspace.files[file].source;
+    start := offset;
+    end := offset;
+    index := language_token_at(&syntax.language, offset);
+    if index < 0 && offset > 0 {
+        previous := language_token_at(&syntax.language, offset - 1);
+        if previous >= 0 {
+            token := syntax.language.tokens[previous];
+            text := source[token.start..token.end];
+            if token.kind == {
+                case 1, 5, 7;
+                index = previous;
+                case 4;
+                if text.starts_with("//") || !text.ends_with("*/") index = previous;
+                case 3;
+                {
+                    if text.starts_with("\\\\") index = previous;
+                } else;
+            }
+            if token.kind == 3 || token.kind == 4 {
+                for diagnostic: syntax.language.diagnostics {
+                    if diagnostic.start == token.start index = previous;
+                }
+            }
+        }
+    }
+    out.write_string("{\"isIncomplete\":false,\"items\":[");
+    if index >= 0 {
+        token := syntax.language.tokens[index];
+        if token.kind == 3 || token.kind == 4 {
+            out.write_string("]}");
+            return;
+        }
+        if token.kind == 1 || token.kind == 5 || token.kind == 7 {
+            start = token.start;
+            end = token.end;
+        }
+    }
+    prefix := source[start..offset];
+    dot := start - 1;
+    while dot >= 0 && (source[dot] == #char " " || source[dot] == #char "\t") dot -= 1;
+    member := dot >= 0 && source[dot] == #char ".";
+    candidates: [..]Symbol_Id;
+    if member _ := candidates.replace(analysis_members_at(workspace, file, offset));
+    else _ := candidates.replace(analysis_visible_symbols(workspace, file, offset));
+    count: ssize = 0;
+    for id: candidates {
+        if !ide_valid_symbol(workspace, id) continue;
+        symbol := workspace.files[id.file].syntax.symbols[id.symbol];
+        if !symbol.name.starts_with(prefix) continue;
+        detail: String_Builder;
+        detail.write_string(symbol.name);
+        detail.write_string(": ");
+        analysis_write_type(&detail, workspace, analysis_type(workspace, id));
+        ide_completion_item(
+            out,
+            source,
+            start,
+            end,
+            symbol.name,
+            detail.to_string(),
+            ide_completion_kind(symbol.kind),
+            &count
+        );
+    }
+    if !member {
+        words :: .[
+            "if",
+            "ifx",
+            "else",
+            "while",
+            "for",
+            "return",
+            "break",
+            "continue",
+            "struct",
+            "union",
+            "enum",
+            "case",
+            "using",
+            "defer",
+            "context",
+            "cast",
+            "acast",
+            "where",
+            "noalias",
+            "typeclass",
+            "instance",
+            "distinct",
+            "opaque",
+        ];
+        for word: words {
+            if word.starts_with(prefix) ide_completion_item(
+                out,
+                source,
+                start,
+                end,
+                word,
+                language_keyword_detail(word),
+                14,
+                &count
+            );
+        }
+        for word: language_builtin_types {
+            if word.starts_with(prefix)
+                ide_completion_item(out, source, start, end, word, "Glosso built-in", 14, &count);
+        }
+        for word: .["true", "false"] {
+            if word.starts_with(prefix)
+                ide_completion_item(out, source, start, end, word, "Glosso built-in", 14, &count);
+        }
+        directives :: .[
+            "#import",
+            "#load",
+            "#export",
+            "#public",
+            "#private",
+            "#memory",
+            "#comptime",
+            "#if",
+            "#assert",
+            "#pattern",
+            "#insert",
+            "#string",
+            "#char",
+            "#self",
+            "#Self_Type",
+            "#on_drop_error",
+            "#enable",
+            "#c_call",
+            "#library",
+        ];
+        for word: directives {
+            if word.starts_with(prefix) ide_completion_item(
+                out,
+                source,
+                start,
+                end,
+                word,
+                "Glosso compiler directive",
+                14,
+                &count
+            );
+        }
+    }
+    out.write_string("]}");
+}
+
+#public ide_write_inlay_hints :: (
+    out: *String_Builder,
+    workspace: *Workspace,
+    file: ssize,
+    start: ssize,
+    end: ssize,
+) {
+    out.write_byte(#char "[");
+    count: ssize = 0;
+    for i: 0..workspace.files[file].syntax.symbols.count {
+        symbol := workspace.files[file].syntax.symbols[i];
+        if symbol.name == "_" continue;
+        if symbol.kind != 13 || symbol.type_node >= 0 || symbol.value_node < 0 ||
+            symbol.selection_end < start || symbol.selection_end > end continue;
+        ty := analysis_type(workspace, .{ .file = file, .symbol = i });
+        if ty <= 0 continue;
+        label: String_Builder;
+        label.write_string(": ");
+        analysis_write_type(&label, workspace, ty);
+        if count > 0 out.write_byte(#char ",");
+        count += 1;
+        out.write_string("{\"position\":");
+        write_position(out, position_at(workspace.files[file].source, symbol.selection_end));
+        out.write_string(",\"kind\":1,\"label\":");
+        write_json_string(out, label.to_string());
+        out.write_byte(#char "}");
+    }
+    out.write_byte(#char "]");
+}
+
+#public ide_write_links :: (out: *String_Builder, workspace: *Workspace, file: ssize) {
+    out.write_byte(#char "[");
+    count: ssize = 0;
+    for edge: workspace.files[file].imports {
+        if edge.target < 0 continue;
+        item := workspace.files[file].syntax.imports[edge.declaration];
+        if count > 0 out.write_byte(#char ",");
+        count += 1;
+        out.write_string("{\"range\":");
+        write_range(out, workspace.files[file].source, item.start, item.end);
+        out.write_string(",\"target\":");
+        write_json_string(out, workspace.files[edge.target].uri);
+        out.write_byte(#char "}");
+    }
+    out.write_byte(#char "]");
+}
+
+#public ide_write_selection :: (
+    out: *String_Builder,
+    workspace: *Workspace,
+    file: ssize,
+    offset: ssize,
+) {
+    syntax := &workspace.files[file].syntax;
+    source := workspace.files[file].source;
+    best: ssize = -1;
+    size := source.count + 1;
+    for i: 0..syntax.nodes.count {
+        node := syntax.nodes[i];
+        if node.start <= offset && offset <= node.end && node.end - node.start < size {
+            best = i;
+            size = node.end - node.start;
+        }
+    }
+    depth: ssize = 0;
+    previous_start: ssize = -1;
+    previous_end: ssize = -1;
+    token_index := language_token_at(&syntax.language, offset);
+    if token_index >= 0 {
+        token := syntax.language.tokens[token_index];
+        out.write_string("{\"range\":");
+        write_range(out, source, token.start, token.end);
+        previous_start = token.start;
+        previous_end = token.end;
+        depth = 1;
+    }
+    while best >= 0 && depth < 64 {
+        node := syntax.nodes[best];
+        if (node.start != previous_start || node.end != previous_end) &&
+           (previous_start < 0 || (node.start <= previous_start && node.end >= previous_end)) {
+            if depth > 0 out.write_string(",\"parent\":");
+            out.write_string("{\"range\":");
+            write_range(out, source, node.start, node.end);
+            previous_start = node.start;
+            previous_end = node.end;
+            depth += 1;
+        }
+        parent := node.parent;
+        if parent == best break;
+        best = parent;
+    }
+    if depth == 0 {
+        out.write_string("{\"range\":");
+        write_range(out, source, offset, offset);
+        depth = 1;
+    }
+    for 0..depth out.write_byte(#char "}");
+}
+
+#public ide_write_signature_help :: (
+    out: *String_Builder,
+    workspace: *Workspace,
+    file: ssize,
+    offset: ssize,
+) {
+    syntax := &workspace.files[file].syntax;
+    call: ssize = -1;
+    for i: 0..syntax.nodes.count {
+        node := syntax.nodes[i];
+        if node.kind != .Call || node.start > offset || node.end < offset continue;
+        if call < 0 || node.start >= syntax.nodes[call].start call = i;
+    }
+    if call < 0 {
+        out.write_string("null");
+        return;
+    }
+    callee := syntax.nodes[call].left;
+    if callee < 0 {
+        out.write_string("null");
+        return;
+    }
+    at := syntax.nodes[callee].end - 1;
+    id := analysis_symbol_at(workspace, file, at);
+    if !ide_valid_symbol(workspace, id) {
+        out.write_string("null");
+        return;
+    }
+    symbol := workspace.files[id.file].syntax.symbols[id.symbol];
+    if symbol.kind != 12 {
+        out.write_string("null");
+        return;
+    }
+    declaration := &workspace.files[id.file].syntax;
+    procedure := symbol.value_node;
+    if procedure < 0 || declaration.nodes[procedure].kind != .Procedure procedure = symbol.node;
+    active: ssize = 0;
+    token := language_token_at(&syntax.language, syntax.nodes[callee].end);
+    if token < 0 {
+        token = 0;
+        while token < syntax.language.tokens.count && syntax.language.tokens[token].start <
+            syntax.nodes[callee].end token += 1;
+    }
+    if token < syntax.language.tokens.count token += 1;
+    while token < syntax.language.tokens.count && syntax.language.tokens[token].start < offset {
+        item := syntax.language.tokens[token];
+        text := workspace.files[file].source[item.start..item.end];
+        if text == "," active += 1;
+        if item.matching > token token = item.matching;
+        token += 1;
+    }
+    active += analysis_call_receiver_offset(workspace, file, callee, analysis_type(workspace, id));
+    out.write_string("{\"activeSignature\":0,\"activeParameter\":");
+    count: ssize = 0;
+    if procedure >= 0 {
+        parameter := declaration.nodes[procedure].first_child;
+        while parameter >= 0 {
+            if declaration.nodes[parameter].kind == .Parameter count += 1;
+            parameter = declaration.nodes[parameter].next_sibling;
+        }
+    }
+    if count > 0 && active >= count active = count - 1;
+    write_json_integer(out, active);
+    out.write_string(",\"signatures\":[{\"label\":");
+    write_json_string(out, symbol.detail);
+    out.write_string(",\"parameters\":[");
+    count = 0;
+    if procedure >= 0 {
+        parameter := declaration.nodes[procedure].first_child;
+        while parameter >= 0 {
+            item := declaration.nodes[parameter];
+            if item.kind == .Parameter && item.symbol >= 0 {
+                if count > 0 out.write_byte(#char ",");
+                count += 1;
+                out.write_string("{\"label\":");
+                write_json_string(out, declaration.symbols[item.symbol].detail);
+                out.write_byte(#char "}");
+            }
+            parameter = item.next_sibling;
+        }
+    }
+    out.write_string("]}]}");
+}
+
+ide_spelling_distance :: (left: string, right: string) -> ssize {
+    if left.count - right.count > 2 || right.count - left.count > 2 return 3;
+    previous: [..]ssize;
+    current: [..]ssize;
+    for i: 0..right.count + 1 {
+        previous.push(i);
+        current.push(0);
+    }
+    for row: 1..left.count + 1 {
+        current[0] = row;
+        for column: 1..right.count + 1 {
+            substitution := previous[column - 1];
+            if left[row - 1] != right[column - 1]substitution += 1;
+            value := previous[column] + 1;
+            if current[column - 1] + 1 < value value = current[column - 1] + 1;
+            if substitution < value value = substitution;
+            current[column] = value;
+        }
+        for column: 0..right.count + 1 previous[column] = current[column];
+    }
+    return previous[right.count];
+}
+
+#public ide_write_code_actions :: (
+    out: *String_Builder,
+    workspace: *Workspace,
+    file: ssize,
+    range: ?*Json,
+) {
+    source := workspace.files[file].source;
+    start := json_offset(source, json_field(range, "start"));
+    end := json_offset(source, json_field(range, "end"));
+    count: ssize = 0;
+    out.write_byte(#char "[");
+    for diagnostic: workspace.files[file].semantic.diagnostics {
+        if diagnostic.start > end || diagnostic.end < start continue;
+        if !diagnostic.message.starts_with("Unresolved") &&
+            !diagnostic.message.starts_with("Unknown") continue;
+        token := language_token_at(&workspace.files[file].syntax.language, diagnostic.start);
+        if token < 0 continue;
+        span := workspace.files[file].syntax.language.tokens[token];
+        misspelled := source[span.start..span.end];
+        visible: [..]Symbol_Id;
+        if span.start > 0 && source[span.start - 1] == #char "."
+            _ := visible.replace(analysis_members_at(workspace, file, span.start));
+        else _ := visible.replace(analysis_visible_symbols(workspace, file, span.start));
+        for candidate: visible {
+            symbol := workspace.files[candidate.file].syntax.symbols[candidate.symbol];
+            if symbol.name == misspelled || ide_spelling_distance(
+                misspelled,
+                symbol.name
+            ) > 2 continue;
+            if count > 0 out.write_byte(#char ",");
+            count += 1;
+            title := tprint("Change '%' to '%'", misspelled, symbol.name);
+            out.write_string("{\"kind\":\"quickfix\",\"title\":");
+            write_json_string(out, title);
+            out.write_string(",\"edit\":{\"changes\":{");
+            write_json_string(out, workspace.files[file].uri);
+            out.write_string(":[{\"range\":");
+            write_range(out, source, span.start, span.end);
+            out.write_string(",\"newText\":");
+            write_json_string(out, symbol.name);
+            out.write_string("}]}}}");
+            if count >= 10 break;
+        }
+        for target: 0..workspace.files.count {
+            if target == file || !workspace.files[target].relevant continue;
+            imported := false;
+            for edge: workspace.files[file].imports {
+                if edge.target == target imported = true;
+            }
+            if imported continue;
+            for symbol: workspace.files[target].syntax.symbols {
+                if symbol.scope != 0 || !symbol.is_public || symbol.name != misspelled continue;
+                base := path_dirname(workspace.files[file].path);
+                if path_lexically_relative(workspace.files[target].path, base) == {
+                    case .Err;
+                    case .Ok(path);
+                        defer path.free();
+                        insertion: String_Builder;
+                        insertion.write_string("#load ");
+                        write_json_string(&insertion, path);
+                        insertion.write_string(";\n");
+                        if count > 0 out.write_byte(#char ",");
+                        count += 1;
+                        out.write_string("{\"kind\":\"quickfix\",\"title\":");
+                        write_json_string(out, tprint("Import '%' from '%'", misspelled, path));
+                        out.write_string(",\"edit\":{\"changes\":{");
+                        write_json_string(out, workspace.files[file].uri);
+                        out.write_string(":[{\"range\":");
+                        write_range(out, source, 0, 0);
+                        out.write_string(",\"newText\":");
+                        write_json_string(out, insertion.to_string());
+                        out.write_string("}]}}}");
+                }
+            }
+        }
+    }
+    out.write_byte(#char "]");
+}

@@ -1,0 +1,101 @@
+//! Low-level framing, JSON quoting, and UTF-16 position regression tests.
+//! Run with: glosso tests/protocol.glo --run
+
+#import "Io";
+#import "Serialization/Json";
+#import "Serialization/Core";
+#import "String_Builder";
+#load "../src/protocol.glo";
+#load "../src/positions.glo";
+
+assert_position :: (
+    source: string,
+    offset: ssize,
+    line: ssize,
+    character: ssize,
+) {
+    position := position_at(source, offset);
+    #assert position.line == line;
+    #assert position.character == character;
+}
+
+main :: () {
+    source := "a😀é\r\n한\nz\r";
+    assert_position(source, -1, 0, 0);
+    assert_position(source, 0, 0, 0);
+    assert_position(source, 1, 0, 1);
+    assert_position(source, 2, 0, 1);
+    assert_position(source, 4, 0, 1);
+    assert_position(source, 5, 0, 3);
+    assert_position(source, 6, 0, 3);
+    assert_position(source, 7, 0, 4);
+    assert_position(source, 8, 0, 4);
+    assert_position(source, 9, 1, 0);
+    assert_position(source, 12, 1, 1);
+    assert_position(source, 13, 2, 0);
+    assert_position(source, 14, 2, 1);
+    assert_position(source, 15, 3, 0);
+    assert_position(source, 100, 3, 0);
+    #assert offset_at(source, 0, 0) == 0;
+    #assert offset_at(source, 0, 1) == 1;
+    #assert offset_at(source, 0, 2) == -1;
+    #assert offset_at(source, 0, 3) == 5;
+    #assert offset_at(source, 0, 4) == 7;
+    #assert offset_at(source, 0, 100) == 7;
+    #assert offset_at(source, 1, 0) == 9;
+    #assert offset_at(source, 1, 1) == 12;
+    #assert offset_at(source, 1, 100) == 12;
+    #assert offset_at(source, 2, 1) == 14;
+    #assert offset_at(source, 3, 0) == 15;
+    #assert offset_at(source, 3, 100) == 15;
+    #assert offset_at(source, 4, 0) == -1;
+    #assert offset_at(source, -1, 0) == -1;
+    #assert offset_at(source, 0, -1) == -1;
+    #assert offset_at("", 0, 5) == 0;
+    assert_position("\r\nx", 1, 0, 0);
+    assert_position("\r\nx", 2, 1, 0);
+    #assert offset_at("\r\nx", 1, 0) == 2;
+
+    #assert rpc_content_length("Content-Length: 2\r\n\r\n") == 2;
+    #assert rpc_content_length("content-length:\t0 \r\n\r\n") == 0;
+    #assert rpc_content_length(
+        "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n" +
+        "Content-Length: 16777216\r\n\r\n") == MAX_MESSAGE_BYTES;
+    #assert rpc_content_length("Content-Length: 16777217\r\n\r\n") == -1;
+    #assert rpc_content_length("Content-Length: 9999999999999999999\r\n\r\n") == -1;
+    #assert rpc_content_length("Content-Length: -1\r\n\r\n") == -1;
+    #assert rpc_content_length("Content-Length: +1\r\n\r\n") == -1;
+    #assert rpc_content_length("Content-Length: 1x\r\n\r\n") == -1;
+    #assert rpc_content_length("Content-Length: \r\n\r\n") == -1;
+    #assert rpc_content_length("Content-Length: 1\r\nContent-Length: 1\r\n\r\n") == -1;
+    #assert rpc_content_length("Content-Length: 1\rX\r\n\r\n") == -1;
+    #assert rpc_content_length("Content-Length: 1\nX: y\r\n\r\n") == -1;
+    #assert rpc_content_length("Content-Length : 1\r\n\r\n") == -1;
+    #assert rpc_content_length(": 1\r\n\r\n") == -1;
+    #assert rpc_content_length("X-Test: 한글\r\nContent-Length: 1\r\n\r\n") == -1;
+    #assert rpc_content_length("Content-Length: 1\r\n") == -1;
+    #assert rpc_content_length("X-Test: value\r\n\r\n") == -1;
+    #assert rpc_content_length("\r\n\r\n") == -1;
+    #assert rpc_content_type_utf8("application/vscode-jsonrpc");
+    #assert rpc_content_type_utf8("application/json; CHARSET = \"UTF-8\"");
+    #assert rpc_content_type_utf8("application/json; charset=utf8");
+    #assert rpc_content_type_utf8("application/json; ignored=\"a;b\"; charset=utf-8");
+    #assert !rpc_content_type_utf8("application/json; charset=ascii");
+    #assert !rpc_content_type_utf8("application/json; charset=");
+    #assert !rpc_content_type_utf8("application/json; charset");
+    #assert !rpc_content_type_utf8("application/json; ignored=\"; charset=ascii");
+    #assert !rpc_content_type_utf8("");
+    #assert rpc_content_length(
+        "Content-Length: 1\r\n" +
+        "Content-Type: application/json; charset=latin1\r\n\r\n") == -1;
+
+    quoted: String_Builder;
+    write_json_string(&quoted, "\"\\\n\r\t😀한");
+    #assert quoted.to_string() == "\"\\\"\\\\\\u000a\\u000d\\u0009😀한\"";
+    if Serialization_Document.json_document_from_string(quoted.to_string()) == {
+        case .Err; exit(1);
+        case .Ok(document);
+            #assert json_text(.Some(&document.root)) == "\"\\\n\r\t😀한";
+    }
+    print("protocol tests passed\n");
+}

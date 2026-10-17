@@ -1,0 +1,137 @@
+//! Shared syntax and semantic identities. Source strings borrow their source file.
+#export "language.glo";
+#load "language.glo";
+
+#public {
+    Syntax_Kind :: enum {
+        Root;
+        Declaration;
+        Parameter;
+        Pattern_Capture;
+        Procedure;
+        Struct;
+        Union;
+        Enum;
+        Typeclass;
+        Inherent;
+        Import;
+        Block;
+        Identifier;
+        Literal;
+        Member;
+        Call;
+        Index;
+        Unary;
+        Binary;
+        Aggregate;
+        Field;
+        Return;
+        If;
+        While;
+        For;
+        Statement;
+        Error;
+        Type;
+    }
+
+    Syntax_Node :: struct {
+        kind: Syntax_Kind;
+        start: ssize;
+        end: ssize;
+        token: ssize = -1;
+        parent: ssize = -1;
+        left: ssize = -1;
+        right: ssize = -1;
+        first_child: ssize = -1;
+        last_child: ssize = -1;
+        next_sibling: ssize = -1;
+        scope: ssize = -1;
+        symbol: ssize = -1;
+        type_node: ssize = -1;
+        value_node: ssize = -1;
+        argument_index: ssize = -1;
+    }
+
+    Syntax_Symbol :: struct {
+        name: string;
+        detail: string;
+        documentation: string;
+        node: ssize = -1;
+        token: ssize = -1;
+        scope: ssize = -1;
+        body_scope: ssize = -1;
+        type_node: ssize = -1;
+        value_node: ssize = -1;
+        parent_symbol: ssize = -1;
+        kind: s32 = 13;
+        is_public: bool;
+        is_unit: bool;
+        start: ssize;
+        end: ssize;
+        selection_start: ssize;
+        selection_end: ssize;
+    }
+
+    Syntax_Scope :: struct {
+        parent: ssize = -1;
+        owner: ssize = -1;
+        start: ssize;
+        end: ssize;
+    }
+
+    Syntax_Import :: struct {
+        path: string;
+        node: ssize = -1;
+        symbol: ssize = -1;
+        load: bool;
+        exported: bool;
+        embedded: bool;
+        start: ssize;
+        end: ssize;
+    }
+
+    Parsed_File :: struct {
+        source: string;
+        language: Language_Analysis;
+        nodes: [..]Syntax_Node;
+        symbols: [..]Syntax_Symbol;
+        scopes: [..]Syntax_Scope;
+        imports: [..]Syntax_Import;
+    }
+
+    Symbol_Id :: struct { file: ssize = -1; symbol: ssize = -1; }
+
+    Type_Id :: ssize;
+
+    Type_Kind :: enum {
+        Unknown;
+        Builtin;
+        Struct;
+        Union;
+        Enum;
+        Procedure;
+        Module;
+        Pointer;
+        Array_Type;
+        Tuple;
+        Generic;
+    }
+
+    Semantic_Type :: struct {
+        kind: Type_Kind;
+        name: string;
+        symbol: Symbol_Id;
+        element: Type_Id = -1;
+        return_type: Type_Id = -1;
+        parameters: [..]Type_Id;
+        arguments: [..]Type_Id;
+    }
+
+    File_Semantics :: struct {
+        bindings: [..]Symbol_Id;
+        symbol_types: [..]Type_Id;
+        node_types: [..]Type_Id;
+        diagnostics: [..]Language_Diagnostic;
+        revision: ssize = -1;
+    }
+}

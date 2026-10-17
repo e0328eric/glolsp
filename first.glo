@@ -1,0 +1,148 @@
+// first.glo - compile-time build entry point for the Glosso language server.
+//
+// Run from the repository root. Nested builds use the compiler that is
+// executing this file, so no additional compiler or package manager is needed.
+
+#import "Compiler";
+#import "File_System/File";
+#import "File_System/System";
+#import "Format";
+#import "Io";
+#import "Os";
+#import "Process/Command";
+#import "Typeclass/Error";
+
+glolsp_executable :: (name: string = "glolsp") -> string {
+    #if OUT.os == Target_OS.Windows return tprint("build/%.exe", name);
+    else return tprint("build/%", name);
+}
+
+glolsp_build :: (
+    source: string = "main.glo",
+    name: string = "glolsp",
+    strict: bool = false,
+) -> bool {
+    if !os_fs_is_directory("build") && !os_fs_create_directories("build") {
+        print("could not create build/\n");
+        return false;
+    }
+    workspace := Workspace.create(name);
+    cache_result := absolute("build/cache");
+    cache_path: string;
+    if cache_result == {
+        case .Ok(path); cache_path = path;
+        case .Err(failure);
+            report_error(failure);
+            return false;
+    }
+    defer cache_path.free();
+    options := workspace.get_build_options();
+    options.output_path = "build";
+    options.output_executable_name = name;
+    #if OUT.os == Target_OS.Windows options.output_executable_name = tprint("%.exe", name);
+
+    // Keep runtime bounds and overflow guards enabled in the server.
+    options.set_color(.Never);
+    options.set_temp_allocator_size(64 * 1024 * 1024);
+    if strict options.borrow_check = .Error;
+    options.add_compiler_arg(tprint("--cache-dir=%", cache_path));
+    options.set_build_options(workspace);
+    built := add_build_file(source, workspace);
+    if #pattern .Err(failure) = built {
+        print("Glosso build failed for %:\n", source);
+        report_error(failure);
+        return false;
+    }
+    return true;
+}
+
+// Commands receive an argument vector directly, with no shell interpolation.
+glolsp_run_command :: (command: *Command) -> ssize {
+    outcome := command.*.run();
+    if outcome == {
+        case .Ok(finished);
+        if finished.status.exited return cast(ssize)finished.status.code;
+        return 1;
+        case .Err(failure);
+        if failure.child.valid _ := failure.child.close();
+        report_error(failure);
+        return 1;
+    }
+}
+
+glolsp_task_usage :: () {
+    print(
+        #string
+            \\usage: glosso first.glo -- [build|run|test|help]
+            \\
+            \\  build       build build/glolsp (the default)
+            \\  run [args]  build and start the stdio language server
+            \\  test        build and run Glosso and Python 3 tests
+            \\
+    );
+}
+
+glolsp_task :: () {
+    set_build_options_dc(.do_output = false);
+    args := get_cmdline_args();
+    task := "build";
+    if args.count > 0 task = args[0];
+    if #partial task == {
+        case "help", "--help", "-h";
+        glolsp_task_usage();
+        return;
+    }
+    if task != "build" && task != "run" && task != "test" {
+        print("unknown task: %\n\n", task);
+        glolsp_task_usage();
+        exit(1);
+    }
+    if task != "run" && args.count > 1 {
+        print("the % task does not accept arguments\n", task);
+        exit(1);
+    }
+    if !glolsp_build() exit(1);
+    if task == {
+        case "build";
+        print("built %\n", glolsp_executable());
+        return;
+        case "run";
+        command := Command.command_make(glolsp_executable());
+        for index: 1..args.count command.add_argument(args[index]);
+        status := glolsp_run_command(&command);
+        command.destroy();
+        if status != 0 exit(status);
+        return;
+        else;
+        glolsp_test();
+    }
+}
+
+glolsp_test :: () {
+    for unit: .["language", "protocol", "semantic", "syntax", "layout", "workspace", "analysis"] {
+        name := tprint("%-tests", unit);
+        source := tprint("tests/%.glo", unit);
+        strict := unit != "workspace" && unit != "analysis";
+        if !glolsp_build(source, name, strict) exit(1);
+        unit_command := Command.command_make(glolsp_executable(name));
+        unit_status := glolsp_run_command(&unit_command);
+        unit_command.destroy();
+        if unit_status != 0 exit(unit_status);
+    }
+    command := Command.command_make("python3");
+    command.add_argument("tests/integration.py");
+    command.add_argument(glolsp_executable());
+    status := glolsp_run_command(&command);
+    command.destroy();
+    if status != 0 exit(status);
+    semantic_command := Command.command_make("python3");
+    semantic_command.add_argument("tests/semantic_lsp.py");
+    semantic_command.add_argument(glolsp_executable());
+    semantic_status := glolsp_run_command(&semantic_command);
+    semantic_command.destroy();
+    if semantic_status != 0 exit(semantic_status);
+}
+
+#comptime glolsp_task();
+
+main :: () {}

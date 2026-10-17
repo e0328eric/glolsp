@@ -1,0 +1,192 @@
+#load "../src/syntax.glo";
+#import "Io";
+#import "String_Builder";
+
+symbol_named :: (file: *const Parsed_File, name: string) -> ssize {
+    for i: 0..file.symbols.count if file.symbols[i].name == name return i;
+    return -1;
+}
+
+scope_includes :: (file: *const Parsed_File, scope: ssize, ancestor: ssize) -> bool {
+    current := scope;
+    while current >= 0 {
+        if current == ancestor return true;
+        current = file.scopes[current].parent;
+    }
+    return false;
+}
+
+main :: () {
+    source := #string
+        \\#public {
+        \\Point :: struct { x: f64; y: f64; }
+        \\Box :: struct($T: type) { value: T; }
+        \\Color :: enum { Red; Green :: 2; }
+        \\Maybe :: union { None; Some(value: Point); }
+        \\}
+        \\Point ::: #public { get :: (#self) -> f64 { return #self.x; } }
+        \\configured :: (flag: bool = true, noalias output: *ssize) {}
+        \\math :: #import "Math";
+        \\#load "helper.glo";
+        \\main :: () {
+        \\    p: Point = .{ .x = 1, .y = 2 };
+        \\    n := p.get();
+        \\    if n > 0 { x := n * 2; } else { n = 3; }
+        \\    for item: 0..10 { n += item; }
+        \\}
+    ;
+    file := parse_file(source);
+    if file.language.diagnostics.count > 0 {
+        for diagnostic: file.language.diagnostics print("% at %\n", diagnostic.message,
+            diagnostic.start);
+    }
+    #assert file.language.diagnostics.count == 0;
+    point := symbol_named(&file, "Point");
+    field := symbol_named(&file, "x");
+    method := symbol_named(&file, "get");
+    #assert point >= 0 && field >= 0 && method >= 0;
+    #assert file.symbols[point].is_public;
+    #assert file.symbols[field].parent_symbol == point;
+    #assert file.symbols[method].parent_symbol == point;
+    #assert file.symbols[method].body_scope >= 0;
+    #assert file.symbols[symbol_named(&file, "T")].scope != 0;
+    #assert file.symbols[symbol_named(&file, "T")].detail == "$T: type";
+    #assert file.symbols[symbol_named(&file, "#self")].detail == "#self";
+    flag := file.symbols[symbol_named(&file, "flag")];
+    output := file.symbols[symbol_named(&file, "output")];
+    #assert flag.detail == "flag: bool = true" && flag.end > flag.selection_end;
+    #assert output.detail == "noalias output: *ssize";
+    #assert source.substring(output.selection_start, output.selection_end) == "output";
+    #assert file.imports.count == 2;
+    #assert file.imports[0].path == "Math" && !file.imports[0].load;
+    #assert file.imports[1].path == "helper.glo" && file.imports[1].load;
+    calls: ssize = 0;
+    members: ssize = 0;
+    for node: file.nodes {
+        if node.kind == .Call calls += 1;
+        if node.kind == .Member members += 1;
+    }
+    #assert calls >= 1 && members >= 2;
+    destroy_parsed_file(&file);
+
+    broken := parse_file("broken :: (x: ssize { return x; }\nvalid :: 7;\nnext := 9;");
+    #assert broken.language.diagnostics.count > 0;
+    #assert symbol_named(&broken, "valid") >= 0;
+    #assert symbol_named(&broken, "next") >= 0;
+    destroy_parsed_file(&broken);
+
+    constructs := #string
+        \\#import,only (sqrt) "Math";
+        \\#load,embed "fragment.glo";
+        \\#public #memory { reads(value), noescape(value) }
+        \\identity :: (value: $T) -> T #inline,always { return value; }
+        \\Witness :: struct { #empty: $T; #as value: ssize; }
+        \\Witness($T) ::: #private where true where true {
+        \\    read :: (*const #self) -> ssize { return #self.value; }
+        \\}
+        \\Comparable :: typeclass (T: type) where true #minimal('==') {
+        \\    '==' :: (left: T, right: T) -> bool #operator(left, 8);
+        \\}
+        \\#if OUT.os == .Linux { linux_value :: 1; }
+        \\pair :: () -> (ssize, string) { return 1, "value"; }
+        \\factory :: () -> (value: ssize) -> ssize { return identity; }
+        \\main :: () {
+        \\    values: [..]ssize;
+        \\    for *value: values value.* += 1;
+        \\    first, second := pair();
+        \\    closure := |value: ssize|-> ssize { return value +% 1; };
+        \\    empty := ||-> ssize { return 1; };
+        \\    chars := values[first..];
+        \\    tuple := .();
+        \\    call(values..., .flag = true);
+        \\    #assert true, "message";
+        \\    quoted := #code { first += second; };
+        \\    (#insert,scope() quoted);
+        \\    result := ifx first > 0 first else second;
+        \\}
+    ;
+    grammar := parse_file(constructs);
+    #assert grammar.language.diagnostics.count == 0;
+    #assert grammar.imports.count == 2 && grammar.imports[1].embedded;
+    #assert grammar.symbols[symbol_named(&grammar, "identity")].is_public;
+    #assert grammar.symbols[symbol_named(&grammar, "linux_value")].scope == 0;
+    receiver := grammar.symbols[symbol_named(&grammar, "#self")];
+    #assert receiver.detail == "*const #self";
+    #assert grammar.nodes[receiver.type_node].kind == .Unary;
+    #assert constructs[receiver.selection_start..receiver.selection_end] == "#self";
+    #assert symbol_named(&grammar, "first") >= 0 && symbol_named(&grammar, "second") >= 0;
+    pair := grammar.nodes[grammar.symbols[symbol_named(&grammar, "pair")].value_node];
+    #assert pair.kind == .Procedure && pair.value_node >= 0;
+    #assert grammar.nodes[pair.type_node].kind == .Type;
+    tuple := grammar.nodes[pair.type_node];
+    #assert tuple.first_child >= 0 && grammar.nodes[tuple.first_child].next_sibling >= 0;
+    factory := grammar.nodes[grammar.symbols[symbol_named(&grammar, "factory")].value_node];
+    #assert factory.value_node >= 0 && grammar.nodes[factory.type_node].kind == .Procedure;
+    #assert grammar.nodes[factory.type_node].value_node == -1;
+    destroy_parsed_file(&grammar);
+
+    patterns := #string
+        \\Point :: struct { x: ssize; }
+        \\Maybe :: union { None; Some(value: Point); }
+        \\main :: () {
+        \\    item: Maybe;
+        \\    if #pattern .Some(captured) = item {
+        \\        captured.x;
+        \\    } else { captured; }
+        \\    if item == {
+        \\        case .Some(arm); arm.x;
+        \\        case .None; arm;
+        \\    }
+        \\    arm;
+        \\}
+    ;
+    captures := parse_file(patterns);
+    #assert captures.language.diagnostics.count == 0;
+    captured := captures.symbols[symbol_named(&captures, "captured")];
+    arm := captures.symbols[symbol_named(&captures, "arm")];
+    #assert captures.nodes[captured.value_node].kind == .Pattern_Capture;
+    #assert captures.nodes[arm.value_node].argument_index == 0;
+    captured_references: ssize = 0;
+    arm_references: ssize = 0;
+    for node: captures.nodes {
+        if node.kind != .Identifier continue;
+        token := captures.language.tokens[node.token];
+        name := patterns.substring(token.start, token.end);
+        if name == "captured" && token.start > captured.selection_start {
+            visible := scope_includes(&captures, node.scope, captured.scope);
+            #assert visible == (captured_references == 0);
+            captured_references += 1;
+        }
+        if name == "arm" && token.start > arm.selection_start {
+            visible := scope_includes(&captures, node.scope, arm.scope);
+            #assert visible == (arm_references == 0);
+            arm_references += 1;
+        }
+    }
+    #assert captured_references == 2 && arm_references == 3;
+    destroy_parsed_file(&captures);
+
+    // Nested parse calls repeatedly grow the arena while their parent nodes stay live.
+    generated: String_Builder;
+    for i: 0..500 generated.write_string(
+        "procedure :: (value: *ssize) -> *ssize { return value; }\n");
+    large_source := generated.into_string();
+    for run: 0..3 {
+        small := parse_file("before :: () -> ssize #inline { return 1; }");
+        destroy_parsed_file(&small);
+        large := parse_file(large_source);
+        #assert large.language.diagnostics.count == 0 && large.symbols.count == 1000;
+        for symbol: large.symbols {
+            if symbol.kind != 12 continue;
+            procedure := large.nodes[symbol.value_node];
+            #assert procedure.kind == .Procedure && procedure.value_node >= 0;
+            #assert procedure.type_node >= 0 && procedure.type_node < large.nodes.count;
+            return_type := large.nodes[procedure.type_node];
+            #assert return_type.kind == .Unary && return_type.left >= 0;
+            #assert large.nodes[return_type.left].kind == .Identifier;
+        }
+        destroy_parsed_file(&large);
+    }
+    large_source.free();
+    print("syntax parser passed\n");
+}

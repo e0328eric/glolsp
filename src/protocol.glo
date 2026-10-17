@@ -1,0 +1,343 @@
+//! LSP framing and borrowed JSON access. Frame bodies are caller-owned.
+#import "Serialization/Json";
+#import "Serialization/Core";
+#import "String_Builder";
+#import "Strings";
+#import "Format";
+#import "File_System/File";
+#import "File_System/Types";
+
+#public {
+    Json :: Serialization_Value;
+    MAX_MESSAGE_BYTES :: 16 * 1024 * 1024;
+
+    Rpc_Frame :: struct {
+        body: string;
+        status: s32;
+    }
+
+    #memory { returns_borrow(value), reads(value, name), noescape(value, name) }
+    json_field :: (value: ?*Json, name: string) -> ?*Json {
+        if #pattern.Some(pointer) = value return pointer.field_value(name);
+        return .None;
+    }
+
+    #memory { returns_borrow(value), reads(value), noescape(value) }
+    json_text :: (value: ?*Json) -> string {
+        if #pattern.Some(pointer) = value {
+            if #partial pointer.* == {
+                case .text(text);
+                return text;
+            }
+        }
+        return "";
+    }
+
+    json_is_text :: (value: ?*Json) -> bool {
+        if #pattern.Some(pointer) = value {
+            if #partial pointer.* == {
+                case .text;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    json_is_object :: (value: ?*Json) -> bool {
+        if #pattern.Some(pointer) = value {
+            if #partial pointer.* == {
+                case .map;
+                return true;
+                case .structure;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    json_is_integer :: (value: ?*Json) -> bool {
+        if #pattern.Some(pointer) = value {
+            if #partial pointer.* == {
+                case .signed_integer(n);
+                return n >= -2147483648 && n <= 2147483647;
+                case .unsigned_integer(n);
+                return n <= 2147483647;
+            }
+        }
+        return false;
+    }
+
+    json_integer :: (value: ?*Json, fallback: ssize = -1) -> ssize {
+        if !json_is_integer(value) return fallback;
+        if #pattern.Some(pointer) = value {
+            if #partial pointer.* == {
+                case .signed_integer(n);
+                return cast(ssize)n;
+                case .unsigned_integer(n);
+                return cast(ssize)n;
+            }
+        }
+        return fallback;
+    }
+
+    json_boolean :: (value: ?*Json, fallback: bool = false) -> bool {
+        if #pattern.Some(pointer) = value {
+            if #partial pointer.* == {
+                case .boolean(flag);
+                return flag;
+            }
+        }
+        return fallback;
+    }
+
+    #memory { reads(value), noescape(value), returns_borrow(value) }
+    json_array :: (value: ?*Json) -> ?*[..]Json {
+        if #pattern.Some(pointer) = value {
+            if #partial pointer.* == {
+                case .sequence(*items);
+                return .Some(items);
+            }
+        }
+        return .None;
+    }
+
+    #memory {
+        invalidates(out),
+        reads(out, text),
+        writes(out),
+        noescape(out, text),
+    }
+    write_json_string :: (out: *String_Builder, text: string) {
+        hex :: "0123456789abcdef";
+        out.write_byte(#char "\"");
+        for byte: text.bytes() {
+            if byte == {
+                case #char "\"";
+                out.write_string("\\\"");
+                case #char "\\";
+                out.write_string("\\\\");
+                case ..(#char " ");
+                out.write_string("\\u00");
+                out.write_byte(hex[cast(ssize)(byte / 16)]);
+                out.write_byte(hex[cast(ssize)(byte % 16)]);
+                else;
+                out.write_byte(byte);
+            }
+        }
+        out.write_byte(#char "\"");
+    }
+
+    write_json_integer :: (out: *String_Builder, number: ssize) {
+        out.write_string(tprint("%", number));
+    }
+
+    write_json_value :: (out: *String_Builder, value: ?*Json) {
+        if #pattern.Some(pointer) = value {
+            if pointer.to_json_string() == {
+                case .Ok(text);
+                defer text.free();
+                out.write_string(text);
+                return;
+                case .Err;
+            }
+        }
+        out.write_string("null");
+    }
+
+    rpc_send :: (output: *File, body: string) -> bool {
+        header := tprint("Content-Length: %\r\n\r\n", body.count);
+        for text: .[header, body] {
+            offset: ssize = 0;
+            while offset < text.count {
+                if output.write(text[offset..]) == {
+                    case .Err;
+                    return false;
+                    case .Ok(count);
+                    if count <= 0 return false;
+                    offset += count;
+                }
+            }
+        }
+        return true;
+    }
+
+    rpc_response :: (output: *File, id: ?*Json, result: string) -> bool {
+        out: String_Builder;
+        out.write_string("{\"jsonrpc\":\"2.0\",\"id\":");
+        write_json_value(&out, id);
+        out.write_string(",\"result\":");
+        out.write_string(result);
+        out.write_byte(#char "}");
+        return rpc_send(output, out.to_string());
+    }
+
+    rpc_error :: (output: *File, id: ?*Json, code: ssize, message: string) -> bool {
+        out: String_Builder;
+        out.write_string("{\"jsonrpc\":\"2.0\",\"id\":");
+        write_json_value(&out, id);
+        out.write_string(",\"error\":{\"code\":");
+        write_json_integer(&out, code);
+        out.write_string(",\"message\":");
+        write_json_string(&out, message);
+        out.write_string("}}");
+        return rpc_send(output, out.to_string());
+    }
+
+    rpc_read_frame :: (input: *File) -> Rpc_Frame {
+        header: String_Builder;
+        while header.buf.count < 16384 {
+            if input.read_byte() == {
+                case .Err;
+                if header.buf.count == 0 return .{ .status = 0 };
+                return .{ .status = -1 };
+                case .Ok(byte);
+                header.write_byte(byte);
+            }
+            size := header.buf.count;
+            if size >= 4 && header.to_string()[size - 4..] == "\r\n\r\n" break;
+        }
+        text := header.to_string();
+        if text.count < 4 || text[text.count - 4..] != "\r\n\r\n" return .{ .status = -1 };
+        length := rpc_content_length(text);
+        if length < 0 return .{ .status = -1 };
+        body := String_Builder.make_len_cap(length, length);
+        offset: ssize = 0;
+        while offset < length {
+            if input.read_into(body.buf[offset..]) == {
+                case .Err;
+                return .{ .status = -1 };
+                case .Ok(count);
+                if count <= 0 return .{ .status = -1 };
+                offset += count;
+            }
+        }
+        return .{ .body = body.into_string(), .status = 1 };
+    }
+
+    // Validate the complete ASCII header before allocating its body. A
+    // malformed delimiter cannot make us skip a byte of the next header.
+    rpc_content_length :: (text: string) -> ssize {
+        if text.count < 4 || text.count > 16384 || text[text.count - 4..] != "\r\n\r\n" return -1;
+        length: ssize = -1;
+        cursor: ssize = 0;
+        while cursor < text.count - 2 {
+            end := cursor;
+            while end < text.count && text[end] != #char "\r" && text[end] != #char "\n" end += 1;
+            if end == cursor || end + 1 >= text.count || text[end] != #char "\r" || text[end + 1] !=
+                #char "\n" return -1;
+            line := text[cursor..end];
+            colon: ssize = 0;
+            while colon < line.count && line[colon] != #char ":" colon += 1;
+            if colon == 0 || colon == line.count return -1;
+            name := line[..colon];
+            for byte: name.bytes() {
+                if !rpc_header_name_byte(byte) return -1;
+            }
+            for index: colon + 1..line.count {
+                byte := line[index];
+                if (byte < #char " " && byte != #char "\t") || byte > #char "~" return -1;
+            }
+            start := colon + 1;
+            while start < line.count && (line[start] == #char " " || line[start] == #char "\t")
+                start += 1;
+            finish := line.count;
+            while finish > start &&
+                (line[finish - 1] == #char " " || line[finish - 1] == #char "\t") finish -= 1;
+            if ascii_equal_fold(name, "Content-Length") {
+                if start == finish return -1;
+                parsed: ssize = 0;
+                for i: start..finish {
+                    if line[i] < #char "0" || line[i] > #char "9" return -1;
+                    parsed = parsed * 10 + cast(ssize)(line[i] - #char "0");
+                    if parsed > MAX_MESSAGE_BYTES return -1;
+                }
+                if length >= 0 return -1;
+                length = parsed;
+            } else if ascii_equal_fold(name, "Content-Type") {
+                if !rpc_content_type_utf8(line[start..finish]) return -1;
+            }
+            cursor = end + 2;
+        }
+        return length;
+    }
+
+    // Content-Type parameters are ASCII and case insensitive. LSP also
+    // accepts the historical "utf8" spelling for UTF-8.
+    rpc_content_type_utf8 :: (value: string) -> bool {
+        if value.count == 0 return false;
+        cursor: ssize = 0;
+        while cursor < value.count && value[cursor] != #char ";" cursor += 1;
+        while cursor < value.count {
+            cursor += 1;
+            end := cursor;
+            quoted := false;
+            while end < value.count {
+                if value[end] == #char "\\" && quoted {
+                    if end + 1 >= value.count return false;
+                    end += 2;
+                    continue;
+                }
+                if value[end] == #char "\"" quoted = !quoted;
+                if value[end] == #char ";" && !quoted break;
+                end += 1;
+            }
+            if quoted return false;
+            start := cursor;
+            while start < end && (value[start] == #char " " || value[start] == #char "\t") start +=
+                1;
+            equals := start;
+            while equals < end && value[equals] != #char "=" equals += 1;
+            name_end := equals;
+            while name_end > start &&
+                (value[name_end - 1] == #char " " || value[name_end - 1] == #char "\t") name_end -=
+                1;
+            if ascii_equal_fold(value[start..name_end], "charset") {
+                if equals == end return false;
+                encoding_start := equals + 1;
+                while encoding_start < end &&
+                    (value[encoding_start] == #char " " || value[encoding_start] == #char "\t")
+                    encoding_start += 1;
+                encoding_end := end;
+                while encoding_end > encoding_start &&
+                    (value[encoding_end - 1] == #char " " || value[encoding_end - 1] == #char "\t")
+                    encoding_end -= 1;
+                if encoding_end - encoding_start >= 2 && value[encoding_start] == #char "\"" &&
+                    value[encoding_end - 1] == #char "\"" {
+                    encoding_start += 1;
+                    encoding_end -= 1;
+                }
+                encoding := value[encoding_start..encoding_end];
+                if !ascii_equal_fold(encoding, "utf-8") && !ascii_equal_fold(
+                    encoding,
+                    "utf8"
+                ) return false;
+            }
+            cursor = end;
+        }
+        return true;
+    }
+
+    rpc_header_name_byte :: (byte: u8) -> bool {
+        if byte == {
+            case (#char "A")..=(#char "Z"), (#char "a")..=(#char "z"), (#char "0")..=(#char "9"),
+                #char "!", #char "#", #char "$", #char "%", #char "&", #char "'", #char "*",
+                #char "+", #char "-", #char ".", #char "^", #char "_", #char "`", #char "|",
+                #char "~";
+            return true;
+            else;
+            return false;
+        }
+    }
+
+    ascii_equal_fold :: (left: string, right: string) -> bool {
+        if left.count != right.count return false;
+        for i: 0..left.count {
+            a := left[i];
+            b := right[i];
+            if a >= #char "A" && a <= #char "Z" a += (#char "a") - (#char "A");
+            if b >= #char "A" && b <= #char "Z" b += (#char "a") - (#char "A");
+            if a != b return false;
+        }
+        return true;
+    }
+}

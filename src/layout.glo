@@ -1,0 +1,161 @@
+//! Token-preserving whitespace layout. Formatting never evaluates source code.
+#load "language.glo";
+#load "protocol.glo";
+#load "positions.glo";
+#import "String_Builder";
+#import "Strings";
+
+Layout_State :: struct {
+    depth: ssize;
+    parentheses: ssize;
+    brackets: ssize;
+    tab_size: ssize;
+    insert_spaces: bool;
+    column: ssize;
+    line_start: bool = true;
+}
+
+layout_newline :: (state: *Layout_State, out: *String_Builder) {
+    while out.buf.count > 0 {
+        last := out.buf[out.buf.count - 1];
+        if last != #char " " && last != #char "\t" break;
+        out.buf.count -= 1;
+    }
+    if !state.line_start out.write_byte(#char "\n");
+    state.line_start = true;
+    state.column = 0;
+}
+
+layout_write :: (
+    state: *Layout_State, out: *String_Builder, text: string, space: bool,
+) {
+    if state.line_start {
+        if state.insert_spaces {
+            for 0..state.depth * state.tab_size out.write_byte(#char " ");
+        } else {
+            for 0..state.depth out.write_byte(#char "\t");
+        }
+        state.column = state.depth * state.tab_size;
+        state.line_start = false;
+    } else if space {
+        out.write_byte(#char " ");
+        state.column += 1;
+    }
+    out.write_string(text);
+    state.column += text.count;
+}
+
+layout_no_space_before :: (text: string) -> bool {
+    if text == {
+        case ",", ";", ")", "]", ":", ".";
+        return true;
+        else;
+        return false;
+    }
+}
+
+layout_no_space_after :: (text: string) -> bool {
+    if text == {
+        case "(", "[", ".", "$", "`", "``";
+        return true;
+        else;
+        return false;
+    }
+}
+
+#public layout_format :: (
+    source: string,
+    tab_size: ssize = 4,
+    insert_spaces: bool = true,
+) -> string {
+    scanned := tokenize_language(source);
+    if scanned.diagnostics.count > 0 return source.clone();
+    state: Layout_State = .{ .tab_size = tab_size, .insert_spaces = insert_spaces };
+    if state.tab_size < 1 || state.tab_size > 16 state.tab_size = 4;
+    out: String_Builder;
+    previous := "";
+    previous_end: ssize = 0;
+    previous_kind: s32 = 0;
+    for i: 0..scanned.tokens.count {
+        token := scanned.tokens[i];
+        text := source[token.start..token.end];
+        gap := source[previous_end..token.start];
+        had_newline := gap.contains("\n") || gap.contains("\r");
+        // Preserve line-sensitive raw literals and source directives.
+        if had_newline && state.parentheses == 0 && state.brackets == 0
+            layout_newline(&state, &out);
+        if text == "}" {
+            if state.depth > 0 state.depth -= 1;
+            layout_newline(&state, &out);
+        }
+        adjacent_operators := i > 0 && previous_end == token.start && token.kind == 6 &&
+            previous_kind == 6;
+        space := i > 0 && !layout_no_space_before(text) && !layout_no_space_after(previous);
+        if adjacent_operators space = false;
+        if text == "(" && previous_kind == 1 space = false;
+        if previous_kind == 7 && text == "(" space = false;
+        if state.column + text.count > 100 &&
+            (previous == "," || previous == "||" || previous == "&&") layout_newline(&state, &out);
+        layout_write(&state, &out, text, space);
+        if text == {
+            case "{";
+            state.depth += 1;
+            layout_newline(&state, &out);
+            case "}";
+            if i + 1 < scanned.tokens.count {
+                next := scanned.tokens[i + 1];
+                next_text := source[next.start..next.end];
+                if next_text != ";" && next_text != "," && next_text != ")" && next_text != "else"
+                    layout_newline(&state, &out);
+            }
+            case "(";
+            state.parentheses += 1;
+            case ")";
+            if state.parentheses > 0 state.parentheses -= 1;
+            case "[";
+            state.brackets += 1;
+            case "]";
+            if state.brackets > 0 state.brackets -= 1;
+            case ";";
+            {
+                if state.parentheses == 0 && state.brackets == 0 layout_newline(&state, &out);
+            } else;
+            {}
+        }
+        if token.kind == 4 && text.starts_with("//") layout_newline(&state, &out);
+        if token.kind == 3 && text.starts_with("\\\\") layout_newline(&state, &out);
+        previous = text;
+        previous_end = token.end;
+        previous_kind = token.kind;
+    }
+    layout_newline(&state, &out);
+    formatted := out.to_string();
+    verified := tokenize_language(formatted);
+    if verified.diagnostics.count > 0 || verified.tokens.count != scanned.tokens.count return
+        source.clone();
+    for i: 0..verified.tokens.count {
+        a := scanned.tokens[i];
+        b := verified.tokens[i];
+        if source[a.start..a.end] != formatted[b.start..b.end]return source.clone();
+    }
+    return out.into_string();
+}
+
+#public layout_write_edits :: (
+    out: *String_Builder,
+    source: string,
+    tab_size: ssize,
+    insert_spaces: bool = true,
+) {
+    formatted := layout_format(source, tab_size, insert_spaces);
+    defer formatted.free();
+    out.write_byte(#char "[");
+    if formatted != source {
+        out.write_string("{\"range\":");
+        write_range(out, source, 0, source.count);
+        out.write_string(",\"newText\":");
+        write_json_string(out, formatted);
+        out.write_byte(#char "}");
+    }
+    out.write_byte(#char "]");
+}

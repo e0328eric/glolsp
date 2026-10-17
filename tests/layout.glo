@@ -1,0 +1,41 @@
+#load "../src/layout.glo";
+#import "Io";
+#import "Strings";
+
+main :: () {
+    source := "main :: () {value:=1;other:=value;}";
+    formatted := layout_format(source);
+    defer formatted.free();
+    #assert formatted == #string
+        \\main :: () {
+        \\    value := 1;
+        \\    other := value;
+        \\}
+        \\
+    ;
+    again := layout_format(formatted);
+    defer again.free();
+    #assert again == formatted;
+    tabs := layout_format(source, 4, false);
+    defer tabs.free();
+    #assert tabs.contains("\n\tvalue");
+    text := #string
+        \\main :: () {
+        \\    string := "{ ; // not code }";
+        \\    byte := #char "}";
+        \\    /* outer /* inner */ comment */
+        \\    raw := #string
+        \\        \\\\  { raw; unchanged }
+        \\    ;
+        \\}
+    ;
+    literals := layout_format(text);
+    defer literals.free();
+    #assert literals.contains("\"{ ; // not code }\"");
+    #assert literals.contains("/* outer /* inner */ comment */");
+    malformed := "main :: () { /* never closed";
+    unchanged := layout_format(malformed);
+    defer unchanged.free();
+    #assert malformed == unchanged;
+    print("layout tests passed\n");
+}

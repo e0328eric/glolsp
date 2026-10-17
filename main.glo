@@ -1,0 +1,6 @@
+//! Glosso language server. Standard output carries LSP messages exclusively.
+#load "src/server.glo";
+
+main :: () -> s32 {
+    return run_language_server();
+}

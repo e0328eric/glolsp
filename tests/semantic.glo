@@ -1,0 +1,44 @@
+// Run with: glosso tests/semantic.glo --run --borrow-check error
+#load "../src/language.glo";
+#load "../src/semantic.glo";
+#import "String_Builder";
+#import "Io";
+
+main :: () {
+    // Exact deltas verify UTF-16 widths, CRLF handling, per-line comment
+    // splitting, and declaration/readonly modifier bits together.
+    unicode_source := "한글 :: 1;\r\n/*😀\r\nb*/\n";
+    unicode_analysis := analyze_language(unicode_source);
+    unicode_tokens: String_Builder;
+    write_semantic_tokens(&unicode_tokens, unicode_source, &unicode_analysis);
+    #assert unicode_tokens.to_string() == #string,oneline
+        \\{"data":[0,0,2,3,3,0,3,2,10,0,0,3,1,9,0,1,0,4,7,0,1,0,3,7,0]}
+    ;
+    destroy_language(&unicode_analysis);
+
+    procedure_source := "f :: (p: s32) { p; }";
+    procedure := analyze_language(procedure_source);
+    procedure_tokens: String_Builder;
+    write_semantic_tokens(&procedure_tokens, procedure_source, &procedure);
+    #assert procedure_tokens.to_string() == #string,oneline
+        \\{"data":[0,0,1,2,1,0,2,2,10,0,0,4,1,4,1,0,1,1,10,0,0,2,3,1,0,0,7,1,4,0]}
+    ;
+    destroy_language(&procedure);
+
+    // The directive and string text contain no document declarations.
+    string_source := "#string\n\\\\😀\n\"a\nb\"";
+    strings := analyze_language(string_source);
+    string_tokens: String_Builder;
+    write_semantic_tokens(&string_tokens, string_source, &strings);
+    #assert string_tokens.to_string() == #string,oneline
+        \\{"data":[0,0,7,11,0,1,0,4,8,0,1,0,2,8,0,1,0,2,8,0]}
+    ;
+    destroy_language(&strings);
+
+    empty := analyze_language("");
+    empty_tokens: String_Builder;
+    write_semantic_tokens(&empty_tokens, "", &empty);
+    #assert empty_tokens.to_string() == "{\"data\":[]}";
+    destroy_language(&empty);
+    print("semantic tokens passed\n");
+}

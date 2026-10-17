@@ -1,0 +1,804 @@
+//! Persistent source files, editor overlays, and the dependency graph.
+#load "model.glo";
+#load "syntax.glo";
+#import "File_System/File";
+#import "File_System/Path";
+#import "File_System/System";
+#import "File_System/Walk";
+#import "File_System/Types";
+#import "Process/Environment";
+#import "String_Builder";
+#import "Strings/Utf8";
+#import "Os";
+#import "Context";
+#import "Memory/Ownership";
+
+#public {
+    Workspace_Import :: struct {
+        declaration: ssize;
+        target: ssize = -1;
+        ambiguous: bool;
+    }
+
+    Source_File :: struct {
+        uri: string;
+        path: string;
+        source: string;
+        version: ssize;
+        open: bool;
+        active: bool;
+        relevant: bool;
+        syntax: Parsed_File;
+        semantic: File_Semantics;
+        imports: [..]Workspace_Import;
+        revision: ssize;
+    }
+
+    Workspace :: struct {
+        files: [..]Source_File;
+        roots: [..]string;
+        import_paths: [..]string;
+        std_path: string;
+        prelude: ssize = -1;
+        types: [..]Semantic_Type;
+        unit_owners: [..]ssize;
+        file_limit: ssize = 4096;
+        source_limit: ssize = 16 * 1024 * 1024;
+        import_depth: ssize;
+        revision: ssize;
+        generation: ssize;
+        analyzed_generation: ssize = -1;
+        parse_count: ssize;
+        truncated: bool;
+    }
+}
+
+workspace_byte :: (text: string, at: ssize) -> u8 {
+    if at < 0 || at >= text.count return 0;
+    return text.bytes()[at];
+}
+
+workspace_hex :: (byte: u8) -> s32 {
+    if byte == {
+        case #char "0"..=#char "9"; return cast(s32)(byte - #char "0");
+        case #char "a"..=#char "f"; return cast(s32)(byte - #char "a") + 10;
+        case #char "A"..=#char "F"; return cast(s32)(byte - #char "A") + 10;
+        else; return -1;
+    }
+}
+
+workspace_prefix :: (text: string, prefix: string) -> bool {
+    if text.count < prefix.count return false;
+    return text.substring_view(0, prefix.count) == prefix;
+}
+
+workspace_suffix :: (text: string, suffix: string) -> bool {
+    if text.count < suffix.count return false;
+    return text.substring_view(text.count - suffix.count, text.count) == suffix;
+}
+
+workspace_drive_path :: (path: string) -> bool {
+    first := workspace_byte(path, 0);
+    return ((first >= #char "A" && first <= #char "Z") ||
+        (first >= #char "a" && first <= #char "z")) &&
+        workspace_byte(path, 1) == #char ":" &&
+        (workspace_byte(path, 2) == #char "/" || workspace_byte(path, 2) == #char "\\");
+}
+
+workspace_windows_path :: (path: string) -> string {
+    cleaned := path_clean(path, .Windows);
+    defer cleaned.free();
+    out: String_Builder;
+    for byte: cleaned.bytes() {
+        if byte == #char "\\" out.write_byte(#char "/");
+        else out.write_byte(byte);
+    }
+    converted := out.to_string();
+    if workspace_prefix(converted, "//?/UNC/") {
+        unc: String_Builder;
+        unc.write_string("//");
+        unc.write_string(converted.substring_view(8, converted.count));
+        return unc.into_string();
+    }
+    if workspace_prefix(converted, "//?/")
+        return converted.substring_view(4, converted.count).clone();
+    return out.into_string();
+}
+
+/// Produces a stable absolute path; existing files also resolve symbolic links.
+#public workspace_normalize_path :: (path: string) -> string {
+    if path.count == 0 return "".clone();
+    #if OUT.os == Target_OS.Windows {
+        if canonical(path) == {
+            case .Ok(value);
+                defer value.free();
+                return workspace_windows_path(value);
+            case .Err;
+        }
+        if absolute(path) == {
+            case .Ok(value);
+                defer value.free();
+                return workspace_windows_path(value);
+            case .Err; return workspace_windows_path(path);
+        }
+    }
+    if workspace_drive_path(path) || workspace_prefix(path, "\\\\") ||
+       workspace_prefix(path, "//") return workspace_windows_path(path);
+    if canonical(path) == {
+        case .Ok(value); return value;
+        case .Err;
+    }
+    if absolute(path) == {
+        case .Ok(value);
+            defer value.free();
+            return path_clean(value);
+        case .Err; return path_clean(path);
+    }
+}
+
+/// Decodes UTF-8 file URIs. Invalid escapes and embedded NULs are rejected.
+#public workspace_uri_to_path :: (uri: string) -> string {
+    if !workspace_prefix(uri, "file://") return "".clone();
+    at: ssize = 7;
+    authority_start := at;
+    while at < uri.count && workspace_byte(uri, at) != #char "/" at += 1;
+    authority := uri.substring_view(authority_start, at);
+    out: String_Builder;
+    if authority.count > 0 && authority != "localhost" {
+        out.write_string("//");
+        out.write_string(authority);
+    }
+    while at < uri.count {
+        byte := workspace_byte(uri, at);
+        if #partial byte == {
+            case #char "%";
+                if at + 2 >= uri.count return "".clone();
+                high := workspace_hex(workspace_byte(uri, at + 1));
+                low := workspace_hex(workspace_byte(uri, at + 2));
+                if high < 0 || low < 0 return "".clone();
+                byte = cast(u8)(high * 16 + low);
+                at += 2;
+            case #char "?", #char "#"; return "".clone();
+        }
+        if byte == 0 return "".clone();
+        out.write_byte(byte);
+        at += 1;
+    }
+    decoded := out.to_string();
+    if !decoded.bytes().utf8_is_valid() return "".clone();
+    if decoded.count > 3 && workspace_byte(decoded, 0) == #char "/" &&
+       workspace_drive_path(decoded.substring_view(1, decoded.count))
+        return workspace_normalize_path(decoded.substring_view(1, decoded.count));
+    if authority.count > 0 && authority != "localhost" return decoded.clone();
+    return workspace_normalize_path(decoded);
+}
+
+/// Percent-encodes bytes, including UTF-8, so editor URIs round-trip exactly.
+#public workspace_path_to_uri :: (path: string) -> string {
+    normalized := workspace_normalize_path(path);
+    defer normalized.free();
+    out: String_Builder;
+    if workspace_prefix(normalized, "//") out.write_string("file:");
+    else out.write_string("file://");
+    if workspace_drive_path(normalized) out.write_byte(#char "/");
+    hex :: "0123456789ABCDEF";
+    for byte: normalized.bytes() {
+        if byte == {
+            case #char "A"..=#char "Z", #char "a"..=#char "z", #char "0"..=#char "9",
+                 #char "-", #char "_", #char ".", #char "~", #char "/", #char ":";
+                out.write_byte(byte);
+            else;
+                out.write_byte(#char "%");
+                out.write_byte(hex.bytes()[cast(ssize)(byte / 16)]);
+                out.write_byte(hex.bytes()[cast(ssize)(byte % 16)]);
+        }
+    }
+    return out.into_string();
+}
+
+workspace_environment :: (name: string) -> string {
+    if environment_get(name) == {
+        case .Ok(value);
+            if value == {
+                case .Some(found); return found.value.clone();
+                case .None;
+            }
+        case .Err;
+    }
+    return "".clone();
+}
+
+#memory { reads(workspace), writes(workspace), invalidates(workspace), noescape(workspace) }
+#public workspace_init :: (workspace: *Workspace) {
+    standard := workspace_environment("GLOSSO_STD");
+    defer standard.free();
+    if standard.count > 0 {
+        workspace_set_std_path(workspace, standard);
+        return;
+    }
+    home_path := workspace_environment("HOME");
+    defer home_path.free();
+    if home_path.count == 0 return;
+    candidate := path_join(home_path, ".local/glosso/std");
+    defer candidate.free();
+    if os_fs_is_directory(candidate) workspace_set_std_path(workspace, candidate);
+}
+
+#memory {
+    reads(workspace, path),
+    writes(workspace),
+    invalidates(workspace),
+    noescape(workspace, path),
+}
+#public workspace_set_std_path :: (workspace: *Workspace, path: string) {
+    next := workspace_normalize_path(path);
+    if workspace.std_path == next {
+        next.free();
+        return;
+    }
+    workspace.std_path.free();
+    workspace.std_path = next;
+    workspace.prelude = -1;
+    if next.count > 0 {
+        entry := path_join(next, "Prelude/module.glo");
+        defer entry.free();
+        workspace.prelude = workspace_load(workspace, entry);
+    }
+    workspace.revision += 1;
+    workspace.generation = workspace.revision;
+    workspace_refresh_imports(workspace);
+}
+
+#memory {
+    reads(workspace, path),
+    writes(workspace),
+    invalidates(workspace),
+    noescape(workspace, path),
+}
+#public workspace_add_import_path :: (workspace: *Workspace, path: string) {
+    normalized := workspace_normalize_path(path);
+    for existing: workspace.import_paths {
+        if existing == normalized {
+            normalized.free();
+            return;
+        }
+    }
+    workspace.import_paths.push(normalized);
+    workspace.revision += 1;
+    workspace.generation = workspace.revision;
+    workspace_refresh_imports(workspace);
+}
+
+#memory { reads(workspace), writes(workspace), invalidates(workspace), noescape(workspace) }
+workspace_touch :: (workspace: *Workspace, index: ssize) {
+    workspace.revision += 1;
+    workspace.generation = workspace.revision;
+    workspace.files[index].revision = workspace.revision;
+}
+
+#public workspace_find_path :: (workspace: *const Workspace, path: string) -> ssize {
+    for i: 0..workspace.files.count {
+        existing := workspace.files[i].path;
+        if existing == path return i;
+        #if OUT.os == Target_OS.Windows {
+            if environment_names_equal(existing, path) return i;
+        }
+    }
+    return -1;
+}
+
+#public workspace_find :: (workspace: *const Workspace, uri: string) -> ssize {
+    path := workspace_uri_to_path(uri);
+    defer path.free();
+    if path.count > 0 return workspace_find_path(workspace, path);
+    for i: 0..workspace.files.count {
+        if workspace.files[i].uri == uri return i;
+    }
+    return -1;
+}
+
+#memory { reads(file), writes(file), noescape(file) }
+workspace_clear_semantics :: (file: *Source_File) {
+    file.semantic.bindings.free();
+    file.semantic.symbol_types.free();
+    file.semantic.node_types.free();
+    file.semantic.diagnostics.free();
+    file.semantic.revision = -1;
+}
+
+#memory { reads(file), writes(file), noescape(file) }
+workspace_clear_syntax :: (file: *Source_File) {
+    workspace_clear_semantics(file);
+    destroy_parsed_file(&file.syntax);
+    file.imports.free();
+}
+
+Source_File ::: instance Drop {
+    Error :: #Never;
+
+    drop :: (value: *#Self_Type) -> #Never!void {
+        workspace_clear_syntax(value);
+        value.source.free();
+        value.path.free();
+        value.uri.free();
+        return .Ok;
+    }
+}
+
+/// Clearing a file retains its identity; references never change to another file.
+#memory { reads(workspace), writes(workspace), invalidates(workspace), noescape(workspace) }
+workspace_unload :: (workspace: *Workspace, index: ssize) {
+    file := &workspace.files[index];
+    workspace_clear_syntax(file);
+    file.source.free();
+    empty: string;
+    file.source = empty;
+    file.active = false;
+    file.open = false;
+    workspace_touch(workspace, index);
+}
+
+#public workspace_destroy :: (workspace: *Workspace) {
+    workspace.files.free();
+    for root: workspace.roots root.free();
+    workspace.roots.free();
+    for path: workspace.import_paths path.free();
+    workspace.import_paths.free();
+    workspace.std_path.free();
+    empty: string;
+    workspace.std_path = empty;
+    workspace.prelude = -1;
+    for i: 0..workspace.types.count {
+        workspace.types[i].parameters.free();
+        workspace.types[i].arguments.free();
+    }
+    workspace.types.free();
+    workspace.unit_owners.free();
+}
+
+#memory {
+    reads(workspace, uri, path),
+    writes(workspace),
+    invalidates(workspace),
+    noescape(workspace, uri, path),
+}
+workspace_allocate :: (workspace: *Workspace, uri: string, path: string) -> ssize {
+    if workspace.files.count >= workspace.file_limit {
+        workspace.truncated = true;
+        return -1;
+    }
+    workspace.files.push(.{ .uri = uri.clone(), .path = path.clone() });
+    return workspace.files.count - 1;
+}
+
+#memory {
+    reads(workspace, source),
+    writes(workspace),
+    invalidates(workspace),
+    noescape(workspace, source),
+}
+workspace_replace_source :: (workspace: *Workspace, index: ssize, source: string) -> bool {
+    if source.count > workspace.source_limit || !source.bytes().utf8_is_valid() return false;
+    file := &workspace.files[index];
+    if file.active && file.source == source return true;
+    // Clone before releasing: callers may supply a view of the previous buffer.
+    next := source.clone();
+    workspace_clear_syntax(file);
+    file.source.free();
+    file.source = next;
+    parsed := parse_file(file.source);
+    value_replace(&file.syntax, parsed);
+    file.active = true;
+    workspace.parse_count += 1;
+    workspace_touch(workspace, index);
+    workspace_rebuild_imports(workspace, index);
+    return true;
+}
+
+/// Returns the persistent file identity and loads dependencies recursively.
+#memory {
+    reads(workspace, path),
+    writes(workspace),
+    invalidates(workspace),
+    noescape(workspace, path),
+}
+#public workspace_load :: (workspace: *Workspace, path: string) -> ssize {
+    normalized := workspace_normalize_path(path);
+    defer normalized.free();
+    index := workspace_find_path(workspace, normalized);
+    if index >= 0 && workspace.files[index].active return index;
+    if workspace.import_depth >= 256 {
+        workspace.truncated = true;
+        return -1;
+    }
+    if read_file_up_to(normalized, workspace.source_limit + 1) == {
+        case .Err; return -1;
+        case .Ok(source);
+            defer source.free();
+            if source.count > workspace.source_limit || !source.bytes().utf8_is_valid() return -1;
+            if index < 0 {
+                uri := workspace_path_to_uri(normalized);
+                defer uri.free();
+                index = workspace_allocate(workspace, uri, normalized);
+            }
+            if index < 0 return -1;
+            workspace.import_depth += 1;
+            defer { workspace.import_depth -= 1; }
+            if !workspace_replace_source(workspace, index, source) return -1;
+            return index;
+    }
+}
+
+#memory {
+    reads(workspace, uri, source),
+    writes(workspace),
+    invalidates(workspace),
+    noescape(workspace, uri, source),
+}
+#public workspace_open :: (
+    workspace: *Workspace, uri: string, source: string, version: ssize,
+) -> ssize {
+    if source.count > workspace.source_limit || !source.bytes().utf8_is_valid() return -1;
+    path := workspace_uri_to_path(uri);
+    defer path.free();
+    index := workspace_find(workspace, uri);
+    if index < 0 {
+        index = workspace_allocate(workspace, uri, path);
+    }
+    if index < 0 return -1;
+    was_open := workspace.files[index].open;
+    next_uri := uri.clone();
+    workspace.files[index].uri.free();
+    workspace.files[index].uri = next_uri;
+    workspace.files[index].open = true;
+    workspace.files[index].version = version;
+    if !workspace_replace_source(workspace, index, source) return -1;
+    if !was_open workspace_touch(workspace, index);
+    workspace_refresh_imports(workspace);
+    return index;
+}
+
+#memory {
+    reads(workspace, source),
+    writes(workspace),
+    invalidates(workspace),
+    noescape(workspace, source),
+}
+#public workspace_change :: (
+    workspace: *Workspace, index: ssize, source: string, version: ssize,
+) -> bool {
+    if index < 0 || index >= workspace.files.count return false;
+    if !workspace.files[index].open || version <= workspace.files[index].version return false;
+    if !workspace_replace_source(workspace, index, source) return false;
+    workspace.files[index].version = version;
+    workspace_refresh_relevance(workspace);
+    return true;
+}
+
+#memory { reads(workspace), writes(workspace), invalidates(workspace), noescape(workspace) }
+workspace_reload :: (workspace: *Workspace, index: ssize) {
+    if workspace.files[index].open return;
+    path := workspace.files[index].path.clone();
+    defer path.free();
+    if read_file_up_to(path, workspace.source_limit + 1) == {
+        case .Ok(source);
+            defer source.free();
+            if workspace_replace_source(workspace, index, source) return;
+        case .Err;
+    }
+    workspace_unload(workspace, index);
+}
+
+#memory { reads(workspace), writes(workspace), invalidates(workspace), noescape(workspace) }
+#public workspace_close :: (workspace: *Workspace, index: ssize) {
+    if index < 0 || index >= workspace.files.count return;
+    workspace.files[index].open = false;
+    workspace_reload(workspace, index);
+    workspace_refresh_imports(workspace);
+}
+
+workspace_import_path :: (raw: string) -> string {
+    out: String_Builder;
+    at: ssize = 0;
+    while at < raw.count {
+        byte := workspace_byte(raw, at);
+        if byte == #char "\\" {
+            at += 1;
+            byte = workspace_byte(raw, at);
+            if byte == {
+                case #char "\\", #char "\"", #char "/";
+                case #char "n"; byte = #char "\n";
+                case #char "r"; byte = #char "\r";
+                case #char "t"; byte = #char "\t";
+                case #char "x";
+                    high := workspace_hex(workspace_byte(raw, at + 1));
+                    low := workspace_hex(workspace_byte(raw, at + 2));
+                    if high < 0 || low < 0 return "".clone();
+                    byte = cast(u8)(high * 16 + low);
+                    at += 2;
+                case #char "u";
+                    if workspace_byte(raw, at + 1) != #char "{" return "".clone();
+                    at += 2;
+                    scalar: u32 = 0;
+                    digits: ssize = 0;
+                    while workspace_byte(raw, at) != #char "}" {
+                        digit := workspace_hex(workspace_byte(raw, at));
+                        if digit < 0 || digits >= 6 return "".clone();
+                        scalar = scalar * 16 + cast(u32)digit;
+                        digits += 1;
+                        at += 1;
+                    }
+                    if digits == 0 || scalar == 0 || scalar > 16#10_ffff ||
+                       (scalar >= 16#d800 && scalar <= 16#dfff) return "".clone();
+                    _ := out.write_rune(cast(rune)scalar);
+                    at += 1;
+                    continue;
+                else; return "".clone();
+            }
+        }
+        if byte == 0 return "".clone();
+        out.write_byte(byte);
+        at += 1;
+    }
+    return out.into_string();
+}
+
+workspace_valid_module :: (name: string) -> bool {
+    if name.count == 0 return false;
+    start: ssize = 0;
+    for at: 0..name.count + 1 {
+        byte := workspace_byte(name, at);
+        if byte == #char "\\" || byte == #char ":" return false;
+        if at < name.count && byte != #char "/" continue;
+        component := name.substring_view(start, at);
+        if component.count == 0 || component == "." || component == ".." return false;
+        start = at + 1;
+    }
+    return true;
+}
+
+#memory {
+    reads(workspace, path),
+    writes(workspace),
+    invalidates(workspace),
+    noescape(workspace, path),
+}
+workspace_candidate :: (workspace: *Workspace, path: string) -> ssize {
+    normalized := workspace_normalize_path(path);
+    defer normalized.free();
+    index := workspace_find_path(workspace, normalized);
+    if index >= 0 && workspace.files[index].active return index;
+    if !os_fs_is_regular_file(normalized) return -1;
+    return workspace_load(workspace, normalized);
+}
+
+workspace_candidate_exists :: (workspace: *const Workspace, path: string) -> bool {
+    normalized := workspace_normalize_path(path);
+    defer normalized.free();
+    index := workspace_find_path(workspace, normalized);
+    return (index >= 0 && workspace.files[index].active) || os_fs_is_regular_file(normalized);
+}
+
+#memory {
+    reads(workspace, root, name),
+    writes(workspace),
+    invalidates(workspace),
+    noescape(workspace, root, name),
+}
+workspace_module :: (workspace: *Workspace, root: string, name: string) -> ssize {
+    if root.count == 0 return -1;
+    base := path_join(root, name);
+    defer base.free();
+    builder: String_Builder;
+    builder.write_string(base);
+    builder.write_string(".glo");
+    entry := path_join(base, "module.glo");
+    defer entry.free();
+    single := workspace_candidate_exists(workspace, builder.to_string());
+    directory := workspace_candidate_exists(workspace, entry);
+    if single && directory return -2;
+    if single return workspace_candidate(workspace, builder.to_string());
+    return workspace_candidate(workspace, entry);
+}
+
+#memory {
+    reads(workspace, source_path, declaration),
+    writes(workspace),
+    invalidates(workspace),
+    noescape(workspace, source_path, declaration),
+}
+workspace_resolve_import :: (
+    workspace: *Workspace, source_path: string, declaration: Syntax_Import,
+) -> ssize {
+    if declaration.embedded && !declaration.load return -1;
+    name := workspace_import_path(declaration.path);
+    defer name.free();
+    if name.count == 0 return -1;
+    if declaration.load || declaration.exported {
+        path := path_join(path_dirname(source_path), name);
+        defer path.free();
+        return workspace_candidate(workspace, path);
+    }
+    if !workspace_valid_module(name) return -1;
+    index := workspace_module(workspace, workspace.std_path, name);
+    if index != -1 return index;
+    // Configured module roots follow the compiler's standard-library precedence.
+    for i: 0..workspace.import_paths.count {
+        root := workspace.import_paths[i].clone();
+        defer root.free();
+        index = workspace_module(workspace, root, name);
+        if index != -1 return index;
+    }
+    for i: 0..workspace.roots.count {
+        root := workspace.roots[i].clone();
+        defer root.free();
+        index = workspace_module(workspace, root, name);
+        if index != -1 return index;
+    }
+    return -1;
+}
+
+#memory { reads(workspace), writes(workspace), invalidates(workspace), noescape(workspace) }
+#public workspace_rebuild_imports :: (workspace: *Workspace, index: ssize) {
+    previous := workspace.files[index].imports.take();
+    source_path := workspace.files[index].path.clone();
+    defer source_path.free();
+    count := workspace.files[index].syntax.imports.count;
+    for i: 0..count {
+        // Loading may grow files; retain indices instead of pointers into the array.
+        declaration := workspace.files[index].syntax.imports[i];
+        target := workspace_resolve_import(workspace, source_path, declaration);
+        ambiguous := target == -2;
+        if target < 0 target = -1;
+        workspace.files[index].imports.push(.{
+            .declaration = i, .target = target, .ambiguous = ambiguous,
+        });
+    }
+    changed := previous.count != workspace.files[index].imports.count;
+    if !changed {
+        for i: 0..previous.count {
+            current := workspace.files[index].imports[i];
+            if previous[i].target != current.target || previous[i].ambiguous != current.ambiguous
+                changed = true;
+        }
+    }
+    if changed workspace_touch(workspace, index);
+}
+
+#memory { reads(workspace), writes(workspace), invalidates(workspace), noescape(workspace) }
+#public workspace_refresh_imports :: (workspace: *Workspace) {
+    count := workspace.files.count;
+    for i: 0..count {
+        if workspace.files[i].active workspace_rebuild_imports(workspace, i);
+    }
+    workspace_refresh_relevance(workspace);
+}
+
+/// Visible project files and their dependencies; cached orphan files retain their IDs.
+#memory { reads(workspace), writes(workspace), noescape(workspace) }
+#public workspace_refresh_relevance :: (workspace: *Workspace) {
+    for i: 0..workspace.files.count {
+        file := &workspace.files[i];
+        file.relevant = file.active && (file.open || i == workspace.prelude);
+        if !file.active continue;
+        for root: workspace.roots {
+            if file.path.count > 0 && path_lexically_contains(root, file.path)
+                file.relevant = true;
+        }
+    }
+    changed := true;
+    while changed {
+        changed = false;
+        for i: 0..workspace.files.count {
+            if !workspace.files[i].relevant continue;
+            for edge: workspace.files[i].imports {
+                if edge.target < 0 || !workspace.files[edge.target].active ||
+                   workspace.files[edge.target].relevant continue;
+                workspace.files[edge.target].relevant = true;
+                changed = true;
+            }
+        }
+    }
+}
+
+#public workspace_file_relevant :: (workspace: *const Workspace, index: ssize) -> bool {
+    return index >= 0 && index < workspace.files.count && workspace.files[index].relevant;
+}
+
+/// Open buffers take precedence over watched disk changes, including deletions.
+#memory {
+    reads(workspace, uri),
+    writes(workspace),
+    invalidates(workspace),
+    noescape(workspace, uri),
+}
+#public workspace_watch :: (workspace: *Workspace, uri: string) {
+    index := workspace_find(workspace, uri);
+    if index >= 0 workspace_reload(workspace, index);
+    else {
+        path := workspace_uri_to_path(uri);
+        defer path.free();
+        if path.count > 0 && workspace_suffix(path, ".glo") _ := workspace_load(workspace, path);
+    }
+    workspace_refresh_imports(workspace);
+}
+
+workspace_walk_visit :: (path: string, entry: Directory_Entry, depth: ssize) -> Walk_Control {
+    if #pattern.Some(pointer) = context.user_ptr {
+        workspace := cast(*Workspace)pointer;
+        if workspace.files.count >= workspace.file_limit {
+            workspace.truncated = true;
+            return .Stop;
+        }
+        if entry.kind == File_Kind.Directory {
+            if depth >= 64 return .Skip_Directory;
+            if #partial entry.name == {
+                case ".git", ".hg", ".svn", "build", "node_modules", ".cache";
+                    return .Skip_Directory;
+            }
+        }
+        if entry.kind == File_Kind.Regular && workspace_suffix(path, ".glo")
+            _ := workspace_load(workspace, path);
+    }
+    return .Continue;
+}
+
+#memory {
+    reads(workspace, uri),
+    writes(workspace),
+    invalidates(workspace),
+    noescape(workspace, uri),
+}
+#public workspace_add_root :: (workspace: *Workspace, uri: string) {
+    path := workspace_uri_to_path(uri);
+    defer path.free();
+    if path.count == 0 return;
+    for root: workspace.roots {
+        if root == path return;
+    }
+    workspace.roots.push(path.clone());
+    workspace.revision += 1;
+    workspace.generation = workspace.revision;
+    workspace_refresh_imports(workspace);
+}
+
+#memory {
+    reads(workspace, uri),
+    writes(workspace),
+    invalidates(workspace),
+    noescape(workspace, uri),
+}
+#public workspace_remove_root :: (workspace: *Workspace, uri: string) {
+    path := workspace_uri_to_path(uri);
+    defer path.free();
+    for i: 0..workspace.roots.count {
+        if workspace.roots[i] != path continue;
+        workspace.roots[i].free();
+        for next: i + 1..workspace.roots.count
+            workspace.roots[next - 1] = workspace.roots[next];
+        workspace.roots.count -= 1;
+        workspace.revision += 1;
+        workspace.generation = workspace.revision;
+        workspace_refresh_imports(workspace);
+        return;
+    }
+}
+
+#memory {
+    reads(workspace, uri),
+    writes(workspace),
+    invalidates(workspace),
+    noescape(workspace, uri),
+}
+#public workspace_scan_root :: (workspace: *Workspace, uri: string) {
+    workspace_add_root(workspace, uri);
+    path := workspace_uri_to_path(uri);
+    defer path.free();
+    if path.count == 0 || !os_fs_is_directory(path) return;
+    scoped := context;
+    scoped.user_ptr = .Some(cast(*void)workspace);
+    #push_context scoped {
+        _ := walk(path, workspace_walk_visit);
+    }
+    workspace_refresh_imports(workspace);
+}

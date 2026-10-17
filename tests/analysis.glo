@@ -1,0 +1,305 @@
+#load "../src/analysis.glo";
+#load "../src/model.glo";
+#load "../src/workspace.glo";
+#import "Io";
+#import "String_Builder";
+
+find_text :: (text: string, needle: string, from: ssize = 0) -> ssize {
+    for at: from..text.count - needle.count + 1 {
+        if text.substring(at, at + needle.count) == needle return at;
+    }
+    return -1;
+}
+
+symbol_named :: (workspace: *const Workspace, file: ssize, name: string) -> Symbol_Id {
+    for i: 0..workspace.files[file].syntax.symbols.count {
+        if workspace.files[file].syntax.symbols[i].name == name
+            return .{ .file = file, .symbol = i };
+    }
+    return .{};
+}
+
+type_text :: (workspace: *Workspace, symbol: Symbol_Id) -> string {
+    out: String_Builder;
+    analysis_write_type(&out, workspace, analysis_type(workspace, symbol));
+    return out.into_string();
+}
+
+check_slice_types :: () {
+    for bounds: .["start..end", "start..=end", "start..", "..end", "..=end", "..",
+                  "(start..end)", "..(end + 1)", "..=(end + 1)"] {
+        generated: String_Builder;
+        generated.write_string(#string
+            \\Point :: struct { x: ssize; }
+            \\take_text :: (value: string) {}
+            \\take_wide :: (value: string16) {}
+            \\take_points :: (value: []Point) {}
+            \\main :: () {
+            \\    source := "hello"; wide: string16; values: [4]Point;
+            \\    start: ssize = 0; end: ssize = 2;
+        );
+        for name: .["source", "wide", "values"] {
+            generated.write_string(name);
+            generated.write_string("_slice := ");
+            generated.write_string(name);
+            generated.write_string("[");
+            generated.write_string(bounds);
+            generated.write_string("];\n");
+        }
+        generated.write_string(#string
+            \\    take_text(source_slice); take_wide(wide_slice); take_points(values_slice);
+            \\    source_byte := source[0]; wide_unit := wide[0]; point := values[0];
+            \\    point.x; values_slice[0].x;
+            \\    take_text(source[0]); take_points(values[0]);
+            \\}
+        );
+        source := generated.into_string();
+        defer source.free();
+        workspace: Workspace;
+        defer workspace_destroy(&workspace);
+        file := workspace_open(&workspace, "file:///tmp/glolsp-analysis/slices.glo", source, 1);
+        analyze_workspace(&workspace);
+        #assert workspace.files[file].syntax.language.diagnostics.count == 0;
+        #assert workspace.files[file].semantic.diagnostics.count == 2;
+        for name: .["source_slice", "wide_slice", "values_slice", "source_byte", "wide_unit"] {
+            inferred := type_text(&workspace, symbol_named(&workspace, file, name));
+            defer inferred.free();
+            expected := "string";
+            if name == {
+                case "wide_slice"; expected = "string16";
+                case "values_slice"; expected = "[]Point";
+                case "source_byte"; expected = "u8";
+                case "wide_unit"; expected = "u16";
+                else; {}
+            }
+            if inferred != expected print("%[%]: expected %, got %\n", name, bounds,
+                expected, inferred);
+            #assert inferred == expected;
+        }
+        x := symbol_named(&workspace, file, "x");
+        for access: .["point.x", "values_slice[0].x"] {
+            #assert analysis_same_symbol(analysis_symbol_at(&workspace, file,
+                find_text(source, access) + access.count - 1), x);
+        }
+    }
+}
+
+main :: () {
+    check_slice_types();
+    workspace: Workspace;
+    defer workspace_destroy(&workspace);
+    source := #string
+        \\Point :: struct { x: ssize; y: ssize; }
+        \\Child :: struct { point: Point; }
+        \\Alias :: Point;
+        \\Box :: struct { value: $T; }
+        \\Container :: struct($T: type) { value: T; }
+        \\Option :: union($T: type) { Some(T); None; }
+        \\Result :: union($E: type, $T: type) { Ok(T); Err(E); }
+        \\Style :: enum { Native; Unix; }
+        \\join :: (parts: ...string, style: Style = .Native) -> string { return ""; }
+        \\pick :: (parts: ...string, flag: bool = false) -> Point { result: Point; return result; }
+        \\pick :: (flag: bool) -> Child { result: Child; return result; }
+        \\identity :: (value: $T) -> T { return value; }
+        \\make :: () -> Point { return .{ .x = 1, .y = 2 }; }
+        \\pair :: () -> (Point, Child) { point: Point; child: Child; return point, child; }
+        \\select :: (value: string) -> Child { result: Child; return result; }
+        \\select :: (value: s64) -> Point { return make(); }
+        \\Point ::: #public {
+        \\    read :: (#self) -> ssize { return #self.x; }
+        \\}
+        \\main :: () {
+        \\    point: Alias = .{ .x = 1, .y = 2 };
+        \\    child: Child;
+        \\    child.point.x;
+        \\    inferred := make();
+        \\    inferred.x;
+        \\    generic := identity(point);
+        \\    generic.x;
+        \\    boxed: Box(Point);
+        \\    boxed.value.x;
+        \\    container: Container(Point);
+        \\    container.value.x;
+        \\    text := "hello";
+        \\    length := text.count;
+        \\    joined := join("one", "two", "three", .style = Style.Unix);
+        \\    picked := pick("one", "two");
+        \\    picked.x;
+        \\    optional: ?Point;
+        \\    if #pattern .Some(payload) = optional { payload.x; }
+        \\    outcome: string!Point;
+        \\    if #pattern .Ok(success) = outcome { success.x; }
+        \\    first, second := pair();
+        \\    first.x;
+        \\    second.point.x;
+        \\    number: s64 = 1;
+        \\    chosen := select(number);
+        \\    chosen.x;
+        \\    point.read();
+        \\    shadow := point;
+        \\    { shadow: Child; shadow.point; }
+        \\    shadow.x;
+        \\}
+    ;
+    file := workspace_open(&workspace, "file:///tmp/glolsp-analysis/main.glo", source, 1);
+    #assert file >= 0;
+    analyze_workspace(&workspace);
+    #assert workspace.files[file].syntax.language.diagnostics.count == 0;
+    #assert workspace.files[file].semantic.diagnostics.count == 0;
+    x := symbol_named(&workspace, file, "x");
+    for text: .["child.point.x", "inferred.x", "generic.x", "boxed.value.x", "chosen.x"] {
+        offset := find_text(source, text) + text.count - 1;
+        #assert analysis_same_symbol(analysis_symbol_at(&workspace, file, offset), x);
+    }
+    receiver := find_text(source, "#self.x") + 6;
+    #assert analysis_same_symbol(analysis_symbol_at(&workspace, file, receiver), x);
+    read := symbol_named(&workspace, file, "read");
+    #assert analysis_same_symbol(analysis_symbol_at(&workspace, file,
+        find_text(source, "point.read") + 6), read);
+    generic := symbol_named(&workspace, file, "generic");
+    generic_type := type_text(&workspace, generic);
+    defer generic_type.free();
+    #assert generic_type == "Point";
+    boxed := symbol_named(&workspace, file, "boxed");
+    boxed_type := type_text(&workspace, boxed);
+    defer boxed_type.free();
+    #assert boxed_type == "Box(Point)";
+    container := symbol_named(&workspace, file, "container");
+    container_type := type_text(&workspace, container);
+    defer container_type.free();
+    #assert container_type == "Container(Point)";
+    #assert analysis_same_symbol(analysis_symbol_at(&workspace, file,
+        find_text(source, "container.value.x") + 16), x);
+    length := symbol_named(&workspace, file, "length");
+    #assert analysis_type_name(&workspace, analysis_type(&workspace, length)) == "ssize";
+    #assert analysis_same_symbol(analysis_symbol_at(&workspace, file,
+        find_text(source, "picked.x") + 7), x);
+    for needle: .["payload.x", "success.x", "first.x", "second.point.x"] {
+        found := analysis_symbol_at(&workspace, file, find_text(source, needle) + needle.count - 1);
+        if !analysis_same_symbol(found, x) print("failed member resolution: %\n", needle);
+        #assert analysis_same_symbol(found, x);
+    }
+    outside := analysis_symbol_at(&workspace, file, find_text(source, "shadow.x"));
+    inside := analysis_symbol_at(&workspace, file, find_text(source, "shadow.point"));
+    #assert !analysis_same_symbol(outside, inside);
+    count := workspace.types.count;
+    analyze_workspace(&workspace);
+    #assert workspace.types.count == count;
+
+    dependency := #string
+        \\#public Item :: struct { value: ssize; }
+        \\#public create :: () -> Item { return .{ .value = 1 }; }
+        \\secret :: 1;
+    ;
+    dep := workspace_open(&workspace, "file:///tmp/glolsp-analysis/dep.glo", dependency, 1);
+    module := #string
+        \\#export "dep.glo";
+    ;
+    _ := workspace_open(&workspace, "file:///tmp/glolsp-analysis/module.glo", module, 1);
+    caller_source := #string
+        \\Local :: #load "module.glo";
+        \\#load "module.glo";
+        \\main :: () {
+        \\    item := Local.create();
+        \\    item.value;
+        \\    create();
+        \\    secret;
+        \\}
+    ;
+    caller := workspace_open(&workspace, "file:///tmp/glolsp-analysis/caller.glo",
+        caller_source, 1);
+    analyze_workspace(&workspace);
+    create := symbol_named(&workspace, dep, "create");
+    #assert analysis_same_symbol(analysis_symbol_at(&workspace, caller,
+        find_text(caller_source, "Local.create") + 6), create);
+    #assert analysis_same_symbol(analysis_symbol_at(&workspace, caller,
+        find_text(caller_source, "    create();") + 4), create);
+    value := symbol_named(&workspace, dep, "value");
+    #assert analysis_same_symbol(analysis_symbol_at(&workspace, caller,
+        find_text(caller_source, "item.value") + 5), value);
+    #assert analysis_symbol_at(&workspace, caller, find_text(caller_source, "secret;")).symbol < 0;
+    invalid_source := #string
+        \\Point :: struct { x: ssize; }
+        \\take :: (value: bool) {}
+        \\main :: () {
+        \\    point: Point;
+        \\    point.missing;
+        \\    unknown;
+        \\    value: bool = "wrong";
+        \\    value = "wrong";
+        \\    take("wrong");
+        \\}
+    ;
+    invalid := workspace_open(&workspace, "file:///tmp/glolsp-analysis/invalid.glo",
+        invalid_source, 1);
+    analyze_workspace(&workspace);
+    #assert workspace.files[invalid].semantic.diagnostics.count == 5;
+    fragment_source := #string
+        \\#public(unit) shared :: 3;
+        \\hidden :: 4;
+        \\Embedded ::: #public {
+        \\    read :: (#self) -> ssize { return #self.value; }
+        \\}
+    ;
+    fragment := workspace_open(&workspace, "file:///tmp/glolsp-analysis/fragment.glo",
+        fragment_source, 1);
+    owner_source := #string
+        \\#load,embed "fragment.glo";
+        \\#public(unit) Embedded :: struct { value: ssize; }
+        \\main :: () {
+        \\    value: Embedded;
+        \\    value.read();
+        \\    shared;
+        \\    hidden;
+        \\}
+    ;
+    owner := workspace_open(&workspace, "file:///tmp/glolsp-analysis/owner.glo", owner_source, 1);
+    analyze_workspace(&workspace);
+    shared := symbol_named(&workspace, fragment, "shared");
+    #assert analysis_same_symbol(analysis_symbol_at(&workspace, owner,
+        find_text(owner_source, "    shared;") + 4), shared);
+    #assert analysis_symbol_at(&workspace, owner, find_text(owner_source, "hidden;")).symbol < 0;
+    method := symbol_named(&workspace, fragment, "read");
+    #assert analysis_same_symbol(analysis_symbol_at(&workspace, owner,
+        find_text(owner_source, "value.read") + 6), method);
+    member := symbol_named(&workspace, owner, "value");
+    #assert analysis_same_symbol(analysis_symbol_at(&workspace, fragment,
+        find_text(fragment_source, "#self.value") + 6), member);
+    variadic_invalid := #string
+        \\Style :: enum { Native; Unix; }
+        \\join :: (parts: ...string, style: Style = .Native) -> string { return ""; }
+        \\main :: () {
+        \\    join("one", false);
+        \\    join("one", .style = "wrong");
+        \\}
+    ;
+    variadic := workspace_open(&workspace, "file:///tmp/glolsp-analysis/variadic.glo",
+        variadic_invalid, 1);
+    analyze_workspace(&workspace);
+    #assert workspace.files[variadic].semantic.diagnostics.count == 2;
+
+    standard: Workspace;
+    workspace_init(&standard);
+    defer workspace_destroy(&standard);
+    standard_source := #string
+        \\#import "File_System/File";
+        \\#import "Serialization/Json";
+        \\#import "Serialization/Core";
+        \\main :: () {
+        \\    input := File.stdin();
+        \\    output := File.stdout();
+        \\    errors := File.stderr();
+        \\    Serialization_Document.json_document_from_string("{}");
+        \\}
+    ;
+    standard_file := workspace_open(&standard, "file:///tmp/glolsp-analysis/standard.glo",
+        standard_source, 1);
+    analyze_workspace(&standard);
+    #assert standard.files[standard_file].semantic.diagnostics.count == 0;
+    for name: .["stdin", "stdout", "stderr", "json_document_from_string"] {
+        id := analysis_symbol_at(&standard, standard_file, find_text(standard_source, name));
+        #assert id.symbol >= 0;
+        #assert standard.files[id.file].syntax.symbols[id.symbol].name == name;
+    }
+    print("workspace semantic analysis passed\n");
+}

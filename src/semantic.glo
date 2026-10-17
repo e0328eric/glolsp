@@ -1,0 +1,235 @@
+//! Semantic token output. The position cursor only moves forward through the
+//! source; multiline tokens are emitted as one UTF-16 span per physical line.
+#import "String_Builder";
+#import "Strings";
+#load "language.glo";
+#load "protocol.glo";
+
+#public Semantic_Style :: struct { token_type: ssize = -1; modifiers: ssize; }
+
+Semantic_Index :: struct { heads: [..]ssize; next: [..]ssize; }
+
+#public Semantic_Cursor :: struct {
+    byte: ssize;
+    line: ssize;
+    character: ssize;
+    previous_line: ssize;
+    previous_character: ssize;
+    emitted: bool;
+}
+
+#public semantic_advance :: (source: string, cursor: *Semantic_Cursor, target: ssize) {
+    while cursor.byte < target && cursor.byte < source.count {
+        byte := source[cursor.byte];
+        if byte == #char "\r" || byte == #char "\n" {
+            cursor.byte += 1;
+            if byte == #char "\r" && cursor.byte < source.count &&
+               source[cursor.byte] == #char "\n"
+                cursor.byte += 1;
+            cursor.line += 1;
+            cursor.character = 0;
+        } else if #pattern .Some(decoded) = source.decode_at(cursor.byte) {
+            cursor.byte = decoded.next;
+            cursor.character += 1;
+            if cast(u32)decoded.rune > 65535 cursor.character += 1;
+        } else {
+            cursor.byte += 1;
+            cursor.character += 1;
+        }
+    }
+}
+
+#public semantic_emit_span :: (
+    out: *String_Builder, cursor: *Semantic_Cursor, line: ssize, character: ssize,
+    length: ssize, style: Semantic_Style,
+) {
+    if length <= 0 || style.token_type < 0 return;
+    if cursor.emitted out.write_byte(#char ",");
+    delta_line := line - cursor.previous_line;
+    delta_character := character;
+    if delta_line == 0 delta_character -= cursor.previous_character;
+    write_json_integer(out, delta_line);
+    out.write_byte(#char ",");
+    write_json_integer(out, delta_character);
+    out.write_byte(#char ",");
+    write_json_integer(out, length);
+    out.write_byte(#char ",");
+    write_json_integer(out, style.token_type);
+    out.write_byte(#char ",");
+    write_json_integer(out, style.modifiers);
+    cursor.previous_line = line;
+    cursor.previous_character = character;
+    cursor.emitted = true;
+}
+
+semantic_symbol_styles :: (analysis: *const Language_Analysis) -> [..]Semantic_Style {
+    styles: [..]Semantic_Style;
+    procedures: [..]ssize;
+    for i: 0..analysis.symbols.count {
+        symbol := analysis.symbols[i];
+        while procedures.count > 0 {
+            parent := analysis.symbols[procedures[procedures.count - 1]];
+            if symbol.start < parent.end break;
+            procedures.count -= 1;
+        }
+        style: Semantic_Style = .{ .token_type = 3 };
+        if symbol.kind == {
+            case 2; style.token_type = 0;
+            case 10, 11, 23, 26; style.token_type = 1;
+            case 12, 6; style.token_type = 2;
+            case 8; style.token_type = 5;
+            case 14, 22; style.modifiers = 2;
+            else;
+        }
+        if symbol.kind == 13 && procedures.count > 0 {
+            parent := analysis.symbols[procedures[procedures.count - 1]];
+            if symbol.start < parent.start + parent.detail.count style.token_type = 4;
+        }
+        if symbol.kind == 12 procedures.push(i);
+        styles.push(style);
+    }
+    return styles;
+}
+
+#public semantic_builtin_type :: (name: string) -> bool {
+    return language_builtin_type(name);
+}
+
+semantic_name_hash :: (name: string, capacity: ssize) -> ssize {
+    hash: ssize = 0;
+    for byte: name.bytes() hash = (hash * 31 + cast(ssize)byte) % capacity;
+    return hash;
+}
+
+// Group declarations by name once. Each identifier lookup then visits only
+// declarations with that spelling, instead of rescanning the whole document.
+semantic_make_index :: (analysis: *const Language_Analysis) -> Semantic_Index {
+    result: Semantic_Index;
+    capacity: ssize = 8;
+    while capacity < analysis.symbols.count * 2 capacity *= 2;
+    result.heads.reserve(capacity);
+    for i: 0..capacity result.heads.push(-1);
+    for i: 0..analysis.symbols.count {
+        name := analysis.symbols[i].name;
+        bucket := semantic_name_hash(name, capacity);
+        while result.heads[bucket] >= 0 && analysis.symbols[result.heads[bucket]].name != name
+            bucket = (bucket + 1) % capacity;
+        result.next.push(result.heads[bucket]);
+        result.heads[bucket] = i;
+    }
+    return result;
+}
+
+semantic_resolve :: (
+    analysis: *const Language_Analysis, names: *const Semantic_Index,
+    name: string, offset: ssize, source_count: ssize,
+) -> ssize {
+    bucket := semantic_name_hash(name, names.heads.count);
+    while names.heads[bucket] >= 0 && analysis.symbols[names.heads[bucket]].name != name
+        bucket = (bucket + 1) % names.heads.count;
+    index := names.heads[bucket];
+    best: ssize = -1;
+    best_scope := source_count + 1;
+    while index >= 0 {
+        symbol := analysis.symbols[index];
+        if offset >= symbol.selection_start && offset < symbol.selection_end return index;
+        if offset >= symbol.scope_start && offset <= symbol.scope_end &&
+           !(symbol.kind == 13 && symbol.scope_start > 0 && symbol.selection_start > offset) {
+            span := symbol.scope_end - symbol.scope_start;
+            if span < best_scope || (span == best_scope && best >= 0 &&
+                symbol.selection_start <= offset &&
+                symbol.selection_start > analysis.symbols[best].selection_start) {
+                best = index;
+                best_scope = span;
+            }
+        }
+        index = names.next[index];
+    }
+    return best;
+}
+
+semantic_identifier_style :: (
+    source: string, analysis: *const Language_Analysis, styles: []Semantic_Style,
+    names: *const Semantic_Index, index: ssize,
+) -> Semantic_Style {
+    token := analysis.tokens[index];
+    name := source[token.start..token.end];
+    previous := index - 1;
+    while previous >= 0 && analysis.tokens[previous].kind == 4 previous -= 1;
+    if previous >= 0 {
+        before := analysis.tokens[previous];
+        if source[before.start..before.end] == "." return .{ .token_type = 5 };
+    }
+    symbol_index := semantic_resolve(analysis, names, name, token.start, source.count);
+    if symbol_index >= 0 {
+        style := styles[symbol_index];
+        if analysis.symbols[symbol_index].selection_start == token.start style.modifiers |= 1;
+        return style;
+    }
+    if semantic_builtin_type(name) return .{ .token_type = 1 };
+    if name == {
+        case "true", "false", "null", "typeclass", "instance", "distinct", "opaque";
+            return .{ .token_type = 6 };
+        else;
+    }
+    next := index + 1;
+    while next < analysis.tokens.count && analysis.tokens[next].kind == 4 next += 1;
+    if next < analysis.tokens.count {
+        after := analysis.tokens[next];
+        if source[after.start..after.end] == "(" return .{ .token_type = 2 };
+    }
+    return .{ .token_type = 3 };
+}
+
+/// Legend: namespace,type,function,variable,parameter,property,keyword,comment,
+/// string,number,operator,macro. Modifier bits: declaration=1, readonly=2.
+#public #memory {
+    invalidates(out), reads(out, source, analysis), writes(out), noescape(out, source, analysis)
+}
+write_semantic_tokens :: (
+    out: *String_Builder, source: string, analysis: *const Language_Analysis,
+) {
+    styles := semantic_symbol_styles(analysis);
+    names := semantic_make_index(analysis);
+    cursor: Semantic_Cursor;
+    out.write_string("{\"data\":[");
+    for index: 0..analysis.tokens.count {
+        token := analysis.tokens[index];
+        style: Semantic_Style;
+        if token.kind == {
+            case 1;
+                style = semantic_identifier_style(source, analysis, styles.view(), &names, index);
+            case 2; style.token_type = 9;
+            case 3; style.token_type = 8;
+            case 4; style.token_type = 7;
+            case 5; style.token_type = 6;
+            case 7;
+                style.token_type = 11;
+                name := source[token.start..token.end];
+                if name == {
+                    case "#self"; style.token_type = 4;
+                    case "#Self_Type", "#Never"; style.token_type = 1;
+                    else;
+                }
+            else;
+                text := source[token.start..token.end];
+                if text == {
+                    case "(", ")", "{", "}", "[", "]", ";", ",", ".";
+                    else; style.token_type = 10;
+                }
+        }
+        semantic_advance(source, &cursor, token.start);
+        while cursor.byte < token.end {
+            start_line := cursor.line;
+            start_character := cursor.character;
+            end := cursor.byte;
+            while end < token.end && source[end] != #char "\r" &&
+                  source[end] != #char "\n" end += 1;
+            semantic_advance(source, &cursor, end);
+            length := cursor.character - start_character;
+            semantic_emit_span(out, &cursor, start_line, start_character, length, style);
+            if cursor.byte < token.end semantic_advance(source, &cursor, cursor.byte + 1);
+        }
+    }
+    out.write_string("]}");
+}
