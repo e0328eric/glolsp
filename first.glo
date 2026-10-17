@@ -39,10 +39,8 @@ glolsp_build :: (
     options := workspace.get_build_options();
     options.output_path = "build";
     options.output_executable_name = name;
-    #if OUT.os == Target_OS.Windows options.output_executable_name = tprint("%.exe", name);
 
     // Keep runtime bounds and overflow guards enabled in the server.
-    options.set_color(.Never);
     options.set_temp_allocator_size(64 * 1024 * 1024);
     if strict options.borrow_check = .Error;
     options.add_compiler_arg(tprint("--cache-dir=%", cache_path));
