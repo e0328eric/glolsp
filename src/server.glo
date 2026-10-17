@@ -600,15 +600,12 @@ server_process :: (server: *Server, output: *File, message: *Json) -> s32 {
             continue;
             else;
             error_output := File.stderr();
-            #on_drop_error(error_output, error) {}
             _ := error_output.write("glolsp: unsupported argument (use --help)\n");
             return 1;
         }
     }
     input := File.stdin();
-    #on_drop_error(input, error) {}
     output := File.stdout();
-    #on_drop_error(output, error) {}
     server: Server;
     workspace_init(&server.workspace);
     while true {

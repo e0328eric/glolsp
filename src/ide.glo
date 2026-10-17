@@ -645,7 +645,7 @@ ide_spelling_distance :: (left: string, right: string) -> ssize {
             ) > 2 continue;
             if count > 0 out.write_byte(#char ",");
             count += 1;
-            title := tprint("Change '%' to '%'", misspelled, symbol.name);
+            title := tprint("Change '{}' to '{}'", misspelled, symbol.name);
             out.write_string("{\"kind\":\"quickfix\",\"title\":");
             write_json_string(out, title);
             out.write_string(",\"edit\":{\"changes\":{");
@@ -678,7 +678,7 @@ ide_spelling_distance :: (left: string, right: string) -> ssize {
                         if count > 0 out.write_byte(#char ",");
                         count += 1;
                         out.write_string("{\"kind\":\"quickfix\",\"title\":");
-                        write_json_string(out, tprint("Import '%' from '%'", misspelled, path));
+                        write_json_string(out, tprint("Import '{}' from '{}'", misspelled, path));
                         out.write_string(",\"edit\":{\"changes\":{");
                         write_json_string(out, workspace.files[file].uri);
                         out.write_string(":[{\"range\":");

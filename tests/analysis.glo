@@ -72,7 +72,7 @@ check_slice_types :: () {
                 case "wide_unit"; expected = "u16";
                 else; {}
             }
-            if inferred != expected print("%[%]: expected %, got %\n", name, bounds,
+            if inferred != expected print("{}[{}]: expected {}, got {}\n", name, bounds,
                 expected, inferred);
             #assert inferred == expected;
         }
@@ -176,7 +176,7 @@ main :: () {
         find_text(source, "picked.x") + 7), x);
     for needle: .["payload.x", "success.x", "first.x", "second.point.x"] {
         found := analysis_symbol_at(&workspace, file, find_text(source, needle) + needle.count - 1);
-        if !analysis_same_symbol(found, x) print("failed member resolution: %\n", needle);
+        if !analysis_same_symbol(found, x) print("failed member resolution: {}\n", needle);
         #assert analysis_same_symbol(found, x);
     }
     outside := analysis_symbol_at(&workspace, file, find_text(source, "shadow.x"));

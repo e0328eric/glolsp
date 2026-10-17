@@ -37,7 +37,7 @@ main :: () {
     ;
     file := parse_file(source);
     if file.language.diagnostics.count > 0 {
-        for diagnostic: file.language.diagnostics print("% at %\n", diagnostic.message,
+        for diagnostic: file.language.diagnostics print("{} at {}\n", diagnostic.message,
             diagnostic.start);
     }
     #assert file.language.diagnostics.count == 0;

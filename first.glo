@@ -13,8 +13,8 @@
 #import "Typeclass/Error";
 
 glolsp_executable :: (name: string = "glolsp") -> string {
-    #if OUT.os == Target_OS.Windows return tprint("build/%.exe", name);
-    else return tprint("build/%", name);
+    #if OUT.os == Target_OS.Windows return tprint("build/{}.exe", name);
+    else return tprint("build/{}", name);
 }
 
 glolsp_build :: (
@@ -43,11 +43,11 @@ glolsp_build :: (
     // Keep runtime bounds and overflow guards enabled in the server.
     options.set_temp_allocator_size(64 * 1024 * 1024);
     if strict options.borrow_check = .Error;
-    options.add_compiler_arg(tprint("--cache-dir=%", cache_path));
+    options.add_compiler_arg(tprint("--cache-dir={}", cache_path));
     options.set_build_options(workspace);
     built := add_build_file(source, workspace);
     if #pattern .Err(failure) = built {
-        print("Glosso build failed for %:\n", source);
+        print("Glosso build failed for {}:\n", source);
         report_error(failure);
         return false;
     }
@@ -91,18 +91,18 @@ glolsp_task :: () {
         return;
     }
     if task != "build" && task != "run" && task != "test" {
-        print("unknown task: %\n\n", task);
+        print("unknown task: {}\n\n", task);
         glolsp_task_usage();
         exit(1);
     }
     if task != "run" && args.count > 1 {
-        print("the % task does not accept arguments\n", task);
+        print("the {} task does not accept arguments\n", task);
         exit(1);
     }
     if !glolsp_build() exit(1);
     if task == {
         case "build";
-        print("built %\n", glolsp_executable());
+        print("built {}\n", glolsp_executable());
         return;
         case "run";
         command := Command.command_make(glolsp_executable());
@@ -118,8 +118,8 @@ glolsp_task :: () {
 
 glolsp_test :: () {
     for unit: .["language", "protocol", "semantic", "syntax", "layout", "workspace", "analysis"] {
-        name := tprint("%-tests", unit);
-        source := tprint("tests/%.glo", unit);
+        name := tprint("{}-tests", unit);
+        source := tprint("tests/{}.glo", unit);
         strict := unit != "workspace" && unit != "analysis";
         if !glolsp_build(source, name, strict) exit(1);
         unit_command := Command.command_make(glolsp_executable(name));

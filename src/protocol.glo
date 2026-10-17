@@ -128,7 +128,7 @@
     }
 
     write_json_integer :: (out: *String_Builder, number: ssize) {
-        out.write_string(tprint("%", number));
+        out.writef("{}", number);
     }
 
     write_json_value :: (out: *String_Builder, value: ?*Json) {
@@ -145,7 +145,7 @@
     }
 
     rpc_send :: (output: *File, body: string) -> bool {
-        header := tprint("Content-Length: %\r\n\r\n", body.count);
+        header := tprint("Content-Length: {}\r\n\r\n", body.count);
         for text: .[header, body] {
             offset: ssize = 0;
             while offset < text.count {
