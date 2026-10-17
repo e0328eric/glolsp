@@ -8,8 +8,8 @@ the adjacent `glosso` and `glosso-manual` repositories.
 Build and test from this repository's root with the installed compiler:
 
 ```sh
-~/.local/glosso/bin/glosso first.glo
-~/.local/glosso/bin/glosso first.glo -- test
+glosso first.glo
+glosso first.glo -- test
 ```
 
 The default task produces `build/glolsp`. The `build`, `run`, `test`, and `help`
