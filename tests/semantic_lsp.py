@@ -144,6 +144,73 @@ class SemanticLspTests(unittest.TestCase):
         hover = self.at("textDocument/hover", uri, "text :=")
         self.assertIn("string", str(hover["contents"]))
 
+    def test_variadic_parameters_are_slices_inside_method_bodies(self):
+        uri = self.write("main.glo", (
+            "Allocator :: struct {}\n"
+            "Path_Style :: enum { Native; Posix; }\n"
+            "Path :: struct { style: Path_Style; }\n"
+            "path_resolve_parts :: (base: string, parts: []const string,\n"
+            "    style: Path_Style = .Native, allocator: Allocator) -> string {\n"
+            "    return base;\n"
+            "}\n"
+            "Path ::: #public {\n"
+            "    joined :: (*const #self, parts: ...string, allocator: Allocator) -> string {\n"
+            "        copied := parts; first := parts[0];\n"
+            "        return path_resolve_parts(first, parts, #self.style, allocator);\n"
+            "    }\n"
+            "}\n"
+            "main :: () {\n"
+            "    path: Path; allocator: Allocator;\n"
+            '    path.joined("one", "two", .allocator = allocator);\n'
+            "    path.joined(.allocator = allocator);\n"
+            "}\n"
+        ))
+        self.initialize()
+        self.open(uri)
+        diagnostics = self.client.request("textDocument/diagnostic", {
+            "textDocument": {"uri": uri},
+        })["items"]
+        self.assertEqual(diagnostics, [])
+        for variable, expected in [("copied", "[]string"), ("first", "string")]:
+            with self.subTest(variable=variable):
+                hover = self.at("textDocument/hover", uri, variable + " :=")
+                self.assertIn(variable + ": " + expected, str(hover["contents"]))
+        definition = self.at("textDocument/definition", uri, "first, parts", offset=7)
+        self.assertEqual(definition, [{
+            "uri": uri, "range": source_range(self.documents[uri], "parts", occurrence=2),
+        }])
+
+    def test_variadic_calls_check_elements_and_expanded_slices(self):
+        uri = self.write("main.glo", (
+            "join :: (parts: ...string, flag: bool = false) {}\n"
+            "forward :: (parts: ...string) { join(parts...); }\n"
+            "main :: () {\n"
+            "    strings: []const string; numbers: []ssize;\n"
+            '    join(); join("one"); join("one", "two", .flag = true);\n'
+            "    join(strings...); forward(strings...);\n"
+            '    join("one", false);\n'
+            '    join("one", .flag = "wrong");\n'
+            "    join(strings); join(numbers...);\n"
+            '    join("scalar"...);\n'
+            "}\n"
+        ))
+        self.initialize()
+        self.open(uri)
+        diagnostics = self.client.request("textDocument/diagnostic", {
+            "textDocument": {"uri": uri},
+        })["items"]
+        expected = [
+            source_range(self.documents[uri], "false", occurrence=1),
+            source_range(self.documents[uri], '"wrong"'),
+            source_range(self.documents[uri], "strings", occurrence=3),
+            source_range(self.documents[uri], "numbers..."),
+            source_range(self.documents[uri], '"scalar"...'),
+        ]
+        self.assertEqual([(item["range"], item["message"]) for item in diagnostics], [
+            (span, "Argument type does not match the procedure parameter.")
+            for span in expected
+        ])
+
     def test_pointer_fields_support_nested_access_addresses_and_indexing(self):
         uri = self.write("main.glo", (
             "Leaf :: struct { value: ssize; }\n"

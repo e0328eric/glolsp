@@ -177,6 +177,23 @@ analysis_call_parameter :: (
     return position;
 }
 
+analysis_call_expected_type :: (
+    workspace: *const Workspace, file: ssize, procedure: Type_Id, index: ssize, argument: ssize,
+) -> Type_Id {
+    expected := workspace.types[procedure].parameters[index];
+    if expected <= 0 || workspace.types[expected].kind != .Array_Type ||
+       analysis_variadic_parameter(workspace, procedure) != index return expected;
+    // A spread supplies the whole pack; each ordinary argument supplies one element.
+    if argument >= 0 {
+        expression := workspace.files[file].syntax.nodes[argument];
+        if expression.kind == .Unary && analysis_text(workspace, file, argument) == "..." {
+            span := workspace.files[file].syntax.language.tokens[expression.token];
+            if span.start > expression.start return expected;
+        }
+    }
+    return workspace.types[expected].element;
+}
+
 #public analysis_call_receiver_offset :: (
     workspace: *Workspace, file: ssize, callee: ssize, procedure: Type_Id,
 ) -> ssize {
@@ -693,7 +710,9 @@ analysis_call_result :: (
         index := analysis_call_parameter(workspace, procedure, argument.name, position);
         actual := analysis_expression_type(workspace, file, argument.value);
         if index >= 0 && index < value.parameters.count {
-            _ := analysis_generic_match(workspace, value.parameters[index], actual, &names, &types);
+            expected := analysis_call_expected_type(workspace, file, procedure, index,
+                argument.value);
+            _ := analysis_generic_match(workspace, expected, actual, &names, &types);
             if argument.label >= 0 {
                 parameter := analysis_parameter_symbol(workspace, procedure, index);
                 analysis_bind(workspace, file, argument.label, parameter);
@@ -760,10 +779,11 @@ analysis_select_overload :: (
             if index < 0 || index >= value.parameters.count score -= 20;
             else {
                 used[index] = true;
-                if analysis_generic_match(workspace, value.parameters[index], actual,
-                    &names, &types) {
+                expected := analysis_call_expected_type(workspace, file, type_id, index,
+                    argument.value);
+                if analysis_generic_match(workspace, expected, actual, &names, &types) {
                     score += 2;
-                    if actual == value.parameters[index] score += 2;
+                    if actual == expected score += 2;
                 } else score -= 10;
             }
             if argument.name.count == 0 position += 1;
@@ -915,6 +935,11 @@ analysis_slice_index :: (workspace: *const Workspace, file: ssize, node: ssize) 
                     else result = analysis_new_type(workspace, .Pointer, "", .{}, element);
                 case "[", "[]", "[..]", "[*]";
                     result = analysis_new_type(workspace, .Array_Type, "", .{}, element);
+                case "...";
+                    span := workspace.files[file].syntax.language.tokens[expression.token];
+                    if span.start == expression.start
+                        result = analysis_new_type(workspace, .Array_Type, "", .{}, element);
+                    else result = element;
                 case "!"; result = analysis_builtin(workspace, "bool");
                 case "cast", "acast";
                     result = analysis_expression_type(workspace, file, expression.type_node);
@@ -1269,7 +1294,8 @@ analysis_diagnostics :: (workspace: *Workspace, file: ssize) {
                 if argument.value >= 0
                     actual = workspace.files[file].semantic.node_types[argument.value];
                 if index >= 0 && index < workspace.types[callee].parameters.count {
-                    expected := workspace.types[callee].parameters[index];
+                    expected := analysis_call_expected_type(workspace, file, callee, index,
+                        argument.value);
                     if !analysis_compatible(workspace, expected, actual) {
                         span := syntax.nodes[argument.value];
                         analysis_add_diagnostic(workspace, file, span.start, span.end,

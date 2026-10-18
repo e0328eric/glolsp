@@ -84,8 +84,54 @@ check_slice_types :: () {
     }
 }
 
+check_variadic_types :: () {
+    source := #string
+        \\Point :: struct { x: ssize; }
+        \\Child :: struct { point: Point; }
+        \\take_parts :: (parts: []const string) {}
+        \\join :: (parts: ...string) {
+        \\    take_parts(parts);
+        \\    copied := parts; first := parts[0]; count := parts.count;
+        \\    join(parts...);
+        \\}
+        \\identity :: (items: ...$T) -> T { return items[0]; }
+        \\pick :: (values: ...string) -> Point { result: Point; return result; }
+        \\pick :: (values: ...bool) -> Child { result: Child; return result; }
+        \\main :: () {
+        \\    strings: []const string; flags: []bool; points: []Point; point: Point;
+        \\    direct := identity(point); spread := identity(points...);
+        \\    direct.x; spread.x;
+        \\    text := pick("one", "two"); texts := pick(strings...);
+        \\    flag := pick(true, false); bools := pick(flags...);
+        \\    text.x; texts.x; flag.point.x; bools.point.x;
+        \\    join(); join("one", "two"); join(strings...);
+        \\}
+    ;
+    workspace: Workspace;
+    defer workspace_destroy(&workspace);
+    file := workspace_open(&workspace, "file:///tmp/glolsp-analysis/variadic-types.glo", source, 1);
+    analyze_workspace(&workspace);
+    #assert workspace.files[file].syntax.language.diagnostics.count == 0;
+    #assert workspace.files[file].semantic.diagnostics.count == 0;
+    for name: .["copied", "first", "count", "direct", "spread", "text", "texts", "flag", "bools"] {
+        inferred := type_text(&workspace, symbol_named(&workspace, file, name));
+        defer inferred.free();
+        expected := "Point";
+        if name == {
+            case "copied"; expected = "[]string";
+            case "first"; expected = "string";
+            case "count"; expected = "ssize";
+            case "flag", "bools"; expected = "Child";
+            else;
+        }
+        if inferred != expected print("{}: expected {}, got {}\n", name, expected, inferred);
+        #assert inferred == expected;
+    }
+}
+
 main :: () {
     check_slice_types();
+    check_variadic_types();
     workspace: Workspace;
     defer workspace_destroy(&workspace);
     source := #string
