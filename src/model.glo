@@ -8,6 +8,7 @@
         Declaration;
         Parameter;
         Pattern_Capture;
+        Pattern_Binding;
         Procedure;
         Struct;
         Union;
@@ -70,6 +71,8 @@
         end: ssize;
         selection_start: ssize;
         selection_end: ssize;
+        // Pattern bindings become visible after their failure block has ended.
+        visible_from: ssize;
     }
 
     Syntax_Scope :: struct {

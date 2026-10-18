@@ -166,6 +166,40 @@ main :: () {
     #assert captured_references == 2 && arm_references == 3;
     destroy_parsed_file(&captures);
 
+    bindings := parse_file(#string
+        \\main :: () {
+        \\    #pattern .Some(home) := home_dir() else { return; };
+        \\    #pattern Point.{ .x = field, ... } := point else { return; };
+        \\    #pattern .[first, second] := items else { return; };
+        \\    #pattern .Some(_) := optional else { return; };
+        \\    #pattern .Some(quoted);
+        \\    if #pattern .Some(branch) = optional { branch; }
+        \\    #pattern .Some(last) := optional else { return; }
+        \\    after := home;
+        \\}
+    );
+    #assert bindings.language.diagnostics.count == 0;
+    body_scope := bindings.symbols[symbol_named(&bindings, "main")].body_scope;
+    for name: .["home", "field", "first", "second", "last"] {
+        index := symbol_named(&bindings, name);
+        #assert index >= 0;
+        symbol := bindings.symbols[index];
+        #assert symbol.scope == body_scope;
+        #assert symbol.visible_from > symbol.selection_end;
+        #assert bindings.nodes[symbol.value_node].kind == .Pattern_Capture;
+    }
+    #assert symbol_named(&bindings, "_") == -1;
+    #assert symbol_named(&bindings, "quoted") == -1;
+    #assert bindings.symbols[symbol_named(&bindings, "branch")].scope != body_scope;
+    #assert bindings.symbols[symbol_named(&bindings, "after")].scope == body_scope;
+    destroy_parsed_file(&bindings);
+
+    incomplete_binding := parse_file(
+        "main :: () { #pattern .Some(value) := optional else; after := 1; }");
+    #assert incomplete_binding.language.diagnostics.count > 0;
+    #assert symbol_named(&incomplete_binding, "after") >= 0;
+    destroy_parsed_file(&incomplete_binding);
+
     // Nested parse calls repeatedly grow the arena while their parent nodes stay live.
     generated: String_Builder;
     for i: 0..500 generated.write_string(

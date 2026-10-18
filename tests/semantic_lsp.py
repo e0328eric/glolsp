@@ -254,6 +254,112 @@ class SemanticLspTests(unittest.TestCase):
         failure = self.at("textDocument/hover", uri, "failure", occurrence=1)
         self.assertIn("string", str(failure["contents"]))
 
+    def test_pattern_binding_home_directory(self):
+        uri = self.write("main.glo", (
+            "main :: () -> s8 {\n"
+            "    #pattern .Some(home) := home_dir() else {\n"
+            '        print("$HOME environment is not set\\n");\n'
+            "        return FAILURE;\n"
+            "    };\n"
+            '    print("path: {}\\n", home);\n'
+            "    args := get_cmdline_args();\n"
+            "    return SUCCESS;\n"
+            "}\n"
+            '#import "Io";\n'
+            '#import "File_System/Directory_Paths";\n'
+            "SUCCESS :: 0;\n"
+            "FAILURE :: 1;\n"
+        ))
+        self.initialize()
+        self.open(uri)
+        diagnostics = self.client.request("textDocument/diagnostic", {
+            "textDocument": {"uri": uri},
+        })["items"]
+        self.assertEqual(diagnostics, [])
+        self.assertEqual(self.at("textDocument/definition", uri, "home);"), [{
+            "uri": uri, "range": source_range(self.documents[uri], "home"),
+        }])
+        hover = self.at("textDocument/hover", uri, "home);")
+        self.assertIn("Path", str(hover["contents"]))
+        self.assertIn("home", self.completion_names(uri, "home);", offset=2))
+        edits = self.at("textDocument/rename", uri, "home);", newName="directory")
+        self.assertEqual(edits["changes"][uri], [
+            {"range": source_range(self.documents[uri], "home", occurrence),
+             "newText": "directory"}
+            for occurrence in [0, 2]
+        ])
+
+    def test_pattern_binding_shadows_only_after_the_else_block(self):
+        uri = self.write("main.glo", (
+            "Point :: struct { x: ssize; }\n"
+            "Option :: union($T: type) { Some(T); None; }\n"
+            "make :: (value: Point) -> ?Point { return .Some(value); }\n"
+            "main :: () {\n"
+            "    payload: Point;\n"
+            "    {\n"
+            "        payload.x;\n"
+            "        #pattern .Some(payload) := make(payload) else {\n"
+            "            payload.x;\n"
+            "            return;\n"
+            "        };\n"
+            "        payload.x;\n"
+            "        { payload.x; }\n"
+            "    }\n"
+            "    payload.x;\n"
+            "}\n"
+        ))
+        self.initialize()
+        self.open(uri)
+        diagnostics = self.client.request("textDocument/diagnostic", {
+            "textDocument": {"uri": uri},
+        })["items"]
+        self.assertEqual(diagnostics, [])
+        for occurrence in range(8):
+            with self.subTest(occurrence=occurrence):
+                declaration = 2 if occurrence in [2, 5, 6] else 0
+                self.assertEqual(self.at("textDocument/definition", uri, "payload", occurrence), [{
+                    "uri": uri,
+                    "range": source_range(self.documents[uri], "payload", declaration),
+                }])
+        inferred = self.at("textDocument/typeDefinition", uri, "payload", occurrence=5)
+        self.assertEqual(inferred, [{
+            "uri": uri, "range": source_range(self.documents[uri], "Point"),
+        }])
+        field = self.at("textDocument/definition", uri, "payload.x", occurrence=2, offset=8)
+        self.assertEqual(field, [{
+            "uri": uri, "range": source_range(self.documents[uri], "x"),
+        }])
+
+    def test_pattern_binding_is_hidden_before_success_and_outside_its_scope(self):
+        uri = self.write("main.glo", (
+            "Point :: struct { x: ssize; }\n"
+            "Option :: union($T: type) { Some(T); None; }\n"
+            "make :: (value: Point) -> ?Point { return .Some(value); }\n"
+            "main :: () {\n"
+            "    captured;\n"
+            "    #pattern .Some(captured) := make(captured) else { captured; return; };\n"
+            "    captured.x;\n"
+            "}\n"
+            "outside :: () { captured; }\n"
+        ))
+        self.initialize()
+        self.open(uri)
+        diagnostics = self.client.request("textDocument/diagnostic", {
+            "textDocument": {"uri": uri},
+        })["items"]
+        self.assertEqual([(item["range"], item["message"]) for item in diagnostics], [
+            (source_range(self.documents[uri], "captured", occurrence), "Unresolved identifier.")
+            for occurrence in [0, 2, 3, 5]
+        ])
+        for occurrence in [0, 2, 3, 5]:
+            self.assertEqual(self.at("textDocument/definition", uri, "captured", occurrence), [])
+            completion = self.at("textDocument/completion", uri, "captured", occurrence, offset=2)
+            items = completion["items"] if isinstance(completion, dict) else completion
+            self.assertNotIn("captured", {item["label"] for item in items})
+        self.assertEqual(self.at("textDocument/definition", uri, "captured.x"), [{
+            "uri": uri, "range": source_range(self.documents[uri], "captured", 1),
+        }])
+
     def test_tuple_destructuring_preserves_each_element_type(self):
         uri = self.write("main.glo", (
             "Point :: struct { x: ssize; }\n"

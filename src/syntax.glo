@@ -895,6 +895,53 @@ syntax_pattern_condition :: (parser: *Syntax_Parser, condition: ssize) {
         syntax_capture(parser, pattern.left, expression.right);
 }
 
+syntax_pattern_binding_ahead :: (parser: *const Syntax_Parser) -> bool {
+    cursor := syntax_next(parser, parser.at);
+    while cursor < parser.file.language.tokens.count {
+        text := syntax_text(parser, cursor);
+        if text == ":=" return true;
+        if text == "=" || text == ";" || text == "," || text == "{" ||
+           text == "}" || text == ")" || text == "]" return false;
+        // A bare '{' ends the pattern; '.{' and '.[' are aggregate patterns.
+        if text == "." {
+            next := syntax_next(parser, cursor);
+            following := syntax_text(parser, next);
+            if following == "{" || following == "[" {
+                cursor = next;
+                text = following;
+            }
+        }
+        if text == "(" || text == "[" || text == "{" {
+            close := parser.file.language.tokens[cursor].matching;
+            if close < 0 return false;
+            cursor = close;
+        }
+        cursor = syntax_next(parser, cursor);
+    }
+    return false;
+}
+
+syntax_pattern_binding :: (parser: *Syntax_Parser) -> ssize {
+    node := syntax_node(parser, .Pattern_Binding);
+    syntax_advance(parser);
+    pattern := syntax_expression(parser, 2);
+    parser.file.nodes[node].left = pattern;
+    syntax_expect(parser, ":=", "Expected ':=' after binding pattern.");
+    subject := syntax_expression(parser, 0);
+    parser.file.nodes[node].right = subject;
+    syntax_expect(parser, "else", "Expected 'else' after pattern binding.");
+    if syntax_text(parser) == "{" syntax_child(parser, node, syntax_block(parser));
+    else syntax_error(parser, "Expected '{' after pattern binding 'else'.");
+    _ := syntax_take(parser, ";");
+    syntax_finish(parser, node);
+
+    first := parser.file.symbols.count;
+    syntax_capture(parser, pattern, subject);
+    for symbol: first..parser.file.symbols.count
+        parser.file.symbols[symbol].visible_from = parser.file.nodes[node].end;
+    return node;
+}
+
 syntax_switch_subject :: (parser: *Syntax_Parser, condition: ssize) -> ssize {
     previous := parser.at - 1;
     while previous >= 0 && parser.file.language.tokens[previous].kind == 4 previous -= 1;
@@ -1092,6 +1139,8 @@ syntax_statement :: (parser: *Syntax_Parser) -> ssize {
         case "#if"; return syntax_control(parser, .If, true);
         case "while"; return syntax_control(parser, .While);
         case "for"; return syntax_control(parser, .For);
+        case "#pattern";
+            if syntax_pattern_binding_ahead(parser) return syntax_pattern_binding(parser);
         case "#import", "#load", "#export", "#embed";
             return syntax_import(parser, -1);
         case "return";

@@ -293,6 +293,7 @@ analysis_lookup :: (
                 if offset < owner.start || offset > owner.end continue;
             }
             if symbol.kind == 13 && current > 0 && symbol.selection_start > offset continue;
+            if offset < symbol.visible_from && offset != symbol.selection_start continue;
             if best < 0 || symbol.selection_start > syntax.symbols[best].selection_start best = i;
         }
         if best >= 0 return .{ .file = file, .symbol = best };
@@ -1117,12 +1118,13 @@ analysis_compatible :: (workspace: *const Workspace, expected: Type_Id, actual: 
     left := analysis_type_view(workspace, expected);
     right := analysis_type_view(workspace, actual);
     if left.kind == .Generic || right.kind == .Generic return true;
+    if left.kind == .Builtin && left.name == "any" return true;
     if left.kind == .Builtin && right.kind == .Builtin &&
        analysis_numeric(left.name) && analysis_numeric(right.name) return true;
     if left.kind == .Builtin && right.kind == .Builtin && right.name == "string" &&
        (left.name == "string16" || left.name == "cstring" || left.name == "cstring16") return true;
     if left.kind != right.kind return false;
-    if left.kind == .Builtin return left.name == right.name || left.name == "any";
+    if left.kind == .Builtin return left.name == right.name;
     if left.kind == .Pointer || left.kind == .Array_Type
         return analysis_compatible(workspace, left.element, right.element);
     if left.kind != .Tuple && !analysis_same_symbol(left.symbol, right.symbol) return false;
@@ -1196,6 +1198,8 @@ analysis_diagnostics :: (workspace: *Workspace, file: ssize) {
     for i: 0..syntax.nodes.count {
         node := syntax.nodes[i];
         if node.kind == .Member && node.right >= 0 roles[node.right] = -1;
+        if node.kind == .Pattern_Binding
+            analysis_suppress_diagnostics(syntax, node.left, &roles);
         if node.kind == .Unary {
             operator := analysis_text(workspace, file, i);
             if operator == "$" || operator.starts_with("#")
@@ -1409,6 +1413,7 @@ analysis_collect_exports :: (
             }
             if declaration.kind == 13 && current > 0 && declaration.selection_start > offset
                 continue;
+            if offset < declaration.visible_from && offset != declaration.selection_start continue;
             shadowed := false;
             for existing: result {
                 other := workspace.files[existing.file].syntax.symbols[existing.symbol];
