@@ -319,6 +319,176 @@ class SemanticLspTests(unittest.TestCase):
         links = self.client.request("textDocument/documentLink", {"textDocument": {"uri": caller}})
         self.assertEqual([link["target"] for link in links], [module])
 
+    def test_import_path_completion_discovers_modules_without_workspace_scanning(self):
+        self.write("std/Standard.glo", "")
+        self.write("modules/Single.glo", "")
+        self.write("modules/Shapes/module.glo", "")
+        self.write("modules/Nested/Child.glo", "")
+        self.write("Workspace.glo", "")
+        self.write("modules/notes.txt", "")
+        self.write("modules/build/Generated.glo", "")
+        caller = self.write("main.glo", '#import "";\n')
+        capabilities = self.initialize(stdPath=str(self.root / "std"),
+                                       importPaths=[str(self.root / "modules")],
+                                       scanWorkspace=False)
+        self.assertTrue({'"', '/'}.issubset(
+            capabilities["completionProvider"]["triggerCharacters"]))
+        self.open(caller)
+        completion = self.at("textDocument/completion", caller, '"', offset=1)
+        self.assertFalse(completion["isIncomplete"])
+        items = {item["label"]: item for item in completion["items"]}
+        for label in ("Standard", "Single", "Shapes", "Workspace"):
+            self.assertIn(label, items)
+            self.assertEqual(items[label]["kind"], 9)
+            self.assertEqual(items[label]["textEdit"], {
+                "range": {"start": {"line": 0, "character": 9},
+                          "end": {"line": 0, "character": 9}},
+                "newText": label,
+            })
+        self.assertEqual(items["Nested/"]["kind"], 19)
+        self.assertIn("Shapes/", items)
+        for label in ("Single.glo", "notes", "notes.txt", "build/", "return"):
+            self.assertNotIn(label, items)
+
+    def test_import_path_completion_replaces_partial_and_unterminated_paths(self):
+        self.write("modules/Nested/Child.glo", "")
+        self.write("modules/Nested/Choice/module.glo", "")
+        self.write("modules/Single.glo", "")
+        caller = (self.root / "main.glo").as_uri()
+        self.initialize(stdPath=str(self.root / "std"),
+                        importPaths=[str(self.root / "modules")], scanWorkspace=False)
+        cases = (
+            ('#import "Si";\n', "Si", "Single", 2),
+            ('Alias :: #import "Single";\n', "Single", "Single", 2),
+            ('#import,only (thing) /* path */ "Si";\n', "Si", "Single", 2),
+            ('#import "Nested/Ch";\n', "Nested/Ch", "Nested/Child", 9),
+            ('#import "Nested/";\n', "Nested/", "Nested/Child", 7),
+            ('#import "Si', "Si", "Single", 2),
+            ('#import "Si\nnext :: 1;\n', "Si", "Single", 2),
+            ('/* 🙂 */ #import "Si";\r\n', "Si", "Single", 2),
+            ('#import "', "", "Single", 0),
+        )
+        for version, (source, path, expected, offset) in enumerate(cases, start=1):
+            with self.subTest(source=source):
+                if version == 1:
+                    self.open(caller, source)
+                else:
+                    self.documents[caller] = source
+                    self.client.change(caller, [{"text": source}], version=version)
+                    self.client.diagnostics(caller, version)
+                completion = self.at("textDocument/completion", caller, '"' + path,
+                                     offset=offset + 1)
+                items = {item["label"]: item for item in completion["items"]}
+                self.assertIn(expected, items)
+                start = position(source, '"' + path, offset=1)
+                end = position(source, '"' + path, offset=len(path) + 1)
+                self.assertEqual(items[expected]["textEdit"], {
+                    "range": {"start": start, "end": end}, "newText": expected,
+                })
+                self.assertTrue(all(label.startswith(path[:offset]) for label in items))
+
+    def test_import_path_completion_respects_precedence_and_ambiguity(self):
+        self.write("std/Shared.glo", "")
+        self.write("modules/Shared/module.glo", "")
+        self.write("Shared.glo", "")
+        self.write("std/Ambiguous.glo", "")
+        self.write("std/Ambiguous/module.glo", "")
+        self.write("modules/Ambiguous.glo", "")
+        self.write("modules/Conflict.glo", "")
+        self.write("modules/Conflict/module.glo", "")
+        caller = self.write("main.glo", '#import "";\n')
+        self.initialize(stdPath=str(self.root / "std"),
+                        importPaths=[str(self.root / "modules")], scanWorkspace=False)
+        self.open(caller)
+        completion = self.at("textDocument/completion", caller, '"', offset=1)
+        labels = [item["label"] for item in completion["items"]]
+        self.assertEqual(labels.count("Shared"), 1)
+        self.assertEqual(len(labels), len(set(labels)))
+        self.assertNotIn("Ambiguous", labels)
+        self.assertNotIn("Conflict", labels)
+        self.assertIn("Ambiguous/", labels)
+        self.assertIn("Conflict/", labels)
+
+    def test_import_path_completion_includes_unsaved_modules_and_disk_changes(self):
+        caller = self.write("main.glo", '#import "Fresh";\n')
+        self.initialize(stdPath=str(self.root / "std"), scanWorkspace=False)
+        self.open(caller)
+        self.assertEqual(self.completion_names(caller, '"Fresh'), set())
+        module = (self.root / "Fresh" / "module.glo").as_uri()
+        self.open(module, "#public value :: 1;\n")
+        self.assertEqual(self.completion_names(caller, '"Fresh'), {"Fresh", "Fresh/"})
+        self.client.notify("textDocument/didClose", {"textDocument": {"uri": module}})
+        self.assertEqual(self.completion_names(caller, '"Fresh'), set())
+        self.write("Fresh.glo", "")
+        self.assertEqual(self.completion_names(caller, '"Fresh'), {"Fresh"})
+        (self.root / "Fresh.glo").unlink()
+        self.assertEqual(self.completion_names(caller, '"Fresh'), set())
+
+    def test_relative_import_completion_preserves_extensions_and_parent_paths(self):
+        self.write("shared/part.glo", "")
+        self.write("src/local.glo", "")
+        self.write("src/children/child.glo", "")
+        self.write("src/notes.txt", "")
+        caller = self.write("src/main.glo", (
+            '#load "lo";\n'
+            '#export "../shared/pa";\n'
+            'Alias :: #load "children/";\n'
+        ))
+        self.initialize(stdPath=str(self.root / "std"), scanWorkspace=False)
+        self.open(caller)
+        for prefix, expected in (("lo", "local.glo"),
+                                 ("../shared/pa", "../shared/part.glo"),
+                                 ("children/", "children/child.glo")):
+            with self.subTest(prefix=prefix):
+                result = self.at("textDocument/completion", caller, '"' + prefix,
+                                 offset=len(prefix) + 1)
+                self.assertEqual([item["label"] for item in result["items"]], [expected])
+                self.assertEqual(result["items"][0]["kind"], 17)
+                self.assertEqual(result["items"][0]["textEdit"], {
+                    "range": {
+                        "start": position(self.documents[caller], '"' + prefix, offset=1),
+                        "end": position(self.documents[caller], '"' + prefix,
+                                        offset=len(prefix) + 1),
+                    },
+                    "newText": expected,
+                })
+
+    def test_import_path_completion_handles_escaped_and_unicode_names(self):
+        self.write('modules/한글/Quote"Name.glo', "")
+        caller = self.write("main.glo", r'#import "\u{D55C}글/Qu";' + "\n")
+        self.initialize(stdPath=str(self.root / "std"),
+                        importPaths=[str(self.root / "modules")], scanWorkspace=False)
+        self.open(caller)
+        result = self.at("textDocument/completion", caller, "Qu", offset=2)
+        self.assertEqual([item["label"] for item in result["items"]], ['한글/Quote"Name'])
+        self.assertEqual(result["items"][0]["textEdit"], {
+            "range": source_range(self.documents[caller], r"\u{D55C}글/Qu"),
+            "newText": r'한글/Quote\"Name',
+        })
+
+    def test_import_path_completion_does_not_leak_into_other_strings_or_comments(self):
+        self.write("Single.glo", "")
+        caller = (self.root / "main.glo").as_uri()
+        self.initialize(stdPath=str(self.root / "std"), scanWorkspace=False)
+        cases = (
+            'text :: "Si";\n',
+            '// #import "Si";\n',
+            '/* #import "Si"; */\n',
+            '#import,only ("Si") "Single";\n',
+            '#embed "Si";\n',
+            '#import "../Si";\n',
+            '#import "/Si";\n',
+        )
+        for version, source in enumerate(cases, start=1):
+            with self.subTest(source=source):
+                if version == 1:
+                    self.open(caller, source)
+                else:
+                    self.documents[caller] = source
+                    self.client.change(caller, [{"text": source}], version=version)
+                    self.client.diagnostics(caller, version)
+                self.assertEqual(self.completion_names(caller, "Si"), set())
+
     def test_implicit_prelude_names_resolve_without_an_import(self):
         caller = self.write("main.glo", "main :: () { exit(0); }\n")
         self.initialize()

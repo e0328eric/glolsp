@@ -81,6 +81,7 @@
 
     Syntax_Import :: struct {
         path: string;
+        path_token: ssize = -1;
         node: ssize = -1;
         symbol: ssize = -1;
         load: bool;

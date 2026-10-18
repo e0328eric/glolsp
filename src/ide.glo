@@ -237,6 +237,7 @@ ide_completion_item :: (
     detail: string,
     kind: ssize,
     count: *ssize,
+    insert_text: string = "",
 ) {
     if count.* > 0 out.write_byte(#char ",");
     count.* += 1;
@@ -249,8 +250,65 @@ ide_completion_item :: (
     out.write_string(",\"textEdit\":{\"range\":");
     write_range(out, source, start, end);
     out.write_string(",\"newText\":");
-    write_json_string(out, label);
+    if insert_text.count > 0 write_json_string(out, insert_text);
+    else write_json_string(out, label);
     out.write_string("}}");
+}
+
+ide_write_import_completion :: (
+    out: *String_Builder, workspace: *Workspace, file: ssize, offset: ssize,
+) -> bool {
+    syntax := &workspace.files[file].syntax;
+    source := workspace.files[file].source;
+    for dependency: syntax.imports {
+        if dependency.path_token < 0 || (dependency.embedded && !dependency.load) continue;
+        token := syntax.language.tokens[dependency.path_token];
+        if source[token.start] != #char "\"" continue;
+        start := token.start + 1;
+        end := start;
+        // Stop unfinished paths at the line boundary so an edit cannot swallow later code.
+        while end < token.end {
+            if source[end] == #char "\"" || source[end] == #char "\n" ||
+               source[end] == #char "\r" break;
+            if source[end] == #char "\\" && end + 1 < token.end end += 1;
+            end += 1;
+        }
+        if offset < start || offset > end continue;
+        paths := workspace_complete_import(workspace, file, source[start..offset],
+            dependency.load || dependency.exported);
+        defer { for path: paths.paths path.free(); }
+        if paths.incomplete out.write_string("{\"isIncomplete\":true,\"items\":[");
+        else out.write_string("{\"isIncomplete\":false,\"items\":[");
+        count: ssize = 0;
+        for path: paths.paths {
+            kind: ssize = 9;
+            detail := "Glosso module";
+            if dependency.load || dependency.exported {
+                kind = 17;
+                detail = "Glosso source file";
+            }
+            if path.ends_with("/") {
+                kind = 19;
+                detail = "Directory";
+            }
+            escaped: String_Builder;
+            for byte: path.bytes() {
+                if byte == {
+                    case #char "\\"; escaped.write_string("\\\\");
+                    case #char "\""; escaped.write_string("\\\"");
+                    case #char "\n"; escaped.write_string("\\n");
+                    case #char "\r"; escaped.write_string("\\r");
+                    case #char "\t"; escaped.write_string("\\t");
+                    else; escaped.write_byte(byte);
+                }
+            }
+            ide_completion_item(out, source, start, end, path, detail, kind, &count,
+                escaped.to_string());
+        }
+        out.write_string("]}");
+        return true;
+    }
+    return false;
 }
 
 #public ide_write_completion :: (
@@ -259,6 +317,7 @@ ide_completion_item :: (
     file: ssize,
     offset: ssize,
 ) {
+    if ide_write_import_completion(out, workspace, file, offset) return;
     syntax := &workspace.files[file].syntax;
     source := workspace.files[file].source;
     start := offset;

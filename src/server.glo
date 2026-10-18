@@ -20,7 +20,7 @@ INITIALIZE_RESULT :: #string,oneline
     \\{"capabilities":{
     \\    "positionEncoding":"utf-16",
     \\    "textDocumentSync":{"openClose":true,"change":2,"save":{"includeText":false}},
-    \\    "completionProvider":{"triggerCharacters":[".","#"]},
+    \\    "completionProvider":{"triggerCharacters":[".","#","\"","/"]},
     \\    "hoverProvider":true,"definitionProvider":true,"declarationProvider":true,
     \\    "typeDefinitionProvider":true,
     \\    "referencesProvider":true,"documentHighlightProvider":true,

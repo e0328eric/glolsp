@@ -2,6 +2,7 @@
 #load "model.glo";
 #load "syntax.glo";
 #import "File_System/File";
+#import "File_System/Directory";
 #import "File_System/Path";
 #import "File_System/System";
 #import "File_System/Walk";
@@ -18,6 +19,11 @@
         declaration: ssize;
         target: ssize = -1;
         ambiguous: bool;
+    }
+
+    Workspace_Path_Completions :: struct {
+        paths: [..]string;
+        incomplete: bool;
     }
 
     Source_File :: struct {
@@ -579,14 +585,11 @@ workspace_candidate_exists :: (workspace: *const Workspace, path: string) -> boo
     return (index >= 0 && workspace.files[index].active) || os_fs_is_regular_file(normalized);
 }
 
-#memory {
-    reads(workspace, root, name),
-    writes(workspace),
-    invalidates(workspace),
-    noescape(workspace, root, name),
-}
-workspace_module :: (workspace: *Workspace, root: string, name: string) -> ssize {
-    if root.count == 0 return -1;
+// Probe without loading source: completion must not grow or reparse the workspace.
+workspace_module_path :: (
+    workspace: *const Workspace, root: string, name: string,
+) -> (string, bool) {
+    if root.count == 0 return "".clone(), false;
     base := path_join(root, name);
     defer base.free();
     builder: String_Builder;
@@ -596,9 +599,27 @@ workspace_module :: (workspace: *Workspace, root: string, name: string) -> ssize
     defer entry.free();
     single := workspace_candidate_exists(workspace, builder.to_string());
     directory := workspace_candidate_exists(workspace, entry);
-    if single && directory return -2;
-    if single return workspace_candidate(workspace, builder.to_string());
-    return workspace_candidate(workspace, entry);
+    if single && directory return "".clone(), true;
+    if single return builder.into_string(), false;
+    if directory return entry.clone(), false;
+    return "".clone(), false;
+}
+
+// Use the same root precedence for loading and completion.
+workspace_module_root :: (workspace: *const Workspace, index: ssize) -> string {
+    if index == 0 return workspace.std_path;
+    if index <= workspace.import_paths.count return workspace.import_paths[index - 1];
+    return workspace.roots[index - workspace.import_paths.count - 1];
+}
+
+workspace_find_module :: (workspace: *const Workspace, name: string) -> (string, bool) {
+    for i: 0..1 + workspace.import_paths.count + workspace.roots.count {
+        candidate, conflict := workspace_module_path(workspace,
+            workspace_module_root(workspace, i), name);
+        if candidate.count > 0 || conflict return candidate, conflict;
+        candidate.free();
+    }
+    return "".clone(), false;
 }
 
 #memory {
@@ -620,22 +641,143 @@ workspace_resolve_import :: (
         return workspace_candidate(workspace, path);
     }
     if !workspace_valid_module(name) return -1;
-    index := workspace_module(workspace, workspace.std_path, name);
-    if index != -1 return index;
-    // Configured module roots follow the compiler's standard-library precedence.
-    for i: 0..workspace.import_paths.count {
-        root := workspace.import_paths[i].clone();
-        defer root.free();
-        index = workspace_module(workspace, root, name);
-        if index != -1 return index;
-    }
-    for i: 0..workspace.roots.count {
-        root := workspace.roots[i].clone();
-        defer root.free();
-        index = workspace_module(workspace, root, name);
-        if index != -1 return index;
+    for i: 0..1 + workspace.import_paths.count + workspace.roots.count {
+        path, ambiguous := workspace_module_path(workspace,
+            workspace_module_root(workspace, i), name);
+        defer path.free();
+        if ambiguous return -2;
+        if path.count == 0 continue;
+        index := workspace_candidate(workspace, path);
+        if index >= 0 return index;
     }
     return -1;
+}
+
+workspace_completion_push :: (
+    result: *Workspace_Path_Completions, name: string, prefix: string,
+) {
+    if !workspace_prefix(name, prefix) return;
+    for existing: result.paths if existing == name return;
+    if result.paths.count >= 500 {
+        result.incomplete = true;
+        return;
+    }
+    result.paths.push(name.clone());
+}
+
+workspace_ignored_directory :: (name: string) -> bool {
+    if name == {
+        case ".git", ".hg", ".svn", "build", "node_modules", ".cache"; return true;
+        else; return false;
+    }
+}
+
+workspace_completion_entry :: (
+    workspace: *const Workspace, result: *Workspace_Path_Completions,
+    prefix: string, parent: string, entry: string, directory: bool, load: bool,
+) {
+    if directory && workspace_ignored_directory(entry) return;
+    if !directory && !workspace_suffix(entry, ".glo") return;
+    name: String_Builder;
+    name.write_string(parent);
+    if directory || load name.write_string(entry);
+    else name.write_string(entry.substring_view(0, entry.count - 4));
+    candidate := name.to_string();
+    if !load && !workspace_valid_module(candidate) return;
+    if workspace_prefix(candidate, prefix) {
+        if load {
+            if !directory workspace_completion_push(result, candidate, prefix);
+        } else {
+            path, ambiguous := workspace_find_module(workspace, candidate);
+            defer path.free();
+            if path.count > 0 && !ambiguous workspace_completion_push(result, candidate, prefix);
+        }
+    }
+    if directory {
+        name.write_byte(#char "/");
+        workspace_completion_push(result, name.to_string(), prefix);
+    }
+}
+
+workspace_completion_directory :: (
+    workspace: *const Workspace, result: *Workspace_Path_Completions,
+    directory_path: string, prefix: string, parent: string, load: bool,
+) -> Fs_Error!void {
+    directory := Directory.open_directory(directory_path)?;
+    visited: ssize = 0;
+    while !result.incomplete {
+        next := directory.next()?;
+        if next == {
+            case .None; break;
+            case .Some(entry);
+                if visited >= workspace.file_limit {
+                    result.incomplete = true;
+                    break;
+                }
+                visited += 1;
+                path := path_join(directory_path, entry.name);
+                defer path.free();
+                is_directory := os_fs_is_directory(path);
+                if is_directory || os_fs_is_regular_file(path)
+                    workspace_completion_entry(workspace, result, prefix, parent,
+                        entry.name, is_directory, load);
+        }
+    }
+    return .Ok;
+}
+
+workspace_completion_root :: (
+    workspace: *const Workspace, result: *Workspace_Path_Completions,
+    root: string, prefix: string, parent: string, load: bool,
+) {
+    if root.count == 0 || result.incomplete return;
+    joined := path_join(root, parent);
+    defer joined.free();
+    directory_path := workspace_normalize_path(joined);
+    defer directory_path.free();
+    _ := workspace_completion_directory(workspace, result, directory_path, prefix, parent, load);
+    // Unsaved files and directories implied by open buffers are importable too.
+    base: String_Builder;
+    base.write_string(directory_path);
+    if !workspace_suffix(directory_path, "/") base.write_byte(#char "/");
+    for index: 0..workspace.files.count {
+        file := &workspace.files[index];
+        if !file.active || !workspace_prefix(file.path, base.to_string()) continue;
+        relative := file.path.substring_view(base.to_string().count, file.path.count);
+        end: ssize = 0;
+        while end < relative.count && relative[end] != #char "/" end += 1;
+        workspace_completion_entry(workspace, result, prefix, parent,
+            relative.substring_view(0, end), end < relative.count, load);
+    }
+}
+
+/// Lists the current path component without parsing candidates or scanning subtrees.
+/// The caller owns the returned strings.
+#public workspace_complete_import :: (
+    workspace: *const Workspace, file: ssize, raw_prefix: string, load: bool,
+) -> Workspace_Path_Completions {
+    result: Workspace_Path_Completions;
+    prefix := workspace_import_path(raw_prefix);
+    defer prefix.free();
+    if raw_prefix.count > 0 && prefix.count == 0 return result;
+    parent_end: ssize = 0;
+    for at: 0..prefix.count if prefix[at] == #char "/" parent_end = at + 1;
+    parent := prefix.substring_view(0, parent_end);
+    if load {
+        source_path := workspace.files[file].path;
+        if source_path.count > 0 workspace_completion_root(workspace, &result,
+            path_dirname(source_path), prefix, parent, true);
+    } else {
+        if prefix.count > 0 {
+            check := prefix;
+            if workspace_suffix(check, "/") check = check.substring_view(0, check.count - 1);
+            if !workspace_valid_module(check) return result;
+        }
+        for i: 0..1 + workspace.import_paths.count + workspace.roots.count
+            workspace_completion_root(workspace, &result, workspace_module_root(workspace, i),
+                prefix, parent, false);
+    }
+    return result;
 }
 
 #memory { reads(workspace), writes(workspace), invalidates(workspace), noescape(workspace) }
@@ -731,11 +873,7 @@ workspace_walk_visit :: (path: string, entry: Directory_Entry, depth: ssize) -> 
             return .Stop;
         }
         if entry.kind == File_Kind.Directory {
-            if depth >= 64 return .Skip_Directory;
-            if #partial entry.name == {
-                case ".git", ".hg", ".svn", "build", "node_modules", ".cache";
-                    return .Skip_Directory;
-            }
+            if depth >= 64 || workspace_ignored_directory(entry.name) return .Skip_Directory;
         }
         if entry.kind == File_Kind.Regular && workspace_suffix(path, ".glo")
             _ := workspace_load(workspace, path);

@@ -623,8 +623,10 @@ syntax_import :: (parser: *Syntax_Parser, symbol: ssize) -> ssize {
         }
     }
     path := "";
+    path_token: ssize = -1;
     if parser.at < parser.file.language.tokens.count &&
        parser.file.language.tokens[parser.at].kind == 3 {
+        path_token = parser.at;
         literal := syntax_text(parser);
         if literal.count >= 2 path = literal.substring(1, literal.count - 1);
         syntax_advance(parser);
@@ -632,7 +634,7 @@ syntax_import :: (parser: *Syntax_Parser, symbol: ssize) -> ssize {
     _ := syntax_take(parser, ";");
     syntax_finish(parser, node);
     parser.file.imports.push(.{
-        .path = path, .node = node, .symbol = symbol, .start = start,
+        .path = path, .path_token = path_token, .node = node, .symbol = symbol, .start = start,
         .end = parser.file.nodes[node].end, .load = directive == "#load",
         .exported = directive == "#export", .embedded = embedded,
     });

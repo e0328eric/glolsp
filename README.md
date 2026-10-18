@@ -38,7 +38,7 @@ Implemented editor features include:
 
 - Full and incremental document synchronization with UTF-16 and CRLF positions.
 - Workspace indexing, dependency loading, implicit Prelude, and module aliases.
-- Completion of visible declarations, inferred members, keywords, and directives.
+- Completion of visible declarations, inferred members, import paths, keywords, and directives.
 - Hover with signatures, documentation, and inferred variable types.
 - Definition, declaration, type definition, references, and document highlights.
 - Rename across loaded workspace files, with scope and name-conflict checks.
@@ -76,6 +76,12 @@ standard library and additional search paths. Both `Name.glo` and
 `Name/module.glo` are supported; an ambiguous pair produces an import diagnostic.
 Relative `#load` paths resolve from the importing file's directory. The server
 never runs a workspace's `first.glo` to discover configuration.
+
+Import completion suggests module names inside `#import "..."` from these search
+paths, including modules in unopened files and open buffers. Directory suggestions
+end in `/` to continue into nested modules. Relative `#load` and `#export` paths
+complete source filenames, including their `.glo` extension. Suggestions work in
+unfinished strings and replace the path while preserving its quotes.
 
 Optional `initializationOptions` configure loading:
 
