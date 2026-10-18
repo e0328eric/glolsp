@@ -91,7 +91,7 @@ syntax_child :: (parser: *Syntax_Parser, parent: ssize, child: ssize) {
 }
 
 // Evaluate the child before indexing the arena: parsing may grow its storage.
-Syntax_Slot :: enum { Left; Right; Annotation; Value; }
+Syntax_Slot :: enum #derive(Clone, Copy) { Left; Right; Annotation; Value; }
 
 syntax_store :: (parser: *Syntax_Parser, node: ssize, slot: Syntax_Slot, child: ssize) {
     if slot == {
@@ -363,6 +363,42 @@ syntax_arguments :: (parser: *Syntax_Parser, parent: ssize, close: string) {
     syntax_expect(parser, close, "Expected a closing delimiter after arguments.");
 }
 
+syntax_matrix :: (parser: *Syntax_Parser) -> ssize {
+    node := syntax_node(parser, .Aggregate);
+    syntax_advance(parser);
+    if !syntax_take(parser, ".") || !syntax_take(parser, "[") {
+        syntax_error(parser, "#matrix expects a .[...] literal.");
+        return node;
+    }
+    rows: ssize = 0;
+    columns: ssize = 0;
+    while syntax_text(parser) != "" && syntax_text(parser) != "]" &&
+          syntax_text(parser) != "}" {
+        width: ssize = 0;
+        while true {
+            element := syntax_expression(parser, 0);
+            if element < 0 {
+                syntax_error(parser, "Expected a matrix element.");
+                break;
+            }
+            syntax_child(parser, node, element);
+            width += 1;
+            if !syntax_take(parser, ",") || syntax_text(parser) == ";" ||
+               syntax_text(parser) == "]" break;
+        }
+        if rows > 0 && columns != width
+            syntax_error(parser, "Matrix rows must have the same number of columns.");
+        columns = width;
+        rows += 1;
+        if !syntax_take(parser, ";") break;
+    }
+    syntax_expect(parser, "]", "Expected ']' after matrix rows.");
+    parser.file.nodes[node].matrix_rows = rows;
+    parser.file.nodes[node].matrix_columns = columns;
+    syntax_finish(parser, node);
+    return node;
+}
+
 syntax_primary :: (parser: *Syntax_Parser) -> ssize {
     token := parser.at;
     text := syntax_text(parser);
@@ -370,6 +406,7 @@ syntax_primary :: (parser: *Syntax_Parser) -> ssize {
        text == "}" || text == "{" || text == ":" return -1;
     kind := parser.file.language.tokens[token].kind;
     if text == {
+        case "#matrix"; return syntax_matrix(parser);
         case "|", "||", "||->"; return syntax_procedure(parser, -1);
         case "(";
             if syntax_is_procedure(parser) return syntax_procedure(parser, -1);
@@ -644,10 +681,10 @@ syntax_import :: (parser: *Syntax_Parser, symbol: ssize) -> ssize {
 syntax_aggregate :: (parser: *Syntax_Parser, owner: ssize) -> ssize {
     token := parser.at;
     text := syntax_text(parser);
-    kind := Syntax_Kind.Struct;
+    kind := Syntax_Kind.Struct_Type;
     lsp_kind: s32 = 23;
     if #partial text == {
-        case "union"; kind = .Union;
+        case "union"; kind = .Union_Type;
         case "enum", "enum_flags"; kind = .Enum; lsp_kind = 10;
         case "typeclass"; kind = .Typeclass; lsp_kind = 11;
     }
@@ -682,7 +719,7 @@ syntax_aggregate :: (parser: *Syntax_Parser, owner: ssize) -> ssize {
     syntax_expect(parser, "{", "Expected '{' before type members.");
     while syntax_text(parser) != "" && syntax_text(parser) != "}" {
         before := parser.at;
-        if kind == .Enum || kind == .Union {
+        if kind == .Enum || kind == .Union_Type {
             if parser.file.language.tokens[parser.at].kind == 1 {
                 member := syntax_node(parser, .Declaration);
                 member_token := parser.at;
@@ -765,7 +802,7 @@ syntax_declaration :: (parser: *Syntax_Parser) -> ssize {
     header_end := end;
     if value >= 0 {
         value_kind := parser.file.nodes[value].kind;
-        if value_kind == .Procedure || value_kind == .Struct || value_kind == .Union ||
+        if value_kind == .Procedure || value_kind == .Struct_Type || value_kind == .Union_Type ||
            value_kind == .Enum || value_kind == .Typeclass {
             cursor := token;
             while cursor < parser.at {
@@ -1122,6 +1159,30 @@ syntax_statement :: (parser: *Syntax_Parser) -> ssize {
         case "#memory";
             node := syntax_node(parser, .Statement);
             syntax_advance(parser);
+            trusted := syntax_take(parser, ",");
+            legacy := syntax_text(parser) == "trusted" &&
+                syntax_text(parser, syntax_next(parser, parser.at)) == "(";
+            if trusted || legacy {
+                if !trusted
+                    syntax_error(parser, "Use #memory,trusted { ... } for a trusted block.");
+                if !syntax_take(parser, "trusted")
+                    syntax_error(parser, "Expected 'trusted' after '#memory,'.");
+                if syntax_text(parser) == "(" {
+                    syntax_error(parser, "Trusted blocks take no arguments; use a comment.");
+                    close := parser.file.language.tokens[parser.at].matching;
+                    if close >= 0 parser.at = syntax_next(parser, close);
+                }
+                if parser.scope == 0
+                    syntax_error(parser, "Trusted blocks require a statement scope.");
+                if syntax_text(parser) == "{" {
+                    // Analyze the block normally, including names and local declarations.
+                    parser.file.nodes[node].kind = .Block;
+                    syntax_child(parser, node, syntax_block(parser));
+                } else syntax_error(parser, "#memory,trusted requires a statement block.");
+                _ := syntax_take(parser, ";");
+                syntax_finish(parser, node);
+                return node;
+            }
             if syntax_text(parser) == "{" {
                 close := parser.file.language.tokens[parser.at].matching;
                 if close >= 0 {
@@ -1130,7 +1191,10 @@ syntax_statement :: (parser: *Syntax_Parser) -> ssize {
                 }
             }
             syntax_child(parser, node, syntax_expression(parser, 0));
-            if syntax_text(parser) == "{" syntax_child(parser, node, syntax_block(parser));
+            if syntax_text(parser) == "{" {
+                close := parser.file.language.tokens[parser.at].matching;
+                if close >= 0 parser.at = syntax_next(parser, close);
+            }
             _ := syntax_take(parser, ";");
             syntax_finish(parser, node);
             return node;
@@ -1247,7 +1311,7 @@ parse_file :: (source: string) -> Parsed_File {
             syntax_advance(&parser);
         }
     }
-    for symbol: parser.file.symbols {
+    for symbol: parser.file.symbols.view() {
         scope := parser.file.scopes[symbol.scope];
         parser.file.language.symbols.push(.{
             .name = symbol.name, .detail = symbol.detail, .documentation = symbol.documentation,

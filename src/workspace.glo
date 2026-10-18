@@ -15,7 +15,7 @@
 #import "Memory/Ownership";
 
 #public {
-    Workspace_Import :: struct {
+    Workspace_Import :: struct #derive(Clone, Copy) {
         declaration: ssize;
         target: ssize = -1;
         ambiguous: bool;
@@ -263,7 +263,7 @@ workspace_environment :: (name: string) -> string {
 }
 #public workspace_add_import_path :: (workspace: *Workspace, path: string) {
     normalized := workspace_normalize_path(path);
-    for existing: workspace.import_paths {
+    for existing: workspace.import_paths.view() {
         if existing == normalized {
             normalized.free();
             return;
@@ -346,9 +346,9 @@ workspace_unload :: (workspace: *Workspace, index: ssize) {
 
 #public workspace_destroy :: (workspace: *Workspace) {
     workspace.files.free();
-    for root: workspace.roots root.free();
+    for root: workspace.roots.view() root.free();
     workspace.roots.free();
-    for path: workspace.import_paths path.free();
+    for path: workspace.import_paths.view() path.free();
     workspace.import_paths.free();
     workspace.std_path.free();
     empty: string;
@@ -657,7 +657,7 @@ workspace_completion_push :: (
     result: *Workspace_Path_Completions, name: string, prefix: string,
 ) {
     if !workspace_prefix(name, prefix) return;
-    for existing: result.paths if existing == name return;
+    for existing: result.paths.view() if existing == name return;
     if result.paths.count >= 500 {
         result.incomplete = true;
         return;
@@ -823,7 +823,7 @@ workspace_completion_root :: (
         file := &workspace.files[i];
         file.relevant = file.active && (file.open || i == workspace.prelude);
         if !file.active continue;
-        for root: workspace.roots {
+        for root: workspace.roots.view() {
             if file.path.count > 0 && path_lexically_contains(root, file.path)
                 file.relevant = true;
         }
@@ -833,7 +833,7 @@ workspace_completion_root :: (
         changed = false;
         for i: 0..workspace.files.count {
             if !workspace.files[i].relevant continue;
-            for edge: workspace.files[i].imports {
+            for edge: workspace.files[i].imports.view() {
                 if edge.target < 0 || !workspace.files[edge.target].active ||
                    workspace.files[edge.target].relevant continue;
                 workspace.files[edge.target].relevant = true;
@@ -891,7 +891,7 @@ workspace_walk_visit :: (path: string, entry: Directory_Entry, depth: ssize) -> 
     path := workspace_uri_to_path(uri);
     defer path.free();
     if path.count == 0 return;
-    for root: workspace.roots {
+    for root: workspace.roots.view() {
         if root == path return;
     }
     workspace.roots.push(path.clone());
@@ -914,7 +914,7 @@ workspace_walk_visit :: (path: string, entry: Directory_Entry, depth: ssize) -> 
         workspace.roots[i].free();
         for next: i + 1..workspace.roots.count
             workspace.roots[next - 1] = workspace.roots[next];
-        workspace.roots.count -= 1;
+        _ := array_pop_last(&workspace.roots);
         workspace.revision += 1;
         workspace.generation = workspace.revision;
         workspace_refresh_imports(workspace);

@@ -1,11 +1,12 @@
 //! Semantic token output. The position cursor only moves forward through the
 //! source; multiline tokens are emitted as one UTF-16 span per physical line.
+#import "Memory/Ownership";
 #import "String_Builder";
 #import "Strings";
 #load "language.glo";
 #load "protocol.glo";
 
-#public Semantic_Style :: struct { token_type: ssize = -1; modifiers: ssize; }
+#public Semantic_Style :: struct #derive(Clone, Copy) { token_type: ssize = -1; modifiers: ssize; }
 
 Semantic_Index :: struct { heads: [..]ssize; next: [..]ssize; }
 
@@ -70,7 +71,7 @@ semantic_symbol_styles :: (analysis: *const Language_Analysis) -> [..]Semantic_S
         while procedures.count > 0 {
             parent := analysis.symbols[procedures[procedures.count - 1]];
             if symbol.start < parent.end break;
-            procedures.count -= 1;
+            _ := array_pop_last(&procedures);
         }
         style: Semantic_Style = .{ .token_type = 3 };
         if symbol.kind == {

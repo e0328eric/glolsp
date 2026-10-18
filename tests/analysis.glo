@@ -129,7 +129,55 @@ check_variadic_types :: () {
     }
 }
 
+check_matrix_types :: () {
+    workspace: Workspace;
+    defer workspace_destroy(&workspace);
+    source := #string
+        \\Rows :: 2;
+        \\M :: Matrix(f64, Rows, 2);
+        \\read :: (value: M) -> f64 { return value[0, 1]; }
+        \\make :: () -> M { return #matrix .[1, 2; 3, 4]; }
+        \\main :: () {
+        \\    element: f64 = 1;
+        \\    value: M = #matrix .[element, 2; 3, 4];
+        \\    inferred := make();
+        \\    indexed := value[1, 0];
+        \\    empty: Matrix(f64, 2, 0) = #matrix .[];
+        \\    value = #matrix .[1, 2; 3, 4];
+        \\    read(#matrix .[1, 2; 3, 4]);
+        \\}
+    ;
+    file := workspace_open(&workspace, "file:///tmp/glolsp-matrix.glo", source, 1);
+    analyze_workspace(&workspace);
+    #assert workspace.files[file].syntax.language.diagnostics.count == 0;
+    #assert workspace.files[file].semantic.diagnostics.count == 0;
+    inferred := type_text(&workspace, symbol_named(&workspace, file, "inferred"));
+    defer inferred.free();
+    #assert inferred == "Matrix(f64, 2, 2)";
+    indexed := type_text(&workspace, symbol_named(&workspace, file, "indexed"));
+    defer indexed.free();
+    #assert indexed == "f64";
+    element := symbol_named(&workspace, file, "element");
+    #assert analysis_same_symbol(element, analysis_symbol_at(&workspace, file,
+        find_text(source, "[element") + 1));
+
+    invalid := #string
+        \\main :: () {
+        \\    size: Matrix(ssize, 2, 2) = #matrix .[1, 2];
+        \\    item: Matrix(ssize, 1, 1) = #matrix .[true];
+        \\    ordinary: Matrix(ssize, 1, 2) = .[1, 2];
+        \\    scalar: ssize = #matrix .[1];
+        \\    #memory,trusted { missing; }
+        \\}
+    ;
+    _ := workspace_open(&workspace, "file:///tmp/glolsp-matrix.glo", invalid, 2);
+    analyze_workspace(&workspace);
+    #assert workspace.files[file].syntax.language.diagnostics.count == 0;
+    #assert workspace.files[file].semantic.diagnostics.count == 5;
+}
+
 main :: () {
+    check_matrix_types();
     check_slice_types();
     check_variadic_types();
     workspace: Workspace;

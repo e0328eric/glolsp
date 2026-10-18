@@ -46,10 +46,12 @@ glolsp_build :: (
     options.add_compiler_arg(tprint("--cache-dir={}", cache_path));
     options.set_build_options(workspace);
     built := add_build_file(source, workspace);
-    if #pattern .Err(failure) = built {
-        print("Glosso build failed for {}:\n", source);
-        report_error(failure);
-        return false;
+    if built == {
+        case .Ok;
+        case .Err(failure);
+            print("Glosso build failed for {}:\n", source);
+            report_error(failure);
+            return false;
     }
     return true;
 }

@@ -3,15 +3,16 @@
 #load "language.glo";
 
 #public {
-    Syntax_Kind :: enum {
+    // Avoid the reflection enum's Struct/Union spellings in derive expansion.
+    Syntax_Kind :: enum #derive(Clone, Copy) {
         Root;
         Declaration;
         Parameter;
         Pattern_Capture;
         Pattern_Binding;
         Procedure;
-        Struct;
-        Union;
+        Struct_Type;
+        Union_Type;
         Enum;
         Typeclass;
         Inherent;
@@ -35,7 +36,7 @@
         Type;
     }
 
-    Syntax_Node :: struct {
+    Syntax_Node :: struct #derive(Clone, Copy) {
         kind: Syntax_Kind;
         start: ssize;
         end: ssize;
@@ -51,9 +52,11 @@
         type_node: ssize = -1;
         value_node: ssize = -1;
         argument_index: ssize = -1;
+        matrix_rows: ssize = -1;
+        matrix_columns: ssize = -1;
     }
 
-    Syntax_Symbol :: struct {
+    Syntax_Symbol :: struct #derive(Clone, Copy) {
         name: string;
         detail: string;
         documentation: string;
@@ -75,14 +78,14 @@
         visible_from: ssize;
     }
 
-    Syntax_Scope :: struct {
+    Syntax_Scope :: struct #derive(Clone, Copy) {
         parent: ssize = -1;
         owner: ssize = -1;
         start: ssize;
         end: ssize;
     }
 
-    Syntax_Import :: struct {
+    Syntax_Import :: struct #derive(Clone, Copy) {
         path: string;
         path_token: ssize = -1;
         node: ssize = -1;
@@ -103,20 +106,21 @@
         imports: [..]Syntax_Import;
     }
 
-    Symbol_Id :: struct { file: ssize = -1; symbol: ssize = -1; }
+    Symbol_Id :: struct #derive(Clone, Copy) { file: ssize = -1; symbol: ssize = -1; }
 
     Type_Id :: ssize;
 
-    Type_Kind :: enum {
+    Type_Kind :: enum #derive(Clone, Copy) {
         Unknown;
         Builtin;
-        Struct;
-        Union;
+        Struct_Type;
+        Union_Type;
         Enum;
         Procedure;
         Module;
         Pointer;
         Array_Type;
+        Matrix_Type;
         Tuple;
         Generic;
     }
@@ -126,6 +130,8 @@
         name: string;
         symbol: Symbol_Id;
         element: Type_Id = -1;
+        matrix_rows: ssize = -1;
+        matrix_columns: ssize = -1;
         return_type: Type_Id = -1;
         parameters: [..]Type_Id;
         arguments: [..]Type_Id;

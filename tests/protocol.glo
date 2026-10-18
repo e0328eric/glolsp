@@ -92,7 +92,7 @@ main :: () {
     quoted: String_Builder;
     write_json_string(&quoted, "\"\\\n\r\t😀한");
     #assert quoted.to_string() == "\"\\\"\\\\\\u000a\\u000d\\u0009😀한\"";
-    if Serialization_Document.json_document_from_string(quoted.to_string()) == {
+    if json_parse_document(quoted.to_string()) == {
         case .Err; exit(1);
         case .Ok(document);
             #assert json_text(.Some(&document.root)) == "\"\\\n\r\t😀한";

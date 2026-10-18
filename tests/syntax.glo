@@ -16,7 +16,65 @@ scope_includes :: (file: *const Parsed_File, scope: ssize, ancestor: ssize) -> b
     return false;
 }
 
+check_current_syntax :: () {
+    current := parse_file(#string
+        \\Point :: struct #derive(Clone, Copy) { x: ssize; }
+        \\Color :: enum u8 #derive(Clone, Copy) { Red; Green; }
+        \\#memory { reads(pointer), requires_unsafe(reason: "live pointer") }
+        \\read :: (pointer: *const ssize) -> ssize { return pointer.*; }
+        \\trusted :: (pointer: *const ssize) -> ssize { return pointer.*; }
+        \\#memory trusted { reads(pointer), requires_unsafe(reason: "live pointer") };
+        \\main :: () {
+        \\    x := 1;
+        \\    matrix: Matrix(ssize, 2, 2) = #matrix .[x, 2,; 3, 4;];
+        \\    empty: Matrix(ssize, 0, 2) = #matrix .[];
+        \\    #memory, /* audited */ trusted {
+        \\        local := read(&x);
+        \\        read(&local) #memory { reads(local), noescape(local) };
+        \\        #memory,
+        \\            trusted { nested := local; }
+        \\    }
+        \\    after := x;
+        \\}
+    );
+    #assert current.language.diagnostics.count == 0;
+    matrix := current.nodes[current.symbols[symbol_named(&current, "matrix")].value_node];
+    #assert matrix.kind == .Aggregate && matrix.matrix_rows == 2 && matrix.matrix_columns == 2;
+    elements: ssize = 0;
+    child := matrix.first_child;
+    while child >= 0 {
+        elements += 1;
+        child = current.nodes[child].next_sibling;
+    }
+    #assert elements == 4;
+    empty := current.nodes[current.symbols[symbol_named(&current, "empty")].value_node];
+    #assert empty.matrix_rows == 0 && empty.matrix_columns == 0;
+    local := current.symbols[symbol_named(&current, "local")];
+    nested := current.symbols[symbol_named(&current, "nested")];
+    after := current.symbols[symbol_named(&current, "after")];
+    #assert local.scope != after.scope && nested.scope != local.scope;
+    #assert scope_includes(&current, nested.scope, local.scope);
+    destroy_parsed_file(&current);
+
+    for source: .[
+        "main :: () { value := #matrix .[1, 2; 3]; after := 1; }",
+        "main :: () { value := #matrix [1, 2]; after := 1; }",
+        "main :: () { value := #matrix .[1,; ;]; after := 1; }",
+        "main :: () { #memory,trusted; after := 1; }",
+        "main :: () { #memory,trusted(\"reason\") {} after := 1; }",
+        "main :: () { #memory trusted(\"reason\") {} after := 1; }",
+        "main :: () { #memory,unknown {} after := 1; }",
+        "#memory,trusted {} after := 1;",
+    ] {
+        invalid := parse_file(source);
+        #assert invalid.language.diagnostics.count > 0;
+        #assert symbol_named(&invalid, "after") >= 0;
+        destroy_parsed_file(&invalid);
+    }
+}
+
 main :: () {
+    check_current_syntax();
     source := #string
         \\#public {
         \\Point :: struct { x: f64; y: f64; }
@@ -37,7 +95,7 @@ main :: () {
     ;
     file := parse_file(source);
     if file.language.diagnostics.count > 0 {
-        for diagnostic: file.language.diagnostics print("{} at {}\n", diagnostic.message,
+        for diagnostic: file.language.diagnostics.view() print("{} at {}\n", diagnostic.message,
             diagnostic.start);
     }
     #assert file.language.diagnostics.count == 0;
@@ -62,7 +120,7 @@ main :: () {
     #assert file.imports[1].path == "helper.glo" && file.imports[1].load;
     calls: ssize = 0;
     members: ssize = 0;
-    for node: file.nodes {
+    for node: file.nodes.view() {
         if node.kind == .Call calls += 1;
         if node.kind == .Member members += 1;
     }
@@ -148,7 +206,7 @@ main :: () {
     #assert captures.nodes[arm.value_node].argument_index == 0;
     captured_references: ssize = 0;
     arm_references: ssize = 0;
-    for node: captures.nodes {
+    for node: captures.nodes.view() {
         if node.kind != .Identifier continue;
         token := captures.language.tokens[node.token];
         name := patterns.substring(token.start, token.end);
@@ -168,7 +226,7 @@ main :: () {
 
     bindings := parse_file(#string
         \\main :: () {
-        \\    #pattern .Some(home) := home_dir() else { return; };
+        \\    #pattern .Some(home) := get_home_dir() else { return; };
         \\    #pattern Point.{ .x = field, ... } := point else { return; };
         \\    #pattern .[first, second] := items else { return; };
         \\    #pattern .Some(_) := optional else { return; };
@@ -210,7 +268,7 @@ main :: () {
         destroy_parsed_file(&small);
         large := parse_file(large_source);
         #assert large.language.diagnostics.count == 0 && large.symbols.count == 1000;
-        for symbol: large.symbols {
+        for symbol: large.symbols.view() {
             if symbol.kind != 12 continue;
             procedure := large.nodes[symbol.value_node];
             #assert procedure.kind == .Procedure && procedure.value_node >= 0;

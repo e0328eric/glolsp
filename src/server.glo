@@ -77,12 +77,12 @@ server_write_diagnostic :: (
 server_write_diagnostics :: (out: *String_Builder, workspace: *Workspace, index: ssize) {
     count: ssize = 0;
     out.write_byte(#char "[");
-    for diagnostic: workspace.files[index].syntax.language.diagnostics {
+    for diagnostic: workspace.files[index].syntax.language.diagnostics.view() {
         if count > 0 out.write_byte(#char ",");
         count += 1;
         server_write_diagnostic(out, workspace.files[index].source, diagnostic);
     }
-    for diagnostic: workspace.files[index].semantic.diagnostics {
+    for diagnostic: workspace.files[index].semantic.diagnostics.view() {
         if count > 0 out.write_byte(#char ",");
         count += 1;
         server_write_diagnostic(out, workspace.files[index].source, diagnostic);
@@ -305,7 +305,7 @@ server_workspace_symbol_file :: (workspace: *Workspace, file: ssize) -> bool {
     in_standard := standard.count > 0 && path.starts_with(standard) &&
         (path.count == standard.count || path[standard.count] == #char "/");
     if !in_standard return true;
-    for root: workspace.roots {
+    for root: workspace.roots.view() {
         if path.starts_with(root) &&
            (path.count == root.count || path[root.count] == #char "/") return true;
     }
@@ -622,7 +622,7 @@ server_process :: (server: *Server, output: *File, message: *Json) -> s32 {
             _ := rpc_error(&output, .None, -32700, "Message is not valid UTF-8.");
             continue;
         }
-        if Serialization_Document.json_document_from_string(frame.body) == {
+        if json_parse_document(frame.body) == {
             case .Err;
             if !rpc_error(&output, .None, -32700, "Invalid JSON.") return 1;
             case .Ok(message);

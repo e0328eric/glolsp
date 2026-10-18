@@ -1,9 +1,10 @@
 // Source analysis deliberately borrows the document text. Keep that text alive
 // until the analysis is destroyed; all offsets are UTF-8 byte offsets.
+#import "Memory/Ownership";
 #import "Strings/Utf8";
 #import "Unicode";
 
-#public Language_Token :: struct {
+#public Language_Token :: struct #derive(Clone, Copy) {
     start: ssize;
     end: ssize;
     kind: s32; // identifier, number, string, comment, keyword, punctuation, directive
@@ -11,7 +12,7 @@
     scope: ssize = -1;
 }
 
-#public Language_Symbol :: struct {
+#public Language_Symbol :: struct #derive(Clone, Copy) {
     name: string;
     detail: string;
     documentation: string;
@@ -24,7 +25,7 @@
     scope_end: ssize;
 }
 
-#public Language_Diagnostic :: struct {
+#public Language_Diagnostic :: struct #derive(Clone, Copy) {
     start: ssize;
     end: ssize;
     message: string;
@@ -366,7 +367,7 @@ language_match_delimiters :: (source: string, analysis: *Language_Analysis) {
             if stack.count > 0 &&
                language_token_text(source, analysis, stack[stack.count - 1]) == expected {
                 open := stack[stack.count - 1];
-                stack.count -= 1;
+                _ := array_pop_last(&stack);
                 analysis.tokens[i].matching = open;
                 analysis.tokens[open].matching = i;
                 if text == "}" scope = analysis.tokens[open].scope;
@@ -377,7 +378,7 @@ language_match_delimiters :: (source: string, analysis: *Language_Analysis) {
             }
         }
     }
-    for open: stack {
+    for open: stack.view() {
         token := analysis.tokens[open];
         language_add_diagnostic(analysis, token.start, token.end, "Unclosed delimiter.");
     }
@@ -419,7 +420,7 @@ language_declarations :: (source: string, analysis: *Language_Analysis) {
             enclosing := analysis.tokens[token.scope];
             if enclosing.matching >= 0 {
                 enclosing_end := analysis.tokens[enclosing.matching].end;
-                for parent: analysis.symbols {
+                for parent: analysis.symbols.view() {
                     if (parent.kind == 23 || parent.kind == 10 || parent.kind == 11) &&
                        parent.end == enclosing_end
                         aggregate_kind = parent.kind;
@@ -506,7 +507,7 @@ language_declarations :: (source: string, analysis: *Language_Analysis) {
             scope_end = declaration_end;
         }
         // Parameter bindings live in the procedure, including its signature.
-        for parent: analysis.symbols {
+        for parent: analysis.symbols.view() {
             if parent.kind == 12 && token.start > parent.selection_end && token.start < parent.end {
                 if token.start < parent.start + parent.detail.count {
                     scope_start = parent.start;

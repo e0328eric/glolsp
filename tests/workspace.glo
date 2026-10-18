@@ -61,7 +61,7 @@ main :: () {
     workspace_add_import_path(&workspace, "build/workspace-fixtures/modules");
     completion_parses := workspace.parse_count;
     completions := workspace_complete_import(&workspace, -1, "Sha", false);
-    defer { for path: completions.paths path.free(); }
+    defer { for path: completions.paths.view() path.free(); }
     #assert !completions.incomplete && completions.paths.count == 2;
     #assert completions.paths[0] == "Shapes" && completions.paths[1] == "Shapes/";
     #assert workspace.files.count == prelude_files && workspace.parse_count == completion_parses;

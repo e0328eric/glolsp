@@ -12,6 +12,11 @@ glosso first.glo
 glosso first.glo -- test
 ```
 
+Use a current Glosso compiler and matching standard library, including the
+move-by-default ownership rules and Prelude `Clone`/`Copy` typeclasses. The LSP's
+value records explicitly derive `Clone, Copy`; workspace storage remains owned
+and array traversal borrows views.
+
 The default task produces `build/glolsp`. The `build`, `run`, `test`, and `help`
 tasks are also available explicitly. Tests require Python 3; there are no
 package manager dependencies. The build driver uses `Compiler.Workspace` with
@@ -61,6 +66,14 @@ payloads, and tuple destructuring.
 Aggregate pointers support `pointer.field`, nested chains, and field addresses.
 Value and pointer receivers participate in navigation and signature help;
 generic inherent heads specialize their methods for the receiver's type.
+Matrix literals use `#matrix .[a, b; c, d]`. The server checks rectangular rows,
+known dimensions and element types, preserves element references for navigation
+and rename, and infers matrix indexing results. Literal decimal dimensions and
+simple constant aliases are recognized; unevaluated dimensions stay unknown.
+`#memory,trusted` blocks retain ordinary lexical scopes and name diagnostics.
+Leading contracts, call assertions, named overlays, and `#derive(Clone, Copy)`
+on structures and enums are accepted. Completion includes the current directives
+and renamed standard-library APIs loaded from the configured standard library.
 Unknown types remain unknown instead of producing speculative type errors.
 
 Open buffers take precedence over disk contents. Changed buffers are reparsed;
@@ -118,10 +131,16 @@ its ownership summaries still report warnings for mutable nested workspace
 storage. Compile either suite directly to inspect these warnings; memory
 checking is never disabled.
 Lifecycle regressions cover aliasing, cleanup, and repeated updates as well.
+Current-language regressions also cover matrix literals, trusted blocks,
+derivation annotations, brace format strings, and renamed path and process APIs.
+The JSON parser call has a narrow trusted boundary for the standard library's
+internal container operations; source is borrowed during parsing and decoded
+documents own their contents.
 
 Analysis is an independent implementation, not the compiler's complete semantic
 engine. It does not execute `#comptime`, expand macros or generated source,
 evaluate reflection, or implement the compiler's full typeclass solver.
+It also does not enforce the compiler's move, borrow, or unsafe-call checks.
 Queries depending on those operations can return incomplete results. Ordinary
 source is parsed even when incomplete, and supported declarations remain usable
 after a nearby syntax error. Compiler diagnostics are not invoked because the

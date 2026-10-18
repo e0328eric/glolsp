@@ -19,7 +19,7 @@ layout_newline :: (state: *Layout_State, out: *String_Builder) {
     while out.buf.count > 0 {
         last := out.buf[out.buf.count - 1];
         if last != #char " " && last != #char "\t" break;
-        out.buf.count -= 1;
+        _ := out.pop_byte();
     }
     if !state.line_start out.write_byte(#char "\n");
     state.line_start = true;
@@ -91,6 +91,7 @@ layout_no_space_after :: (text: string) -> bool {
         adjacent_operators := i > 0 && previous_end == token.start && token.kind == 6 &&
             previous_kind == 6;
         space := i > 0 && !layout_no_space_before(text) && !layout_no_space_after(previous);
+        if text == "." && (previous == "#matrix" || previous == "#simd") space = true;
         if adjacent_operators space = false;
         if text == "(" && previous_kind == 1 space = false;
         if previous_kind == 7 && text == "(" space = false;

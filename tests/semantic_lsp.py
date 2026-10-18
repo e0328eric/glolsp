@@ -71,6 +71,106 @@ class SemanticLspTests(unittest.TestCase):
         items = result["items"] if isinstance(result, dict) else result
         return {item["label"] for item in items}
 
+    def test_current_language_matrix_and_trusted_block_queries(self):
+        source = (
+            "Point :: struct #derive(Clone, Copy) { x: ssize; }\n"
+            "Color :: enum u8 #derive(Clone, Copy) { Red; Green; }\n"
+            '#memory { reads(value), requires_unsafe(reason: "live pointer") }\n'
+            "read :: (value: *const ssize) -> ssize { return value.*; }\n"
+            "main :: () {\n"
+            "    element := 1;\n"
+            "    matrix: Matrix(ssize, 2, 2) = #matrix .[element, 2; 3, element];\n"
+            "    inferred := matrix; entry := matrix[0, 1];\n"
+            "    #memory, /* audited */ trusted {\n"
+            "        local := element; read(&local);\n"
+            "    }\n"
+            '    format := "{0:x} {{literal}} 100% {:c}";\n'
+            "}\n"
+        )
+        uri = self.write("main.glo", source)
+        self.initialize()
+        self.open(uri)
+        diagnostics = self.client.request("textDocument/diagnostic", {
+            "textDocument": {"uri": uri},
+        })["items"]
+        self.assertEqual(diagnostics, [])
+        hover = self.at("textDocument/hover", uri, "inferred")
+        self.assertIn("Matrix(ssize, 2, 2)", str(hover["contents"]))
+        entry = self.at("textDocument/hover", uri, "entry")
+        self.assertIn("ssize", str(entry["contents"]))
+        self.assertEqual(self.at("textDocument/definition", uri, "local);"), [{
+            "uri": uri, "range": source_range(source, "local"),
+        }])
+        renamed = self.at("textDocument/rename", uri, "element", newName="coefficient")
+        self.assertEqual(len(renamed["changes"][uri]), 4)
+        for directive in ["#matrix", "#derive", "#memory,trusted"]:
+            self.assertIn(directive, self.completion_names(uri, "#memory", offset=1))
+        formatted = self.client.request("textDocument/formatting", {
+            "textDocument": {"uri": uri},
+            "options": {"tabSize": 4, "insertSpaces": True},
+        })[0]["newText"]
+        self.assertIn("#matrix .[element, 2; 3, element]", formatted)
+        self.assertIn('"{0:x} {{literal}} 100% {:c}"', formatted)
+        self.client.notify("textDocument/didChange", {
+            "textDocument": {"uri": uri, "version": 2},
+            "contentChanges": [{"text": formatted}],
+        })
+        self.assertEqual(self.client.diagnostics(uri, 2), [])
+
+    def test_matrix_diagnostics_and_trusted_blocks_keep_name_checks(self):
+        source = (
+            "main :: () {\n"
+            "    size: Matrix(ssize, 2, 2) = #matrix .[1, 2];\n"
+            "    item: Matrix(ssize, 1, 1) = #matrix .[true];\n"
+            "    ordinary: Matrix(ssize, 1, 2) = .[1, 2];\n"
+            "    #memory,trusted { local := 1; missing; }\n"
+            "    local;\n"
+            "}\n"
+        )
+        uri = self.write("main.glo", source)
+        self.initialize()
+        self.open(uri)
+        diagnostics = self.client.request("textDocument/diagnostic", {
+            "textDocument": {"uri": uri},
+        })["items"]
+        messages = [item["message"] for item in diagnostics]
+        self.assertEqual(len(diagnostics), 5)
+        self.assertEqual(messages.count("Unresolved identifier."), 2)
+        self.assertTrue(any("dimensions" in message for message in messages))
+        self.assertTrue(any("Matrix element" in message for message in messages))
+        self.assertTrue(any("require #matrix" in message for message in messages))
+        self.assertEqual(self.at("textDocument/definition", uri, "local;"), [])
+
+    def test_current_standard_library_names_resolve(self):
+        source = (
+            '#import "File_System/Directory";\n'
+            '#import "File_System/Path";\n'
+            '#import "Process/Command";\n'
+            '#import "Compiler";\n'
+            "main :: () {\n"
+            "    home := get_home_dir();\n"
+            '    path := Path.from_string(".");\n'
+            '    run_command("echo", "hello", .capture_and_return_output = true);\n'
+            '    run_shell_command("echo hello");\n'
+            '    run_build_command("echo build");\n'
+            "}\n"
+        )
+        uri = self.write("main.glo", source)
+        self.initialize()
+        self.open(uri)
+        diagnostics = self.client.request("textDocument/diagnostic", {
+            "textDocument": {"uri": uri},
+        })["items"]
+        self.assertEqual(diagnostics, [])
+        for name in ["get_home_dir", "from_string", "run_command",
+                     "run_shell_command", "run_build_command"]:
+            definitions = self.at("textDocument/definition", uri, name)
+            self.assertEqual(len(definitions), 1, name)
+            self.assertNotEqual(definitions[0]["uri"], uri)
+        path_members = self.completion_names(uri, "Path.")
+        self.assertIn("from_string", path_members)
+        self.assertNotIn("path_from_string", path_members)
+
     def test_cross_file_exports_and_alias_member_resolution(self):
         dependency = self.write("types.glo", (
             "#public Point :: struct { x: ssize; y: ssize; }\n"
@@ -324,7 +424,7 @@ class SemanticLspTests(unittest.TestCase):
     def test_pattern_binding_home_directory(self):
         uri = self.write("main.glo", (
             "main :: () -> s8 {\n"
-            "    #pattern .Some(home) := home_dir() else {\n"
+            "    #pattern .Some(home) := get_home_dir() else {\n"
             '        print("$HOME environment is not set\\n");\n'
             "        return FAILURE;\n"
             "    };\n"
@@ -333,7 +433,7 @@ class SemanticLspTests(unittest.TestCase):
             "    return SUCCESS;\n"
             "}\n"
             '#import "Io";\n'
-            '#import "File_System/Directory_Paths";\n'
+            '#import "File_System/Directory";\n'
             "SUCCESS :: 0;\n"
             "FAILURE :: 1;\n"
         ))

@@ -112,7 +112,7 @@ ide_write_occurrence :: (
     if !ide_valid_symbol(workspace, id) return true;
     original := workspace.files[id.file].syntax.symbols[id.symbol];
     if name == original.name return false;
-    for other: workspace.files[id.file].syntax.symbols {
+    for other: workspace.files[id.file].syntax.symbols.view() {
         if other.name == name && other.scope == original.scope return true;
     }
     for file: 0..workspace.files.count {
@@ -121,7 +121,7 @@ ide_write_occurrence :: (
             if !analysis_same_symbol(workspace.files[file].semantic.bindings[token], id) continue;
             offset := workspace.files[file].syntax.language.tokens[token].start;
             visible := analysis_visible_symbols(workspace, file, offset);
-            for candidate: visible {
+            for candidate: visible.view() {
                 if analysis_same_symbol(candidate, id) continue;
                 if workspace.files[candidate.file].syntax.symbols[candidate.symbol].name == name
                     return true;
@@ -171,7 +171,7 @@ ide_write_occurrence :: (
     hierarchical: bool,
     count: *ssize,
 ) {
-    for symbol: workspace.files[file].syntax.symbols {
+    for symbol: workspace.files[file].syntax.symbols.view() {
         if symbol.name == "_" continue;
         if query.count > 0 && !symbol.name.contains(query) continue;
         if count.* >= 500 return;
@@ -260,7 +260,7 @@ ide_write_import_completion :: (
 ) -> bool {
     syntax := &workspace.files[file].syntax;
     source := workspace.files[file].source;
-    for dependency: syntax.imports {
+    for dependency: syntax.imports.view() {
         if dependency.path_token < 0 || (dependency.embedded && !dependency.load) continue;
         token := syntax.language.tokens[dependency.path_token];
         if source[token.start] != #char "\"" continue;
@@ -276,11 +276,11 @@ ide_write_import_completion :: (
         if offset < start || offset > end continue;
         paths := workspace_complete_import(workspace, file, source[start..offset],
             dependency.load || dependency.exported);
-        defer { for path: paths.paths path.free(); }
+        defer { for path: paths.paths.view() path.free(); }
         if paths.incomplete out.write_string("{\"isIncomplete\":true,\"items\":[");
         else out.write_string("{\"isIncomplete\":false,\"items\":[");
         count: ssize = 0;
-        for path: paths.paths {
+        for path: paths.paths.view() {
             kind: ssize = 9;
             detail := "Glosso module";
             if dependency.load || dependency.exported {
@@ -339,7 +339,7 @@ ide_write_import_completion :: (
                 } else;
             }
             if token.kind == 3 || token.kind == 4 {
-                for diagnostic: syntax.language.diagnostics {
+                for diagnostic: syntax.language.diagnostics.view() {
                     if diagnostic.start == token.start index = previous;
                 }
             }
@@ -365,7 +365,7 @@ ide_write_import_completion :: (
     if member _ := candidates.replace(analysis_members_at(workspace, file, offset));
     else _ := candidates.replace(analysis_visible_symbols(workspace, file, offset));
     count: ssize = 0;
-    for id: candidates {
+    for id: candidates.view() {
         if !ide_valid_symbol(workspace, id) continue;
         symbol := workspace.files[id.file].syntax.symbols[id.symbol];
         if !symbol.name.starts_with(prefix) continue;
@@ -437,6 +437,7 @@ ide_write_import_completion :: (
             "#public",
             "#private",
             "#memory",
+            "#memory,trusted",
             "#comptime",
             "#if",
             "#assert",
@@ -444,6 +445,9 @@ ide_write_import_completion :: (
             "#insert",
             "#string",
             "#char",
+            "#matrix",
+            "#simd",
+            "#derive",
             "#self",
             "#Self_Type",
             "#on_drop_error",
@@ -500,7 +504,7 @@ ide_write_import_completion :: (
 #public ide_write_links :: (out: *String_Builder, workspace: *Workspace, file: ssize) {
     out.write_byte(#char "[");
     count: ssize = 0;
-    for edge: workspace.files[file].imports {
+    for edge: workspace.files[file].imports.view() {
         if edge.target < 0 continue;
         item := workspace.files[file].syntax.imports[edge.declaration];
         if count > 0 out.write_byte(#char ",");
@@ -684,7 +688,7 @@ ide_spelling_distance :: (left: string, right: string) -> ssize {
     end := json_offset(source, json_field(range, "end"));
     count: ssize = 0;
     out.write_byte(#char "[");
-    for diagnostic: workspace.files[file].semantic.diagnostics {
+    for diagnostic: workspace.files[file].semantic.diagnostics.view() {
         if diagnostic.start > end || diagnostic.end < start continue;
         if !diagnostic.message.starts_with("Unresolved") &&
             !diagnostic.message.starts_with("Unknown") continue;
@@ -696,7 +700,7 @@ ide_spelling_distance :: (left: string, right: string) -> ssize {
         if span.start > 0 && source[span.start - 1] == #char "."
             _ := visible.replace(analysis_members_at(workspace, file, span.start));
         else _ := visible.replace(analysis_visible_symbols(workspace, file, span.start));
-        for candidate: visible {
+        for candidate: visible.view() {
             symbol := workspace.files[candidate.file].syntax.symbols[candidate.symbol];
             if symbol.name == misspelled || ide_spelling_distance(
                 misspelled,
@@ -719,11 +723,11 @@ ide_spelling_distance :: (left: string, right: string) -> ssize {
         for target: 0..workspace.files.count {
             if target == file || !workspace.files[target].relevant continue;
             imported := false;
-            for edge: workspace.files[file].imports {
+            for edge: workspace.files[file].imports.view() {
                 if edge.target == target imported = true;
             }
             if imported continue;
-            for symbol: workspace.files[target].syntax.symbols {
+            for symbol: workspace.files[target].syntax.symbols.view() {
                 if symbol.scope != 0 || !symbol.is_public || symbol.name != misspelled continue;
                 base := path_dirname(workspace.files[file].path);
                 if path_lexically_relative(workspace.files[target].path, base) == {

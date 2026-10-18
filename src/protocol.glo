@@ -16,6 +16,15 @@
         status: s32;
     }
 
+    #memory { reads(source), noescape(source), returns_fresh(returned.Ok) }
+    json_parse_document :: (source: string) -> Serialization_Error!Serialization_Document {
+        // The parser reads source during this call and owns every decoded value.
+        // Its internal container operations require trust in the current standard library.
+        #memory,trusted {
+            return Serialization_Document.json_document_from_string(source, .max_depth = 128);
+        }
+    }
+
     #memory { returns_borrow(value), reads(value, name), noescape(value, name) }
     json_field :: (value: ?*Json, name: string) -> ?*Json {
         if #pattern.Some(pointer) = value return pointer.field_value(name);
