@@ -144,10 +144,13 @@ library's home-directory query supplies the platform equivalent on Windows).
 Import completion and compiler diagnostics use this same directory.
 The instruction limit applies per compile-time interpreter invocation; zero
 means unlimited. Normal compiler I/O is captured inside libglosso so a Glosso
-`print` at compile time cannot break JSON-RPC framing. Compilation has the same
-host I/O/FFI semantics as the compiler; it is not a sandbox, and native calls are
-not interrupted by the instruction budget. Nested native-driver build operations
-are outside the frontend library's scope and report diagnostics.
+`print` at compile time cannot break JSON-RPC framing. Failed analysis includes
+captured stdout and stderr in its first diagnostic, limited to 16 KiB per stream.
+Native C builds and Bindgen use the SDK beside the selected standard library.
+Compilation has the same host I/O/FFI semantics as the compiler; it is not a
+sandbox, and native calls are not interrupted by the instruction budget.
+Nested native-driver build operations are outside the frontend library's scope
+and report diagnostics.
 
 Analysis is synchronous. Diagnostics and editor requests share a compiler snapshot
 for each document at the current workspace input revision. Repeated requests do
@@ -167,14 +170,16 @@ python3 tests/compiler_lsp.py --server build/glolsp
 Seven native Glosso suites cover syntax, tokens, layout, protocol, workspace
 ownership, and navigation analysis. The stdio suites exercise editing, rename,
 imports, completion, formatting, and lifecycle behavior. `compiler_lsp.py`
-checks compile-time failure/insertion, captured output, step limits, UTF-16
+checks compile-time failure/insertion, captured failure output and locations,
+step limits, UTF-16
 incremental edits, unsaved dependency changes, and restoring disk on close. It
 also checks generated APIs, import visibility, snapshot invalidation, compiler
 inference, generated-rename rejection, incomplete-directive recovery, and avoiding
 repeated compile-time I/O. The integration suite checks diagnostics and standard
 module completion with default editor initialization in the actual checkout.
 `config_lsp.py` checks TOML configuration, XDG paths, compiler symlinks, relative
-paths, installation layouts, override precedence, and invalid configuration.
+paths, installation layouts, native SDK lookup, override precedence, and invalid
+configuration.
 
 `src/compiler.glo` owns the libglosso snapshots and applies generated namespaces
 and checked facts. `language.glo` consumes

@@ -63,6 +63,7 @@
         compiler_ready: bool;
         compiler_document: Serialization_Document;
         compiler_error: str;
+        compiler_output: str;
     }
 
     Workspace :: struct {
@@ -377,6 +378,7 @@
         workspace_clear_compiler_facts(file);
         if file.compiler_ready file.compiler_document.destroy();
         file.compiler_error.free();
+        file.compiler_output.free();
         file.source.free(); file.path.free(); file.uri.free();
     }
     workspace.files.free();

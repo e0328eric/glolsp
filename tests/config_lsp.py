@@ -69,6 +69,50 @@ class ConfigurationLsp(unittest.TestCase):
         self.assert_standard(client, standard)
         self.assertEqual(client.errors, [])
 
+    @unittest.skipUnless(sys.platform == "linux", "Linux SDK fixture")
+    def test_selected_compiler_sdk_supplies_native_headers_and_libraries(self):
+        compiler, standard = self.make_installation()
+        self.config.write_text(f"compiler_path = {json.dumps(str(compiler))}\n")
+        cpu = {"x86_64": "x86_64", "aarch64": "aarch64"}.get(os.uname().machine)
+        if cpu is None:
+            self.skipTest("unsupported fixture target")
+        target = standard.parent / f"lib/{cpu}-linux-gnu"
+        include = target / "include"
+        include.mkdir(parents=True)
+        header = include / "glolsp_sdk_fixture.h"
+        header.write_text("#define SDK_VALUE 42\n")
+        marker = target / "lib/libglolsp_sdk_fixture.a"
+        marker.parent.mkdir()
+        marker.write_bytes(b"!<arch>\n")
+        native = self.project / "fixture.c"
+        native.write_text('#include <glolsp_sdk_fixture.h>\nint fixture(void) { return SDK_VALUE; }\n')
+        self.environment["GLOSSO_NATIVE_CACHE_DIR"] = str(self.root / "native cache")
+        client = self.start()
+        uri = (self.project / "main.glo").as_uri()
+        source = f'''#import "Compiler"; #import "Io";
+#comptime {{
+    #assert find_library("libglolsp_sdk_fixture.a") == {json.dumps(str(marker))};
+    result := Native_Compile_Output.compile_c_archive("glolsp-sdk-fixture", .[{json.dumps(str(native))}],
+        .compiler_args = .["-nostdinc"]);
+    if result == {{ case .Ok(archive); case .Err(failure); print("{{}}", failure.message); exit(1); }}
+}}
+'''
+        client.open(uri, source)
+        self.assertEqual(client.diagnostics(uri, 1), [])
+        header.unlink()
+        client.change(uri, [{"text": source + "\n"}])
+        errors = client.diagnostics(uri, 2)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("glolsp_sdk_fixture.h", errors[0]["message"])
+        self.assertIn("Compile-time stdout:", errors[0]["message"])
+        self.assertEqual(errors[0]["range"]["start"]["line"], 1)
+        # An unsaved edit must still report real errors after the native build.
+        header.write_text("#define SDK_VALUE 42\n")
+        client.change(uri, [{"text": source + '\nanswer::()->s32{return absent;}'}], 3)
+        errors = client.diagnostics(uri, 3)
+        self.assertTrue(any("absent" in error["message"] for error in errors), errors)
+        self.assertEqual(client.errors, [])
+
     def test_relative_path_is_based_on_config_directory(self):
         compiler, standard = self.make_installation()
         relative = os.path.relpath(compiler, self.config.parent)

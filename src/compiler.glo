@@ -169,6 +169,25 @@ compiler_error :: (workspace: *Workspace, file: ssize, message: str) {
     workspace.files[file].compiler_error = message.clone();
     workspace.files[file].compiler_epoch = workspace.compiler_epoch;
 }
+// The ABI returns arbitrary bytes. Bound each stream and replace invalid UTF-8
+// before including failed compile-time output in a JSON diagnostic.
+compiler_capture_output :: (out: *String_Builder, result: Glosso_Handle, stream: u32, label: str) {
+    captured := glosso_text(glosso_result_output(result, stream));
+    if captured.count == 0 return;
+    out.write_string("\n\nCompile-time "); out.write_string(label); out.write_string(":\n");
+    cursor: ssize = 0;
+    limit: ssize = 16384;
+    while cursor < captured.count && cursor < limit {
+        if #pattern.Some(decoded) = captured.decode_at(cursor) {
+            if decoded.next > limit break;
+            out.write_string(captured[cursor..decoded.next]);
+            cursor = decoded.next;
+        } else {
+            out.write_string("�"); cursor += 1;
+        }
+    }
+    if cursor < captured.count out.write_string("\n[output truncated]");
+}
 #public compiler_refresh :: (workspace: *Workspace, index: ssize) {
     if workspace.files[index].generated ||
        workspace.files[index].compiler_epoch == workspace.compiler_epoch return;
@@ -177,8 +196,10 @@ compiler_error :: (workspace: *Workspace, file: ssize, message: str) {
         workspace.files[index].compiler_ready = false;
     }
     workspace.files[index].compiler_error.free();
+    workspace.files[index].compiler_output.free();
     empty: str;
     workspace.files[index].compiler_error = empty;
+    workspace.files[index].compiler_output = empty;
     handle: Glosso_Handle;
     if glosso_context_create(glosso_view(workspace.std_path), &handle) != 0 {
         compiler_error(workspace, index, glosso_text(glosso_last_error())); return;
@@ -205,6 +226,13 @@ compiler_error :: (workspace: *Workspace, file: ssize, message: str) {
         case .Err; compiler_error(workspace, index, "Invalid JSON from libglosso"); return;
         case .Ok(document);
             compiler_apply(workspace, .Some(&document.root));
+            if glosso_result_success(result) == 0 {
+                output: String_Builder;
+                defer output.free();
+                compiler_capture_output(&output, result, 1, "stdout");
+                compiler_capture_output(&output, result, 2, "stderr");
+                workspace.files[index].compiler_output = output.to_string().clone();
+            }
             workspace.files[index].compiler_document = document;
             workspace.files[index].compiler_ready = true;
             workspace.files[index].compiler_epoch = workspace.compiler_epoch;
@@ -232,7 +260,11 @@ compiler_error :: (workspace: *Workspace, file: ssize, message: str) {
             if #partial json_text(json_field(item, "severity")) == { case "warning"; severity = 2; }
             write_json_integer(out, severity);
             out.write_string(",\"message\":");
-            write_json_string(out, json_text(json_field(item, "message")));
+            message: String_Builder;
+            defer message.free();
+            message.write_string(json_text(json_field(item, "message")));
+            if i == 0 message.write_string(file.compiler_output);
+            write_json_string(out, message.to_string());
             out.write_string(",\"relatedInformation\":[");
             related: ssize = 0;
             if foreign_file {

@@ -86,6 +86,54 @@ class CompilerLsp(unittest.TestCase):
         self.assertEqual(self.client.diagnostics(uri, 2), [])
         self.assertEqual(self.client.errors, [])
 
+    def test_comptime_exit_reports_output_location_and_recovers(self):
+        source = ('#import "Io"; #import "File_System/File";\n'
+                  '#comptime { print("earlier block\\n"); }\n'
+                  '#comptime { print("native build failed: missing SDK 😀\\n"); '
+                  'error := File.stderr(); _ := error.write("compiler details\\n"); exit(7); }\n')
+        uri, errors = self.open("exit.glo", source)
+        self.assertEqual(len(errors), 1, errors)
+        error = errors[0]
+        self.assertEqual(error["range"]["start"], position(source, "#comptime", 1))
+        self.assertIn("exited with status 7", error["message"])
+        self.assertIn("Compile-time stdout:\nearlier block\nnative build failed: missing SDK 😀\n", error["message"])
+        self.assertIn("Compile-time stderr:\ncompiler details\n", error["message"])
+        self.assertEqual(self.pull(uri), errors)
+        self.client.change(uri, [{"text": "answer::42;"}])
+        self.assertEqual(self.client.diagnostics(uri, 2), [])
+        self.client.change(uri, [{"text": "answer::()->s32{return absent;}"}], 3)
+        errors = self.client.diagnostics(uri, 3)
+        self.assertTrue(errors)
+        self.assertNotIn("missing SDK", str(errors))
+        self.assertEqual(self.client.errors, [])
+
+    def test_imported_comptime_exit_retains_related_location(self):
+        module = '// dependency\n#import "Io";\n#comptime { print("dependency failed\\n"); exit(3); }'
+        dependency = self.root / "dependency.glo"
+        dependency.write_text(module)
+        uri, errors = self.open("imported-exit.glo", '#import "./dependency.glo";')
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("dependency failed", errors[0]["message"])
+        related = errors[0]["relatedInformation"][0]["location"]
+        self.assertEqual(related["uri"], dependency.as_uri())
+        self.assertEqual(related["range"]["start"], position(module, "#comptime"))
+        self.assertEqual(self.pull(uri), errors)
+
+    def test_comptime_output_is_bounded_and_valid_utf8(self):
+        payload = "x" * 16382 + "😀" + "hidden tail"
+        source = ('#import "Io"; #import "File_System/File";\n'
+                  '#comptime { out := File.stdout(); _ := out.write(' + json.dumps(payload, ensure_ascii=False) + '); '
+                  'error := File.stderr(); _ := error.write_byte(255); exit(1); }')
+        uri, errors = self.open("binary-output.glo", source)
+        self.assertEqual(len(errors), 1, errors)
+        message = errors[0]["message"]
+        self.assertIn("exited with status 1", message)
+        self.assertIn("x" * 16382 + "\n[output truncated]", message)
+        self.assertNotIn("hidden tail", message)
+        self.assertIn("Compile-time stderr:\n�", message)
+        self.assertEqual(self.pull(uri), errors)
+        self.assertEqual(self.client.errors, [])
+
     def test_unsaved_import_changes_and_close_restore_disk(self):
         module = self.root / "new/Module/module.glo"
         module.parent.mkdir(parents=True)
