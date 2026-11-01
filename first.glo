@@ -5,22 +5,180 @@
 
 #import "Compiler";
 #import "File_System/File";
+#import "File_System/Directory";
+#import "File_System/Path";
+#import "Glosso/Paths";
 #import "File_System/System";
 #import "Format";
 #import "Io";
 #import "Os";
 #import "Process/Command";
+#import "Process/Environment";
 #import "Typeclass/Error";
 
-glolsp_executable :: (name: string = "glolsp") -> string {
+// Use the compile-time filesystem primitives; ordinary File copy operations
+// require native file handles unavailable in the build VM.
+glolsp_copy_tree :: (source: str, destination: str) -> bool {
+    if !os_fs_is_directory(source) {
+        // Clang headers retain read-only installation permissions. Replace
+        // their directory entries so a second build can update them too.
+        if os_fs_exists(destination) || os_fs_is_symlink(destination) {
+            if !os_fs_remove_path(destination) {
+                print("could not replace {}\n", destination);
+                return false;
+            }
+        }
+        if os_fs_copy_file(source, destination, false) return true;
+        print("could not copy {} to {}\n", source, destination);
+        return false;
+    }
+    if !os_fs_is_directory(destination) && !os_fs_create_directories(destination) {
+        print("could not create {}\n", destination);
+        return false;
+    }
+    listed := read_directory(source);
+    if listed == {
+        case .Err(failure); report_error(failure); return false;
+        case .Ok(entries);
+            defer entries.free();
+            for entry: entries.entries.view() {
+                from := path_join(source, entry.name);
+                defer from.free();
+                to := path_join(destination, entry.name);
+                defer to.free();
+                if !glolsp_copy_tree(from, to) return false;
+            }
+    }
+    return true;
+}
+
+// Older builds bundled std. Use the Glosso installation's modules instead.
+glolsp_remove_bundled_std :: (resources: str) -> bool {
+    standard := path_join(resources, "std");
+    defer standard.free();
+    if os_fs_exists(standard) || os_fs_is_symlink(standard) {
+        if os_fs_remove_all(standard) < 0 {
+            print("could not remove obsolete bundled std: {}\n", standard);
+            return false;
+        }
+    }
+    return true;
+}
+
+// Bundle the matching frontend and Bindgen headers. Standard modules are
+// resolved at runtime from GLOSSO_STD or the user's Glosso installation.
+glolsp_bundle :: () -> bool {
+    if (!os_fs_is_directory("share") && !os_fs_create_directories("share")) ||
+       (!os_fs_is_directory("build") && !os_fs_create_directories("build")) {
+        print("could not create bundle directories\n");
+        return false;
+    }
+    prefix := path_dirname(GLOSSO_STANDARD_DIRECTORY);
+    library := glosso_library_path(prefix);
+    if !os_fs_is_regular_file(library) {
+        print("libglosso is missing: {}. Build the SDK with build.exe libglosso first.\n", library);
+        return false;
+    }
+    destination := path_join("share", glosso_library_filename());
+    #if OUT.os == .Windows destination = path_join("build", glosso_library_filename());
+    if !glolsp_copy_tree(library, destination) return false;
+    if !glolsp_remove_bundled_std("share") return false;
+    resources := path_join(path_dirname(library), "lib/clang");
+    if !os_fs_is_directory(resources) resources = path_join(prefix, "lib/clang");
+    if !os_fs_is_directory(resources) {
+        print("Clang resource headers are missing: {}\n", resources);
+        return false;
+    }
+    if !os_fs_is_directory("share/lib") && !os_fs_create_directories("share/lib") return false;
+    resource_destination := "share/lib/clang";
+    #if OUT.os == .Windows resource_destination = "build/lib/clang";
+    if !glolsp_copy_tree(resources, resource_destination) return false;
+    return true;
+}
+
+glolsp_executable :: (name: str = "glolsp") -> str {
     #if OUT.os == Target_OS.Windows return tprint("build/{}.exe", name);
     else return tprint("build/{}", name);
 }
 
+glolsp_default_install_prefix :: () -> str {
+    variable := "HOME";
+    #if HOST.os == .Windows variable = "USERPROFILE";
+    if environment_get_or(variable, "") == {
+        case .Err(failure); report_error(failure); return "";
+        case .Ok(directory);
+            defer directory.free();
+            if directory.count > 0 return path_join(directory, ".local/glolsp");
+    }
+    print("{} is not set; use install --prefix DIR\n", variable);
+    return "";
+}
+
+// A normal user install seeds editable configuration without overwriting it.
+// Explicit --prefix installs are also used for packaging and leave it alone.
+glolsp_install_config :: () -> bool {
+    if #pattern.Some(directory) = get_config_dir() {
+        defer directory.free();
+        base := directory.to_string();
+        defer base.free();
+        folder := path_join(base, "glolsp");
+        defer folder.free();
+        file := path_join(folder, "config.toml");
+        defer file.free();
+        if os_fs_exists(file) || os_fs_is_symlink(file) return true;
+        if (!os_fs_is_directory(folder) && !os_fs_create_directories(folder)) ||
+           !os_fs_copy_file("config.example.toml", file, false) {
+            print("could not create {}\n", file);
+            return false;
+        }
+        print("created {}\n", file);
+    }
+    return true;
+}
+
+// Keep bin/ beside share/ so the same module parameters work after installation.
+glolsp_install :: (prefix: str) -> bool {
+    binaries := path_join(prefix, "bin");
+    defer binaries.free();
+    resources := path_join(prefix, "share");
+    defer resources.free();
+    // Reject copying the bundle into itself, including through symlinks.
+    if relative(resources, "share") == {
+        case .Err(failure); report_error(failure); return false;
+        case .Ok(path);
+            defer path.free();
+            if path_lexically_contains(".", path) {
+                print("installation share directory must be outside the build's share directory\n");
+                return false;
+            }
+    }
+    if !os_fs_is_directory(binaries) && !os_fs_create_directories(binaries) {
+        print("could not create {}\n", binaries);
+        return false;
+    }
+    if !glolsp_remove_bundled_std(resources) return false;
+    if !glolsp_copy_tree("share", resources) return false;
+    #if OUT.os == .Windows {
+        library := path_join("build", glosso_library_filename());
+        defer library.free();
+        installed_library := path_join(binaries, glosso_library_filename());
+        defer installed_library.free();
+        if !glolsp_copy_tree(library, installed_library) return false;
+        headers := path_join(binaries, "lib/clang");
+        defer headers.free();
+        if !glolsp_copy_tree("build/lib/clang", headers) return false;
+    }
+    source := glolsp_executable();
+    executable := path_join(binaries, path_basename(source));
+    defer executable.free();
+    if !glolsp_copy_tree(source, executable) return false;
+    print("installed {}\n", executable);
+    return true;
+}
+
 glolsp_build :: (
-    source: string = "main.glo",
-    name: string = "glolsp",
-    strict: bool = false,
+    source: str = "main.glo",
+    name: str = "glolsp",
 ) -> bool {
     if !os_fs_is_directory("build") && !os_fs_create_directories("build") {
         print("could not create build/\n");
@@ -28,7 +186,7 @@ glolsp_build :: (
     }
     workspace := Workspace.create(name);
     cache_result := absolute("build/cache");
-    cache_path: string;
+    cache_path: str;
     if cache_result == {
         case .Ok(path); cache_path = path;
         case .Err(failure);
@@ -42,7 +200,6 @@ glolsp_build :: (
 
     // Keep runtime bounds and overflow guards enabled in the server.
     options.set_temp_allocator_size(64 * 1024 * 1024);
-    if strict options.borrow_check = .Error;
     options.add_compiler_arg(tprint("--cache-dir={}", cache_path));
     options.set_build_options(workspace);
     built := add_build_file(source, workspace);
@@ -73,11 +230,12 @@ glolsp_run_command :: (command: *Command) -> ssize {
 glolsp_task_usage :: () {
     print(
         #string
-            \\usage: glosso first.glo -- [build|run|test|help]
+            \\usage: glosso first.glo -- [build|install|run|test|help]
             \\
-            \\  build       build build/glolsp (the default)
-            \\  run [args]  build and start the stdio language server
-            \\  test        build and run Glosso and Python 3 tests
+            \\  build                   build build/glolsp (the default)
+            \\  install [--prefix DIR]  build and install (default: ~/.local/glolsp)
+            \\  run [args]              build and start the stdio language server
+            \\  test                    build and run Glosso and Python 3 tests
             \\
     );
 }
@@ -92,19 +250,36 @@ glolsp_task :: () {
         glolsp_task_usage();
         return;
     }
-    if task != "build" && task != "run" && task != "test" {
+    if task != "build" && task != "install" && task != "run" && task != "test" {
         print("unknown task: {}\n\n", task);
         glolsp_task_usage();
         exit(1);
     }
-    if task != "run" && args.count > 1 {
+    install_prefix: str;
+    defer install_prefix.free();
+    if task == "install" {
+        if args.count == 1 {
+            install_prefix = glolsp_default_install_prefix();
+            if install_prefix.count == 0 exit(1);
+        } else if args.count == 3 && args[1] == "--prefix" && args[2].count > 0 {
+            install_prefix = args[2].clone();
+        } else {
+            print("usage: glosso first.glo -- install [--prefix DIR]\n");
+            exit(1);
+        }
+    } else if task != "run" && args.count > 1 {
         print("the {} task does not accept arguments\n", task);
         exit(1);
     }
+    if !glolsp_bundle() exit(1);
     if !glolsp_build() exit(1);
     if task == {
         case "build";
         print("built {}\n", glolsp_executable());
+        return;
+        case "install";
+        if !glolsp_install(install_prefix) exit(1);
+        if args.count == 1 && !glolsp_install_config() exit(1);
         return;
         case "run";
         command := Command.command_make(glolsp_executable());
@@ -122,8 +297,7 @@ glolsp_test :: () {
     for unit: .["language", "protocol", "semantic", "syntax", "layout", "workspace", "analysis"] {
         name := tprint("{}-tests", unit);
         source := tprint("tests/{}.glo", unit);
-        strict := unit != "workspace" && unit != "analysis";
-        if !glolsp_build(source, name, strict) exit(1);
+        if !glolsp_build(source, name) exit(1);
         unit_command := Command.command_make(glolsp_executable(name));
         unit_status := glolsp_run_command(&unit_command);
         unit_command.destroy();
@@ -131,6 +305,7 @@ glolsp_test :: () {
     }
     command := Command.command_make("python3");
     command.add_argument("tests/integration.py");
+    command.add_argument("--server");
     command.add_argument(glolsp_executable());
     status := glolsp_run_command(&command);
     command.destroy();
@@ -141,6 +316,20 @@ glolsp_test :: () {
     semantic_status := glolsp_run_command(&semantic_command);
     semantic_command.destroy();
     if semantic_status != 0 exit(semantic_status);
+    compiler_command := Command.command_make("python3");
+    compiler_command.add_argument("tests/compiler_lsp.py");
+    compiler_command.add_argument("--server");
+    compiler_command.add_argument(glolsp_executable());
+    compiler_status := glolsp_run_command(&compiler_command);
+    compiler_command.destroy();
+    if compiler_status != 0 exit(compiler_status);
+    config_command := Command.command_make("python3");
+    config_command.add_argument("tests/config_lsp.py");
+    config_command.add_argument("--server");
+    config_command.add_argument(glolsp_executable());
+    config_status := glolsp_run_command(&config_command);
+    config_command.destroy();
+    if config_status != 0 exit(config_status);
 }
 
 #comptime glolsp_task();

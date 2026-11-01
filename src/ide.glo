@@ -1,20 +1,20 @@
 //! Editor features operate on resolved declarations and workspace snapshots.
-#load "model.glo";
-#load "workspace.glo";
-#load "analysis.glo";
-#load "protocol.glo";
-#load "positions.glo";
+#import "model.glo";
+#import "workspace.glo";
+#import "analysis.glo";
+#import "protocol.glo";
+#import "positions.glo";
 #import "String_Builder";
 #import "Strings";
 #import "Format";
 #import "File_System/Path";
 
-ide_valid_symbol :: (workspace: *Workspace, id: Symbol_Id) -> bool {
+#public ide_valid_symbol :: (workspace: *Workspace, id: Symbol_Id) -> bool {
     return id.file >= 0 && id.file < workspace.files.count && id.symbol >= 0 && id.symbol <
         workspace.files[id.file].syntax.symbols.count;
 }
 
-ide_symbol_source :: (workspace: *Workspace, id: Symbol_Id) -> string {
+#public ide_symbol_source :: (workspace: *Workspace, id: Symbol_Id) -> str {
     if !ide_valid_symbol(workspace, id) return "";
     return workspace.files[id.file].source;
 }
@@ -24,13 +24,21 @@ ide_symbol_source :: (workspace: *Workspace, id: Symbol_Id) -> string {
     ide_write_occurrence(out, workspace, id.file, symbol.selection_start, symbol.selection_end);
 }
 
-ide_write_occurrence :: (
+#public ide_write_occurrence :: (
     out: *String_Builder,
     workspace: *Workspace,
     file: ssize,
     start: ssize,
     end: ssize,
 ) {
+    // If the compiler cannot materialize its cache, the insertion remains an
+    // editor-readable definition target. Never expose an unusable file URI.
+    document := &workspace.files[file];
+    if document.generated && document.path.starts_with("<") && document.generated_origin >= 0 {
+        ide_write_occurrence(out, workspace, document.generated_origin,
+            document.generated_start, document.generated_end);
+        return;
+    }
     out.write_string("{\"uri\":");
     write_json_string(out, workspace.files[file].uri);
     out.write_string(",\"range\":");
@@ -51,10 +59,15 @@ ide_write_occurrence :: (
     }
     symbol := workspace.files[id.file].syntax.symbols[id.symbol];
     signature: String_Builder;
+    defer signature.free();
     if symbol.type_node < 0 && symbol.kind == 13 {
         signature.write_string(symbol.name);
         signature.write_string(": ");
-        analysis_write_type(&signature, workspace, analysis_type(workspace, id));
+        fact := workspace_compiler_fact(workspace, file, offset, 2);
+        if fact.type_name.count == 0
+            fact = workspace_compiler_fact(workspace, id.file, symbol.selection_start, 1);
+        if fact.type_name.count > 0 signature.write_string(fact.type_name);
+        else analysis_write_type(&signature, workspace, analysis_type(workspace, id));
     } else signature.write_string(symbol.detail);
     out.write_string("{\"contents\":[{\"language\":\"glosso\",\"value\":");
     write_json_string(out, signature.to_string());
@@ -108,7 +121,7 @@ ide_write_occurrence :: (
     out.write_byte(#char "]");
 }
 
-#public ide_rename_conflicts :: (workspace: *Workspace, id: Symbol_Id, name: string) -> bool {
+#public ide_rename_conflicts :: (workspace: *Workspace, id: Symbol_Id, name: str) -> bool {
     if !ide_valid_symbol(workspace, id) return true;
     original := workspace.files[id.file].syntax.symbols[id.symbol];
     if name == original.name return false;
@@ -135,7 +148,7 @@ ide_write_occurrence :: (
     out: *String_Builder,
     workspace: *Workspace,
     id: Symbol_Id,
-    name: string,
+    name: str,
 ) {
     out.write_string("{\"changes\":{");
     documents: ssize = 0;
@@ -167,7 +180,7 @@ ide_write_occurrence :: (
     out: *String_Builder,
     workspace: *Workspace,
     file: ssize,
-    query: string,
+    query: str,
     hierarchical: bool,
     count: *ssize,
 ) {
@@ -207,7 +220,7 @@ ide_write_occurrence :: (
     }
 }
 
-ide_completion_kind :: (kind: s32) -> ssize {
+#public ide_completion_kind :: (kind: s32) -> ssize {
     if kind == {
         case 2;
         return 9;
@@ -228,16 +241,16 @@ ide_completion_kind :: (kind: s32) -> ssize {
     }
 }
 
-ide_completion_item :: (
+#public ide_completion_item :: (
     out: *String_Builder,
-    source: string,
+    source: str,
     start: ssize,
     end: ssize,
-    label: string,
-    detail: string,
+    label: str,
+    detail: str,
     kind: ssize,
     count: *ssize,
-    insert_text: string = "",
+    insert_text: str = "",
 ) {
     if count.* > 0 out.write_byte(#char ",");
     count.* += 1;
@@ -255,23 +268,38 @@ ide_completion_item :: (
     out.write_string("}}");
 }
 
-ide_write_import_completion :: (
+#public ide_write_import_completion :: (
     out: *String_Builder, workspace: *Workspace, file: ssize, offset: ssize,
 ) -> bool {
     syntax := &workspace.files[file].syntax;
     source := workspace.files[file].source;
     for dependency: syntax.imports.view() {
-        if dependency.path_token < 0 || (dependency.embedded && !dependency.load) continue;
-        token := syntax.language.tokens[dependency.path_token];
-        if source[token.start] != #char "\"" continue;
-        start := token.start + 1;
+        if dependency.embedded && !dependency.load continue;
+        quoted := dependency.path_token >= 0;
+        start := offset;
         end := start;
-        // Stop unfinished paths at the line boundary so an edit cannot swallow later code.
-        while end < token.end {
-            if source[end] == #char "\"" || source[end] == #char "\n" ||
-               source[end] == #char "\r" break;
-            if source[end] == #char "\\" && end + 1 < token.end end += 1;
-            end += 1;
+        needs_space := false;
+        if quoted {
+            token := syntax.language.tokens[dependency.path_token];
+            if source[token.start] != #char "\"" continue;
+            start = token.start + 1;
+            end = start;
+            // Stop unfinished paths at the line boundary so an edit cannot swallow later code.
+            while end < token.end {
+                if source[end] == #char "\"" || source[end] == #char "\n" ||
+                   source[end] == #char "\r" break;
+                if source[end] == #char "\\" && end + 1 < token.end end += 1;
+                end += 1;
+            }
+        } else {
+            directive := language_token_at(&syntax.language, dependency.start);
+            if directive < 0 continue;
+            after := syntax.language.tokens[directive].end;
+            if offset < after continue;
+            needs_space = offset == after;
+            while after < offset && (source[after] == #char " " || source[after] == #char "\t")
+                after += 1;
+            if after != offset continue;
         }
         if offset < start || offset > end continue;
         paths := workspace_complete_import(workspace, file, source[start..offset],
@@ -283,7 +311,7 @@ ide_write_import_completion :: (
         for path: paths.paths.view() {
             kind: ssize = 9;
             detail := "Glosso module";
-            if dependency.load || dependency.exported {
+            if dependency.load || dependency.exported || workspace_source_import(source[start..offset]) {
                 kind = 17;
                 detail = "Glosso source file";
             }
@@ -292,6 +320,9 @@ ide_write_import_completion :: (
                 detail = "Directory";
             }
             escaped: String_Builder;
+            defer escaped.free();
+            if needs_space escaped.write_byte(#char " ");
+            if !quoted escaped.write_byte(#char "\"");
             for byte: path.bytes() {
                 if byte == {
                     case #char "\\"; escaped.write_string("\\\\");
@@ -302,6 +333,7 @@ ide_write_import_completion :: (
                     else; escaped.write_byte(byte);
                 }
             }
+            if !quoted escaped.write_byte(#char "\"");
             ide_completion_item(out, source, start, end, path, detail, kind, &count,
                 escaped.to_string());
         }
@@ -362,6 +394,7 @@ ide_write_import_completion :: (
     while dot >= 0 && (source[dot] == #char " " || source[dot] == #char "\t") dot -= 1;
     member := dot >= 0 && source[dot] == #char ".";
     candidates: [..]Symbol_Id;
+    defer candidates.free();
     if member _ := candidates.replace(analysis_members_at(workspace, file, offset));
     else _ := candidates.replace(analysis_visible_symbols(workspace, file, offset));
     count: ssize = 0;
@@ -370,9 +403,12 @@ ide_write_import_completion :: (
         symbol := workspace.files[id.file].syntax.symbols[id.symbol];
         if !symbol.name.starts_with(prefix) continue;
         detail: String_Builder;
+        defer detail.free();
         detail.write_string(symbol.name);
         detail.write_string(": ");
-        analysis_write_type(&detail, workspace, analysis_type(workspace, id));
+        fact := workspace_compiler_fact(workspace, id.file, symbol.selection_start, 1);
+        if symbol.kind == 13 && fact.type_name.count > 0 detail.write_string(fact.type_name);
+        else analysis_write_type(&detail, workspace, analysis_type(workspace, id));
         ide_completion_item(
             out,
             source,
@@ -432,12 +468,10 @@ ide_write_import_completion :: (
         }
         directives :: .[
             "#import",
-            "#load",
+            "#module_params",
             "#export",
             "#public",
             "#private",
-            "#memory",
-            "#memory,trusted",
             "#comptime",
             "#if",
             "#assert",
@@ -446,8 +480,8 @@ ide_write_import_completion :: (
             "#string",
             "#char",
             "#matrix",
-            "#simd",
             "#derive",
+            "#simd",
             "#self",
             "#Self_Type",
             "#on_drop_error",
@@ -486,10 +520,13 @@ ide_write_import_completion :: (
         if symbol.kind != 13 || symbol.type_node >= 0 || symbol.value_node < 0 ||
             symbol.selection_end < start || symbol.selection_end > end continue;
         ty := analysis_type(workspace, .{ .file = file, .symbol = i });
-        if ty <= 0 continue;
+        fact := workspace_compiler_fact(workspace, file, symbol.selection_start, 1);
+        if ty <= 0 && fact.type_name.count == 0 continue;
         label: String_Builder;
+        defer label.free();
         label.write_string(": ");
-        analysis_write_type(&label, workspace, ty);
+        if fact.type_name.count > 0 label.write_string(fact.type_name);
+        else analysis_write_type(&label, workspace, ty);
         if count > 0 out.write_byte(#char ",");
         count += 1;
         out.write_string("{\"position\":");
@@ -654,10 +691,12 @@ ide_write_import_completion :: (
     out.write_string("]}]}");
 }
 
-ide_spelling_distance :: (left: string, right: string) -> ssize {
+#public ide_spelling_distance :: (left: str, right: str) -> ssize {
     if left.count - right.count > 2 || right.count - left.count > 2 return 3;
     previous: [..]ssize;
+    defer previous.free();
     current: [..]ssize;
+    defer current.free();
     for i: 0..right.count + 1 {
         previous.push(i);
         current.push(0);
@@ -697,6 +736,7 @@ ide_spelling_distance :: (left: string, right: string) -> ssize {
         span := workspace.files[file].syntax.language.tokens[token];
         misspelled := source[span.start..span.end];
         visible: [..]Symbol_Id;
+        defer visible.free();
         if span.start > 0 && source[span.start - 1] == #char "."
             _ := visible.replace(analysis_members_at(workspace, file, span.start));
         else _ := visible.replace(analysis_visible_symbols(workspace, file, span.start));
@@ -735,7 +775,8 @@ ide_spelling_distance :: (left: string, right: string) -> ssize {
                     case .Ok(path);
                         defer path.free();
                         insertion: String_Builder;
-                        insertion.write_string("#load ");
+                        defer insertion.free();
+                        insertion.write_string("#import ");
                         write_json_string(&insertion, path);
                         insertion.write_string(";\n");
                         if count > 0 out.write_byte(#char ",");

@@ -1,11 +1,11 @@
 //! Filesystem and overlay regression tests; this suite never executes source files.
-#load "../src/workspace.glo";
+#import "../src/workspace.glo";
 #import "Io";
 #import "File_System/File";
 #import "File_System/Directory";
 #import "Os";
 
-workspace_test_write :: (path: string, source: string) {
+workspace_test_write :: (path: str, source: str) {
     result := write_file(path, source);
     #assert result.is_ok();
 }

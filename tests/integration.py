@@ -7,6 +7,7 @@ The tests require only Python's standard library.
 
 import argparse
 import json
+import os
 import queue
 import subprocess
 import threading
@@ -49,12 +50,13 @@ def names(symbols):
 
 
 class LspClient:
-    def __init__(self):
+    def __init__(self, environment=None):
         self.process = subprocess.Popen(
             [str(SERVER)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=environment,
         )
         self.messages = queue.Queue()
         self.pending = []
@@ -205,6 +207,45 @@ class IntegrationTests(unittest.TestCase):
 
     def params(self, uri, text, needle, occurrence=0):
         return {"textDocument": {"uri": uri}, "position": position(text, needle, occurrence)}
+
+    def test_default_configuration_reports_edits_and_uses_installed_std(self):
+        client = LspClient()
+        self.addCleanup(client.stop)
+        # Exercise editor defaults in a real checkout, without opting out of a
+        # startup scan in initializationOptions as the other tests do.
+        capabilities = client.request("initialize", {
+            "processId": None, "rootUri": ROOT.as_uri(), "capabilities": {},
+        })["capabilities"]
+        self.assertIn(" ", capabilities["completionProvider"]["triggerCharacters"])
+        client.notify("initialized", {})
+        uri = (ROOT / "default-configuration.glo").as_uri()
+        client.open(uri, "main::(){ value:s32=1 }")
+        diagnostics = client.diagnostics(uri, 1)
+        self.assertTrue(any("parse error" in item["message"] for item in diagnostics))
+        source = "main::(){ value:AbsentType; }"
+        client.change(uri, [{"text": source}], 2)
+        diagnostics = client.diagnostics(uri, 2)
+        error = next(item for item in diagnostics if "AbsentType" in item["message"])
+        self.assertEqual(error["range"], source_range(source, "AbsentType"))
+        self.assertEqual(client.request("textDocument/diagnostic", {
+            "textDocument": {"uri": uri},
+        })["items"], diagnostics)
+        client.change(uri, [{"text": '#import "String_Builder"; main::(){}'}], 3)
+        self.assertEqual(client.diagnostics(uri, 3), [])
+        standard = Path(os.environ.get("GLOSSO_STD") or Path.home() / ".local/glosso/std")
+        links = client.request("textDocument/documentLink", {"textDocument": {"uri": uri}})
+        self.assertEqual(links[0]["target"], (standard / "String_Builder.glo").resolve().as_uri())
+        source = "#import "
+        client.change(uri, [{"text": source}], 4)
+        self.assertTrue(client.diagnostics(uri, 4))
+        result = client.request("textDocument/completion", {
+            "textDocument": {"uri": uri}, "position": {"line": 0, "character": len(source)},
+        })
+        items = {item["label"]: item for item in result["items"]}
+        self.assertIn("Io", items)
+        self.assertIn("String_Builder", items)
+        self.assertEqual(items["Io"]["textEdit"]["newText"], '"Io"')
+        self.assertEqual(client.errors, [])
 
     def test_capabilities_and_request_errors(self):
         self.assertEqual(self.capabilities.get("positionEncoding", "utf-16"), "utf-16")
@@ -418,7 +459,7 @@ class IntegrationTests(unittest.TestCase):
         uri = "file:///integration/directive-completion.glo"
         text = "#im\n"
         self.client.open(uri, text)
-        self.assertEqual(self.client.diagnostics(uri), [])
+        self.assertTrue(self.client.diagnostics(uri))
         completion = self.client.request("textDocument/completion", {
             "textDocument": {"uri": uri}, "position": {"line": 0, "character": 3},
         })

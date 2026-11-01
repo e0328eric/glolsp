@@ -1,10 +1,10 @@
 //! Shared syntax and semantic identities. Source strings borrow their source file.
 #export "language.glo";
-#load "language.glo";
+#import "language.glo";
 
 #public {
     // Avoid the reflection enum's Struct/Union spellings in derive expansion.
-    Syntax_Kind :: enum #derive(Clone, Copy) {
+    Syntax_Kind :: enum  {
         Root;
         Declaration;
         Parameter;
@@ -36,7 +36,7 @@
         Type;
     }
 
-    Syntax_Node :: struct #derive(Clone, Copy) {
+    Syntax_Node :: struct  {
         kind: Syntax_Kind;
         start: ssize;
         end: ssize;
@@ -56,10 +56,10 @@
         matrix_columns: ssize = -1;
     }
 
-    Syntax_Symbol :: struct #derive(Clone, Copy) {
-        name: string;
-        detail: string;
-        documentation: string;
+    Syntax_Symbol :: struct  {
+        name: str;
+        detail: str;
+        documentation: str;
         node: ssize = -1;
         token: ssize = -1;
         scope: ssize = -1;
@@ -78,15 +78,15 @@
         visible_from: ssize;
     }
 
-    Syntax_Scope :: struct #derive(Clone, Copy) {
+    Syntax_Scope :: struct  {
         parent: ssize = -1;
         owner: ssize = -1;
         start: ssize;
         end: ssize;
     }
 
-    Syntax_Import :: struct #derive(Clone, Copy) {
-        path: string;
+    Syntax_Import :: struct  {
+        path: str;
         path_token: ssize = -1;
         node: ssize = -1;
         symbol: ssize = -1;
@@ -98,7 +98,7 @@
     }
 
     Parsed_File :: struct {
-        source: string;
+        source: str;
         language: Language_Analysis;
         nodes: [..]Syntax_Node;
         symbols: [..]Syntax_Symbol;
@@ -106,11 +106,11 @@
         imports: [..]Syntax_Import;
     }
 
-    Symbol_Id :: struct #derive(Clone, Copy) { file: ssize = -1; symbol: ssize = -1; }
+    Symbol_Id :: struct  { file: ssize = -1; symbol: ssize = -1; }
 
     Type_Id :: ssize;
 
-    Type_Kind :: enum #derive(Clone, Copy) {
+    Type_Kind :: enum  {
         Unknown;
         Builtin;
         Struct_Type;
@@ -127,7 +127,7 @@
 
     Semantic_Type :: struct {
         kind: Type_Kind;
-        name: string;
+        name: str;
         symbol: Symbol_Id;
         element: Type_Id = -1;
         matrix_rows: ssize = -1;

@@ -12,27 +12,24 @@
     MAX_MESSAGE_BYTES :: 16 * 1024 * 1024;
 
     Rpc_Frame :: struct {
-        body: string;
+        body: str;
         status: s32;
     }
 
-    #memory { reads(source), noescape(source), returns_fresh(returned.Ok) }
-    json_parse_document :: (source: string) -> Serialization_Error!Serialization_Document {
+    json_parse_document :: (source: str) -> Serialization_Error!Serialization_Document {
         // The parser reads source during this call and owns every decoded value.
         // Its internal container operations require trust in the current standard library.
-        #memory,trusted {
+        {
             return Serialization_Document.json_document_from_string(source, .max_depth = 128);
         }
     }
 
-    #memory { returns_borrow(value), reads(value, name), noescape(value, name) }
-    json_field :: (value: ?*Json, name: string) -> ?*Json {
+    json_field :: (value: ?*Json, name: str) -> ?*Json {
         if #pattern.Some(pointer) = value return pointer.field_value(name);
-        return .None;
+        return null;
     }
 
-    #memory { returns_borrow(value), reads(value), noescape(value) }
-    json_text :: (value: ?*Json) -> string {
+    json_text :: (value: ?*Json) -> str {
         if #pattern.Some(pointer) = value {
             if #partial pointer.* == {
                 case .text(text);
@@ -99,7 +96,6 @@
         return fallback;
     }
 
-    #memory { reads(value), noescape(value), returns_borrow(value) }
     json_array :: (value: ?*Json) -> ?*[..]Json {
         if #pattern.Some(pointer) = value {
             if #partial pointer.* == {
@@ -107,16 +103,10 @@
                 return .Some(items);
             }
         }
-        return .None;
+        return null;
     }
 
-    #memory {
-        invalidates(out),
-        reads(out, text),
-        writes(out),
-        noescape(out, text),
-    }
-    write_json_string :: (out: *String_Builder, text: string) {
+    write_json_string :: (out: *String_Builder, text: str) {
         hex :: "0123456789abcdef";
         out.write_byte(#char "\"");
         for byte: text.bytes() {
@@ -153,7 +143,7 @@
         out.write_string("null");
     }
 
-    rpc_send :: (output: *File, body: string) -> bool {
+    rpc_send :: (output: *File, body: str) -> bool {
         header := tprint("Content-Length: {}\r\n\r\n", body.count);
         for text: .[header, body] {
             offset: ssize = 0;
@@ -170,8 +160,9 @@
         return true;
     }
 
-    rpc_response :: (output: *File, id: ?*Json, result: string) -> bool {
+    rpc_response :: (output: *File, id: ?*Json, result: str) -> bool {
         out: String_Builder;
+        defer out.free();
         out.write_string("{\"jsonrpc\":\"2.0\",\"id\":");
         write_json_value(&out, id);
         out.write_string(",\"result\":");
@@ -180,8 +171,9 @@
         return rpc_send(output, out.to_string());
     }
 
-    rpc_error :: (output: *File, id: ?*Json, code: ssize, message: string) -> bool {
+    rpc_error :: (output: *File, id: ?*Json, code: ssize, message: str) -> bool {
         out: String_Builder;
+        defer out.free();
         out.write_string("{\"jsonrpc\":\"2.0\",\"id\":");
         write_json_value(&out, id);
         out.write_string(",\"error\":{\"code\":");
@@ -194,6 +186,7 @@
 
     rpc_read_frame :: (input: *File) -> Rpc_Frame {
         header: String_Builder;
+        defer header.free();
         while header.buf.count < 16384 {
             if input.read_byte() == {
                 case .Err;
@@ -225,7 +218,7 @@
 
     // Validate the complete ASCII header before allocating its body. A
     // malformed delimiter cannot make us skip a byte of the next header.
-    rpc_content_length :: (text: string) -> ssize {
+    rpc_content_length :: (text: str) -> ssize {
         if text.count < 4 || text.count > 16384 || text[text.count - 4..] != "\r\n\r\n" return -1;
         length: ssize = -1;
         cursor: ssize = 0;
@@ -272,7 +265,7 @@
 
     // Content-Type parameters are ASCII and case insensitive. LSP also
     // accepts the historical "utf8" spelling for UTF-8.
-    rpc_content_type_utf8 :: (value: string) -> bool {
+    rpc_content_type_utf8 :: (value: str) -> bool {
         if value.count == 0 return false;
         cursor: ssize = 0;
         while cursor < value.count && value[cursor] != #char ";" cursor += 1;
@@ -338,7 +331,7 @@
         }
     }
 
-    ascii_equal_fold :: (left: string, right: string) -> bool {
+    ascii_equal_fold :: (left: str, right: str) -> bool {
         if left.count != right.count return false;
         for i: 0..left.count {
             a := left[i];

@@ -1,0 +1,10 @@
+//! One shared frontend instance for every server component.
+// Linux's loader expands $ORIGIN relative to build/glolsp, even from another cwd.
+#if OUT.os == .Linux {
+    #export "Glosso"(DYLIB_PREFIX = "$ORIGIN/../share");
+} else #if OUT.os == .Macos {
+    #export "Glosso"(DYLIB_PREFIX = "@executable_path/../share");
+} else {
+    // LoadLibrary searches beside the executable; the build copies its DLL there.
+    #export "Glosso"(DYLIB_PREFIX = "");
+}

@@ -1,153 +1,190 @@
-# Glosso Language Server
+# Glosso language server
 
-`glolsp` is a stdio language server implemented in Glosso. It parses source into
-an AST, loads workspace dependencies, resolves declarations across files, and
-infers types for editor queries. `first.glo` is the build entry point, following
-the adjacent `glosso` and `glosso-manual` repositories.
+`glolsp` is a stdio LSP server written in Glosso. It imports the standard
+`Glosso` module and calls `libglosso` through its C ABI for compiler tokens, type checking, import
+resolution, reflection, generated source, and compile-time evaluation.
+Diagnostics come from the actual compiler, including UTF-16 locations and
+related source information. No compiler subprocess is needed at runtime.
 
-Build and test from this repository's root with the installed compiler:
+## Build and run
+
+Install Glosso with `./build.exe install` from the compiler repository, then
+build from this directory using the installed compiler:
 
 ```sh
-glosso first.glo
-glosso first.glo -- test
+~/.local/glosso/bin/glosso first.glo --cache-dir=build/cache
+build/glolsp --stdio
 ```
 
-Use a current Glosso compiler and matching standard library, including the
-move-by-default ownership rules and Prelude `Clone`/`Copy` typeclasses. The LSP's
-value records explicitly derive `Clone, Copy`; workspace storage remains owned
-and array traversal borrows views.
+The compiler, standard library, and `libglosso` must come from the same build.
+No adjacent Glosso checkout is needed. For a custom installation prefix, use
+`<prefix>/bin/glosso`. For development with adjacent source checkouts:
 
-The default task produces `build/glolsp`. The `build`, `run`, `test`, and `help`
-tasks are also available explicitly. Tests require Python 3; there are no
-package manager dependencies. The build driver uses `Compiler.Workspace` with
-the compiler executing `first.glo`. Executables and caches go under `build/`.
-The server build retains runtime bounds and overflow checks.
-
-Configure your editor to launch the absolute path to `build/glolsp`, associate
-it with `*.glo`, and use the `glosso` language identifier. For example, a generic
-LSP client configuration is:
-
-```json
-{
-    "command": ["/absolute/path/to/glolsp/build/glolsp", "--stdio"],
-    "filetypes": ["glosso"]
-}
+```sh
+(cd ../glosso && ./build.exe libglosso)
+../glosso/build/bin/glosso first.glo --cache-dir=build/cache
+GLOSSO_STD="$PWD/../glosso/std" build/glolsp --stdio
 ```
 
-The executable accepts `--stdio`, `--help`, and `--version`. Standard output
-carries LSP messages exclusively. Launch the executable directly from an editor;
-the development `run` task also produces compiler output while building.
-The server does not invoke the compiler at runtime.
+`first.glo` supports `build` (default), `install`, `run`, `test`, and `help`, following
+`--`. Build artifacts and caches live under `build/`. Tests need Python 3,
+without third-party packages. The compiler's bounds and overflow guards remain
+enabled. The build copies matching runtime files into `share/`: `libglosso.so`
+and `lib/clang/` resource headers. Standard modules are read from the Glosso
+installation, defaulting to `$HOME/.local/glosso/std`; they are not copied into
+`share/`. Builds and reinstalls remove the obsolete `share/std` copy.
+`src/glosso.glo` reexports
+`#export "Glosso"(DYLIB_PREFIX = "$ORIGIN/../share");` using module parameters on Linux;
+macOS uses `@executable_path/../share`. Windows places the DLL beside the executable.
+Distribute `build/glolsp` together with `share/`, preserving that layout. The Linux
+bundle can be moved and launched from any working directory. It requires the
+installed Glosso standard library, but does not launch the compiler executable.
+Rebuild to update the bundled frontend and headers.
 
-Implemented editor features include:
+To build and install into `$HOME/.local/glolsp`:
 
-- Full and incremental document synchronization with UTF-16 and CRLF positions.
-- Workspace indexing, dependency loading, implicit Prelude, and module aliases.
-- Completion of visible declarations, inferred members, import paths, keywords, and directives.
-- Hover with signatures, documentation, and inferred variable types.
-- Definition, declaration, type definition, references, and document highlights.
-- Rename across loaded workspace files, with scope and name-conflict checks.
-- Document and workspace symbols, folding, and semantic highlighting.
-- Signature help, inferred variable inlay hints, and expanding selection ranges.
-- Import document links and token-preserving document formatting.
-- Spelling corrections and import quick fixes for unresolved public declarations.
-- Push and pull diagnostics for syntax, imports, names, members, and type mismatches.
+```sh
+glosso first.glo -- install
+~/.local/glolsp/bin/glolsp --stdio
+```
 
-Navigation and rename use resolved declaration identities, including unopened
-workspace files. Resolution observes lexical scopes, shadowing, public and unit
-visibility, explicit exports, imports, embedded loads, and inherent methods.
-Typeclass operations are visible alongside their owning class, including through
-re-exports and module aliases. Built-in type recognition and completion share the
-compiler's supported types, including `Code`, `Pattern`, and arbitrary-width integers.
-The `_` blackhole discards values without introducing a declaration.
-Type analysis covers declared and inferred types, aliases, procedure returns,
-pointer and array access, generic substitutions, nested member chains, pattern
-payloads, and tuple destructuring.
-Aggregate pointers support `pointer.field`, nested chains, and field addresses.
-Value and pointer receivers participate in navigation and signature help;
-generic inherent heads specialize their methods for the receiver's type.
-Matrix literals use `#matrix .[a, b; c, d]`. The server checks rectangular rows,
-known dimensions and element types, preserves element references for navigation
-and rename, and infers matrix indexing results. Literal decimal dimensions and
-simple constant aliases are recognized; unevaluated dimensions stay unknown.
-`#memory,trusted` blocks retain ordinary lexical scopes and name diagnostics.
-Leading contracts, call assertions, named overlays, and `#derive(Clone, Copy)`
-on structures and enums are accepted. Completion includes the current directives
-and renamed standard-library APIs loaded from the configured standard library.
-Unknown types remain unknown instead of producing speculative type errors.
+Use `glosso first.glo -- install --prefix /path/to/glolsp` for another destination.
+Installation copies the executable into `bin/` and the bundled runtime into
+`share/`, preserving executable permissions. Windows also installs the DLL and
+Clang headers beside the executable under `bin/`, and uses `%USERPROFILE%` for
+the default home directory. The existing executable-relative `DYLIB_PREFIX`
+works for this layout without changes to `src/glosso.glo`. Run `install` again
+to update the installed bundle. A default user install also creates
+`get_config_dir()/glolsp/config.toml` from `config.example.toml` if it is missing,
+preserving any existing configuration. An explicit `--prefix` install leaves
+user configuration alone.
 
-Open buffers take precedence over disk contents. Changed buffers are reparsed;
-unchanged files reuse their parsed ASTs. Semantic results are cached until the
-workspace changes. Watched dependency changes invalidate the results, while
-closing a buffer restores its disk contents. Workspace folders can be added and
-removed while the server is running. Clients supporting dynamic registration
-receive a watcher registration for `**/*.glo`.
+Configure your editor with the absolute executable path, the `glosso` language
+identifier, and `*.glo` files. Launch the executable directly: the build script
+prints build progress, whereas the server reserves stdout for LSP frames.
+The executable accepts `--stdio`, `--version`, and `--help`.
+Restart the editor's LSP client after installing an update, especially if an
+earlier process exited with a dynamic-library loading error.
 
-The standard library defaults to `$GLOSSO_STD`, then `$HOME/.local/glosso/std`.
-The server loads the implicit Prelude and resolves named imports through the
-standard library and additional search paths. Both `Name.glo` and
-`Name/module.glo` are supported; an ambiguous pair produces an import diagnostic.
-Relative `#load` paths resolve from the importing file's directory. The server
-never runs a workspace's `first.glo` to discover configuration.
+## Editor features
 
-Import completion suggests module names inside `#import "..."` from these search
-paths, including modules in unopened files and open buffers. Directory suggestions
-end in `/` to continue into nested modules. Relative `#load` and `#export` paths
-complete source filenames, including their `.glo` extension. Suggestions work in
-unfinished strings and replace the path while preserving its quotes.
+- Full/incremental text synchronization with UTF-16 and CRLF positions.
+- Push/pull compiler diagnostics, in-memory import overlays, and related locations.
+- Completion, hover, definition, type definition, references, highlights, and rename.
+- Document/workspace symbols, folding, semantic highlighting, and signature help.
+- Inlay hints, selection ranges, import links, spelling/import quick fixes.
+- Compiler-token-preserving document formatting.
 
-Optional `initializationOptions` configure loading:
+Import completion lists standard modules after `#import ` and inside quoted
+paths, including incomplete strings. Before the opening quote, accepting a
+module inserts the quotes as well. Incomplete directives remain editable and
+report compiler diagnostics without terminating the server.
+
+Navigation and completion combine an error-tolerant Glosso parser with checked
+facts from libglosso. Compiler-generated top-level functions, constants, globals,
+and types participate in completion, hover, signatures, references and definition
+navigation, including imports and aliases. Compiler-selected callees and inferred
+local types refine the editor index. Generated structure members also support
+completion and type definition. Partial compiler facts remain usable when another
+function has an error.
+
+Definitions open the generated source when the compiler can materialize it;
+otherwise they point to the original `#insert`. Generated declarations cannot be
+renamed through LSP: change the generating source instead of modifying a cache
+artifact. Ordinary source rename retains lexical shadowing and workspace edits.
+
+The snapshot is not a complete compiler semantic graph. Generated symbols can be unavailable when lexing/parsing fails before checking.
+Statement-local generated bindings, audience-restricted exports, and some generic/typeclass projections
+still rely on the fallback index. Ambiguous compiler facts are omitted.
+
+Open buffers override disk, including dependencies and files that have not been
+saved. Changing or closing a buffer refreshes dependent diagnostics. Watched
+files and workspace-folder changes update the index. Relative `#import` paths,
+module directories, and additional import search roots are supported. The server
+does not run a workspace's `first.glo` to discover configuration.
+By default it indexes opened files and their dependencies. Set `scanWorkspace`
+to `true` to include unopened, unrelated files in workspace symbols and references;
+this synchronous scan can delay requests in large repositories.
+
+## Configuration
+
+User configuration is read at startup from `get_config_dir()/glolsp/config.toml`,
+using Glosso's `File_System/Directory` API. On Linux this is
+`$XDG_CONFIG_HOME/glolsp/config.toml`, or `$HOME/.config/glolsp/config.toml` when
+the XDG override is unset. Copy `config.example.toml` there and set:
+
+```toml
+compiler_path = "~/.local/glosso/bin/glosso"
+```
+
+The path names the Glosso executable. Its installation supplies `../std` relative
+to `bin/`; development executables at `<checkout>/build/bin/glosso` use
+`<checkout>/std`. Symlinks are resolved, `~/` expands to the home directory, and
+relative paths are based on the configuration file's directory. Restart the LSP
+client after changing the file. Analysis continues to use the bundled
+`libglosso`; the configured compiler executable is not launched. Keep the
+frontend and selected standard library from matching Glosso builds.
+Malformed configuration is reported on stderr and falls back to the default.
+
+Use these `initializationOptions`:
 
 ```json
 {
     "stdPath": "/absolute/path/to/glosso/std",
     "importPaths": ["/absolute/path/to/project/modules"],
-    "scanWorkspace": true,
-    "maxFiles": 4096
+    "scanWorkspace": false,
+    "maxFiles": 4096,
+    "comptimeStepLimit": 16777216
 }
 ```
 
-Root scanning skips `.git` and `build` directories. Files have a 16 MiB source
-limit; import traversal and directory recursion are bounded. Workspace symbol
-search excludes the closed standard library unless it is itself a workspace
-root. Completion edits replace the complete identifier or directive, including
-the `#` prefix. Formatting preserves token spelling and leaves malformed or
-unsafe-to-format source unchanged.
+Standard-library precedence is `stdPath`, `GLOSSO_STD`, the installation selected
+by `compiler_path` in `config.toml`, then `$HOME/.local/glosso/std` (the standard
+library's home-directory query supplies the platform equivalent on Windows).
+Import completion and compiler diagnostics use this same directory.
+The instruction limit applies per compile-time interpreter invocation; zero
+means unlimited. Normal compiler I/O is captured inside libglosso so a Glosso
+`print` at compile time cannot break JSON-RPC framing. Compilation has the same
+host I/O/FFI semantics as the compiler; it is not a sandbox, and native calls are
+not interrupted by the instruction budget. Nested native-driver build operations
+are outside the frontend library's scope and report diagnostics.
 
-The implementation is split into `syntax.glo` and `model.glo` for parsing and
-AST data, `workspace.glo` for source ownership and dependencies, `analysis.glo`
-for binding and type inference, and `ide.glo` for editor queries. `server.glo`
-handles the protocol and synchronization; `protocol.glo`, `positions.glo`,
-`language.glo`, `semantic.glo`, `highlight.glo`, and `layout.glo` provide support.
+Analysis is synchronous. Diagnostics and editor requests share a compiler snapshot
+for each document at the current workspace input revision. Repeated requests do
+not reevaluate compile-time code. Source edits, imported buffer changes, watched
+files and configuration changes invalidate snapshots and generated bindings.
+External files read by compile-time code need an editor file-change notification
+or a source edit to refresh the snapshot. The next analysis creates a fresh
+compiler context; there is no cancellation of an in-progress native call yet.
 
-The test task runs seven native Glosso suites and two stdio integration suites.
-They cover parser recovery and arena growth, import visibility, pointer fields
-and receivers, generic member inference, cross-file rename, disk changes and
-overlays, UTF-16 edits, malformed
-requests, formatting, and repeated document updates. The language, protocol,
-highlighting, syntax, and layout suites use strict compiler memory checking.
-The workspace and analysis suites use the compiler's default warning mode:
-its ownership summaries still report warnings for mutable nested workspace
-storage. Compile either suite directly to inspect these warnings; memory
-checking is never disabled.
-Lifecycle regressions cover aliasing, cleanup, and repeated updates as well.
-Current-language regressions also cover matrix literals, trusted blocks,
-derivation annotations, brace format strings, and renamed path and process APIs.
-The JSON parser call has a narrow trusted boundary for the standard library's
-internal container operations; source is borrowed during parsing and decoded
-documents own their contents.
+## Tests
 
-Analysis is an independent implementation, not the compiler's complete semantic
-engine. It does not execute `#comptime`, expand macros or generated source,
-evaluate reflection, or implement the compiler's full typeclass solver.
-It also does not enforce the compiler's move, borrow, or unsafe-call checks.
-Queries depending on those operations can return incomplete results. Ordinary
-source is parsed even when incomplete, and supported declarations remain usable
-after a nearby syntax error. Compiler diagnostics are not invoked because the
-installed compiler executes top-level compile-time code on every backend.
+```sh
+~/.local/glosso/bin/glosso first.glo --cache-dir=build/cache -- test
+python3 tests/compiler_lsp.py --server build/glolsp
+```
 
-Source follows four-space indentation and a maximum line length of 100
-characters. Long one-line strings use `#string,oneline`, character matching uses
-`#char`, and fixed-value dispatch uses switches where they make the code clearer.
-Aggregate pointer fields use `pointer.field`. Pointers to arrays retain explicit
-dereferences for array members, such as `pointer.*.count`.
+Seven native Glosso suites cover syntax, tokens, layout, protocol, workspace
+ownership, and navigation analysis. The stdio suites exercise editing, rename,
+imports, completion, formatting, and lifecycle behavior. `compiler_lsp.py`
+checks compile-time failure/insertion, captured output, step limits, UTF-16
+incremental edits, unsaved dependency changes, and restoring disk on close. It
+also checks generated APIs, import visibility, snapshot invalidation, compiler
+inference, generated-rename rejection, incomplete-directive recovery, and avoiding
+repeated compile-time I/O. The integration suite checks diagnostics and standard
+module completion with default editor initialization in the actual checkout.
+`config_lsp.py` checks TOML configuration, XDG paths, compiler symlinks, relative
+paths, installation layouts, override precedence, and invalid configuration.
+
+`src/compiler.glo` owns the libglosso snapshots and applies generated namespaces
+and checked facts. `language.glo` consumes
+compiler tokens; `syntax.glo`, `model.glo`, `workspace.glo`, `analysis.glo`, and
+`ide.glo` maintain the editor index. `server.glo` and `protocol.glo` handle LSP.
+
+On Linux, `python3 tests/standalone.py` copies the executable and `share/` into
+a temporary directory, starts it from an unrelated working directory with
+`GLOSSO_STD` unset, checks the loaded library path and absence of `share/std`, and
+runs the compiler/LSP suite using the default installed std, including Bindgen
+against the copied headers.
+Pass `--compiler /path/to/glosso` to test installation and reinstallation into a
+temporary prefix with spaces, then run the same checks after moving that bundle.

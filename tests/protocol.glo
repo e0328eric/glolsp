@@ -5,11 +5,11 @@
 #import "Serialization/Json";
 #import "Serialization/Core";
 #import "String_Builder";
-#load "../src/protocol.glo";
-#load "../src/positions.glo";
+#import "../src/protocol.glo";
+#import "../src/positions.glo";
 
 assert_position :: (
-    source: string,
+    source: str,
     offset: ssize,
     line: ssize,
     character: ssize,

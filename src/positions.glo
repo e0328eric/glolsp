@@ -1,12 +1,12 @@
 //! Translate byte offsets to the UTF-16 positions required by LSP.
 #import "Strings";
 #import "String_Builder";
-#load "protocol.glo";
+#import "protocol.glo";
 
 #public {
-    Text_Position :: struct #derive(Clone, Copy) { line: ssize; character: ssize; }
+    Text_Position :: struct  { line: ssize; character: ssize; }
 
-    position_at :: (source: string, offset: ssize) -> Text_Position {
+    position_at :: (source: str, offset: ssize) -> Text_Position {
         result: Text_Position;
         cursor: ssize = 0;
         while cursor < source.count && cursor < offset {
@@ -34,7 +34,7 @@
         return result;
     }
 
-    offset_at :: (source: string, line: ssize, character: ssize) -> ssize {
+    offset_at :: (source: str, line: ssize, character: ssize) -> ssize {
         if line < 0 || character < 0 return -1;
         cursor: ssize = 0;
         current: ssize = 0;
@@ -63,7 +63,7 @@
         return cursor;
     }
 
-    json_offset :: (source: string, value: ?*Json) -> ssize {
+    json_offset :: (source: str, value: ?*Json) -> ssize {
         return offset_at(
             source,
             json_integer(json_field(value, "line")),
@@ -79,7 +79,7 @@
         out.write_byte(#char "}");
     }
 
-    write_range :: (out: *String_Builder, source: string, start: ssize, end: ssize) {
+    write_range :: (out: *String_Builder, source: str, start: ssize, end: ssize) {
         out.write_string("{\"start\":");
         write_position(out, position_at(source, start));
         out.write_string(",\"end\":");

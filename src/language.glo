@@ -1,21 +1,22 @@
+#import "glosso.glo";
 // Source analysis deliberately borrows the document text. Keep that text alive
 // until the analysis is destroyed; all offsets are UTF-8 byte offsets.
 #import "Memory/Ownership";
 #import "Strings/Utf8";
 #import "Unicode";
 
-#public Language_Token :: struct #derive(Clone, Copy) {
+#public Language_Token :: struct  {
     start: ssize;
     end: ssize;
-    kind: s32; // identifier, number, string, comment, keyword, punctuation, directive
+    kind: s32; // identifier, number, str, comment, keyword, punctuation, directive
     matching: ssize = -1;
     scope: ssize = -1;
 }
 
-#public Language_Symbol :: struct #derive(Clone, Copy) {
-    name: string;
-    detail: string;
-    documentation: string;
+#public Language_Symbol :: struct  {
+    name: str;
+    detail: str;
+    documentation: str;
     start: ssize;
     end: ssize;
     selection_start: ssize;
@@ -25,10 +26,10 @@
     scope_end: ssize;
 }
 
-#public Language_Diagnostic :: struct #derive(Clone, Copy) {
+#public Language_Diagnostic :: struct  {
     start: ssize;
     end: ssize;
-    message: string;
+    message: str;
     severity: s32 = 1;
 }
 
@@ -44,13 +45,13 @@
     "bool", "s8", "s16", "s32", "s64", "s128", "ssize",
     "u8", "u16", "u32", "u64", "u128", "usize",
     "f16", "f32", "f64", "f80", "f128", "c32", "c64", "c128", "c160", "c256",
-    "rune", "string", "string16", "cstring", "cstring16", "void", "type", "any",
+    "rune", "str", "string16", "cstr", "cstring16", "void", "type", "any",
     "Code", "Pattern", "Namespace", "Library", "label", "Matrix", "Simd", "#Never",
     "int8_t", "int16_t", "int32_t", "int64_t", "__int128",
     "uint8_t", "uint16_t", "uint32_t", "uint64_t",
 ];
 
-#public language_integer_type :: (name: string) -> bool {
+#public language_integer_type :: (name: str) -> bool {
     if name.count < 2 return false;
     if name[0] != #char "s" && name[0] != #char "i" && name[0] != #char "u" return false;
     if name.count > 2 && name[1] == #char "0" return false;
@@ -64,12 +65,12 @@
     return width > 0;
 }
 
-#public language_builtin_type :: (name: string) -> bool {
+#public language_builtin_type :: (name: str) -> bool {
     for builtin: language_builtin_types if name == builtin return true;
     return language_integer_type(name);
 }
 
-#public language_is_keyword :: (name: string) -> bool {
+#public language_is_keyword :: (name: str) -> bool {
     if name == {
         case "if", "ifx", "else", "while", "for", "return", "break", "continue",
              "struct", "union", "case", "enum", "using", "defer", "context", "cast",
@@ -79,7 +80,7 @@
     }
 }
 
-#public language_keyword_detail :: (name: string) -> string {
+#public language_keyword_detail :: (name: str) -> str {
     if name == {
         case "struct"; return "Declares a structure with named fields.";
         case "union"; return "Declares a union of variants.";
@@ -104,12 +105,12 @@
     }
 }
 
-language_byte :: (source: string, at: ssize) -> u8 {
+#public language_byte :: (source: str, at: ssize) -> u8 {
     if at < 0 || at >= source.count return 0;
     return source.bytes()[at];
 }
 
-language_letter_at :: (source: string, at: ssize, first: bool) -> bool {
+#public language_letter_at :: (source: str, at: ssize, first: bool) -> bool {
     byte := language_byte(source, at);
     if byte == #char "_" || (byte >= #char "A" && byte <= #char "Z") ||
        (byte >= #char "a" && byte <= #char "z") return true;
@@ -123,14 +124,14 @@ language_letter_at :: (source: string, at: ssize, first: bool) -> bool {
     return false;
 }
 
-language_next :: (source: string, at: ssize) -> ssize {
+#public language_next :: (source: str, at: ssize) -> ssize {
     next := at + 1;
     while next < source.count && language_byte(source, next) >= 16#80 &&
           language_byte(source, next) < 16#c0 next += 1;
     return next;
 }
 
-#public language_identifier_valid :: (name: string) -> bool {
+#public language_identifier_valid :: (name: str) -> bool {
     if name.count == 0 || language_is_keyword(name) || !language_letter_at(name, 0, true)
         return false;
     at := language_next(name, 0);
@@ -141,13 +142,13 @@ language_next :: (source: string, at: ssize) -> ssize {
     return true;
 }
 
-language_add_diagnostic :: (
-    analysis: *Language_Analysis, start: ssize, end: ssize, message: string,
+#public language_add_diagnostic :: (
+    analysis: *Language_Analysis, start: ssize, end: ssize, message: str,
 ) {
     analysis.diagnostics.push(.{ .start = start, .end = end, .message = message });
 }
 
-language_number_end :: (source: string, start: ssize) -> ssize {
+#public language_number_end :: (source: str, start: ssize) -> ssize {
     at := start + 1;
     while at < source.count {
         byte := language_byte(source, at);
@@ -169,7 +170,7 @@ language_number_end :: (source: string, start: ssize) -> ssize {
     return at;
 }
 
-language_operator_byte :: (byte: u8) -> bool {
+#public language_operator_byte :: (byte: u8) -> bool {
     if byte == {
         case #char "+", #char "-", #char "*", #char "/", #char "<", #char ">",
              #char "!", #char "=", #char "&", #char "|", #char "%", #char "^",
@@ -179,164 +180,77 @@ language_operator_byte :: (byte: u8) -> bool {
     }
 }
 
-language_lex :: (source: string, analysis: *Language_Analysis) {
-    at: ssize = 0;
-    while at < source.count {
-        byte := language_byte(source, at);
-        start := at;
+#public language_lex :: (source: str, analysis: *Language_Analysis, depth: ssize = 0) {
+    scanned := glosso_tokens(source);
+    defer scanned.free();
+    if !scanned.success language_add_diagnostic(
+        analysis, 0, source.count, "Invalid token reported by libglosso.");
+    for token: scanned.tokens.view() {
         kind: s32 = 6;
-        next := language_byte(source, at + 1);
-        if (byte == #char "c" || byte == #char "b") && next == #char "\"" {
-            at += 1;
-            byte = #char "\"";
-        }
-        if byte == {
-            case #char " ", #char "\t", #char "\n", #char "\r";
-                at += 1;
-                continue;
-            case #char "/";
-                at += 1;
-                if next == #char "/" {
-                    at += 1;
-                    while at < source.count && language_byte(source, at) != #char "\n" at += 1;
-                    kind = 4;
-                } else if next == #char "*" {
-                    at += 1;
-                    depth: ssize = 1;
-                    while at < source.count && depth > 0 {
-                        current := language_byte(source, at);
-                        following := language_byte(source, at + 1);
-                        if current == #char "/" && following == #char "*" {
-                            depth += 1;
-                            at += 2;
-                        } else if current == #char "*" && following == #char "/" {
-                            depth -= 1;
-                            at += 2;
-                        } else at += 1;
+        if token.kind == {
+            case "Whitespace", "ByteOrderMark", "Eof"; continue;
+            case "Ident"; kind = 1;
+            case "Int", "Float"; kind = 2;
+            case "Str", "CStr", "BStr", "MlStr"; kind = 3;
+            case "LineComment", "BlockComment"; kind = 4;
+            case "Directive"; kind = 7;
+            case "Invalid";
+                // The compiler preserves an unterminated token as an invalid
+                // tail. Keep its category so completion stays out of literals.
+                tail := source[token.start..token.end];
+                if tail.starts_with("/*") || tail.starts_with("//") kind = 4;
+                else if tail.starts_with("\"") || tail.starts_with("c\"") ||
+                        tail.starts_with("b\"") kind = 3;
+                else if tail.starts_with(".") && depth < 32 {
+                    // A trailing member dot is a lexical error to the compiler,
+                    // but an essential edit state for member completion.
+                    analysis.tokens.push(.{ .start = token.start, .end = token.start + 1, .kind = 6 });
+                    rest: Language_Analysis;
+                    language_lex(source[token.start + 1..token.end], &rest, depth + 1);
+                    for recovered: rest.tokens.view() {
+                        recovered.start += token.start + 1; recovered.end += token.start + 1;
+                        analysis.tokens.push(recovered);
                     }
-                    if depth > 0 language_add_diagnostic(
-                        analysis, start, at, "Unterminated block comment.");
-                    kind = 4;
-                } else while language_operator_byte(language_byte(source, at)) at += 1;
-            case #char "\\";
-                at += 1;
-                if next == #char "\\" {
-                    at += 1;
-                    while at < source.count && language_byte(source, at) != #char "\n" at += 1;
-                    kind = 3;
-                }
-            case #char "\"";
-                at += 1;
-                closed := false;
-                while at < source.count {
-                    current := language_byte(source, at);
-                    if current == {
-                        case #char "\"";
-                            at += 1;
-                            closed = true;
-                            break;
-                        case #char "\\";
-                            if at + 1 < source.count at += 2;
-                            else at += 1;
-                        else; at += 1;
-                    }
-                }
-                if !closed language_add_diagnostic(
-                    analysis, start, at, "Unterminated string literal.");
-                kind = 3;
-            case #char "#";
-                at += 1;
-                while at < source.count && language_letter_at(source, at, false)
-                    at = language_next(source, at);
-                if at == start + 1 language_add_diagnostic(
-                    analysis, start, at, "Expected a directive name after '#'.");
-                kind = 7;
-            case #char "'";
-                at += 1;
-                if language_letter_at(source, at, true) {
-                    while at < source.count && language_letter_at(source, at, false)
-                        at = language_next(source, at);
-                    // A leading apostrophe followed by an identifier is a label.
-                    if language_byte(source, at) == #char "'" at += 1;
-                } else {
-                    while at < source.count && language_byte(source, at) != #char "\n" &&
-                          language_byte(source, at) != #char "'" at += 1;
-                    if language_byte(source, at) == #char "'" at += 1;
-                    else language_add_diagnostic(
-                        analysis, start, at, "Unterminated quoted operator name.");
-                }
-            case #char "`";
-                at += 1;
-                if language_byte(source, at) == #char "`" at += 1;
-                while at < source.count && language_letter_at(source, at, false)
-                    at = language_next(source, at);
-            case #char "0"..=#char "9";
-                at = language_number_end(source, at);
-                kind = 2;
-            case #char ":";
-                at += 1;
-                if next == #char ":" {
-                    at += 1;
-                    current := language_byte(source, at);
-                    if current == #char ":" || current == #char "=" at += 1;
-                } else if next == #char "=" at += 1;
-            case #char "-";
-                at += 1;
-                while language_operator_byte(language_byte(source, at)) at += 1;
-            case #char "?"; at += 1;
-            case #char ",";
-                at += 1;
-                if next == #char "," at += 1;
-            case #char "."; {
-                at += 1;
-                if next == #char "." {
-                    at += 1;
-                    current := language_byte(source, at);
-                    if current == #char "." || current == #char "=" at += 1;
-                }
-            }
-            case #char "+", #char "*", #char "<", #char ">", #char "!",
-                 #char "=", #char "&", #char "|", #char "%", #char "^",
-                 #char "~", #char "@"; {
-                at += 1;
-                if (byte != #char "*" && byte != #char "&") ||
-                   language_byte(source, start - 1) != #char "."
-                    while language_operator_byte(language_byte(source, at)) at += 1;
-            }
+                    destroy_language(&rest);
+                    continue;
+                } else continue;
             else;
-                if language_letter_at(source, at, true) {
-                    at = language_next(source, at);
-                    while at < source.count && language_letter_at(source, at, false)
-                        at = language_next(source, at);
-                    kind = 1;
-                    if language_is_keyword(source.substring(start, at)) kind = 5;
-                } else at += 1;
+                if language_is_keyword(source[token.start..token.end]) kind = 5;
         }
-        analysis.tokens.push(.{ .start = start, .end = at, .kind = kind });
+        // The IDE parser represents dot-prefixed aggregate punctuation as two
+        // tokens; both ranges still come from a single compiler token.
+        text := source[token.start..token.end];
+        if #partial text == {
+            case ".{", ".[", ".*", ".&";
+                analysis.tokens.push(.{ .start = token.start, .end = token.start + 1, .kind = 6 });
+                analysis.tokens.push(.{ .start = token.start + 1, .end = token.end, .kind = 6 });
+                continue;
+        }
+        analysis.tokens.push(.{ .start = token.start, .end = token.end, .kind = kind });
     }
 }
 
-language_token_text :: (
-    source: string, analysis: *const Language_Analysis, index: ssize,
-) -> string {
+#public language_token_text :: (
+    source: str, analysis: *const Language_Analysis, index: ssize,
+) -> str {
     if index < 0 || index >= analysis.tokens.count return "";
     token := analysis.tokens[index];
     return source.substring(token.start, token.end);
 }
 
-language_next_code :: (analysis: *const Language_Analysis, index: ssize) -> ssize {
+#public language_next_code :: (analysis: *const Language_Analysis, index: ssize) -> ssize {
     next := index + 1;
     while next < analysis.tokens.count && analysis.tokens[next].kind == 4 next += 1;
     return next;
 }
 
-language_previous_code :: (analysis: *const Language_Analysis, index: ssize) -> ssize {
+#public language_previous_code :: (analysis: *const Language_Analysis, index: ssize) -> ssize {
     previous := index - 1;
     while previous >= 0 && analysis.tokens[previous].kind == 4 previous -= 1;
     return previous;
 }
 
-language_match_delimiters :: (source: string, analysis: *Language_Analysis) {
+#public language_match_delimiters :: (source: str, analysis: *Language_Analysis) {
     stack: [..]ssize;
     scope: ssize = -1;
     for i: 0..analysis.tokens.count {
@@ -384,7 +298,7 @@ language_match_delimiters :: (source: string, analysis: *Language_Analysis) {
     }
 }
 
-language_documentation :: (source: string, start: ssize) -> string {
+#public language_documentation :: (source: str, start: ssize) -> str {
     end := start;
     while end > 0 && language_byte(source, end - 1) != #char "\n" {
         byte := language_byte(source, end - 1);
@@ -408,7 +322,7 @@ language_documentation :: (source: string, start: ssize) -> string {
     return source.substring(documentation_start, end).trim();
 }
 
-language_declarations :: (source: string, analysis: *Language_Analysis) {
+#public language_declarations :: (source: str, analysis: *Language_Analysis) {
     for i: 0..analysis.tokens.count {
         token := analysis.tokens[i];
         if token.kind != 1 continue;
@@ -535,8 +449,7 @@ language_declarations :: (source: string, analysis: *Language_Analysis) {
 }
 
 /// Returns an analysis owning its arrays and borrowing all text from source.
-#public #memory { reads(source), noescape(source) }
-tokenize_language :: (source: string) -> Language_Analysis {
+#public tokenize_language :: (source: str) -> Language_Analysis {
     analysis: Language_Analysis;
     language_lex(source, &analysis);
     language_match_delimiters(source, &analysis);
@@ -544,8 +457,7 @@ tokenize_language :: (source: string) -> Language_Analysis {
 }
 
 /// Compatibility analysis for callers that do not require the syntax tree.
-#public
-analyze_language :: (source: string) -> Language_Analysis {
+#public analyze_language :: (source: str) -> Language_Analysis {
     analysis := tokenize_language(source);
     language_declarations(source, &analysis);
     return analysis;
@@ -573,7 +485,7 @@ analyze_language :: (source: string) -> Language_Analysis {
 
 /// Resolves an identifier to its nearest enclosing declaration scope.
 #public language_symbol_at :: (
-    analysis: *const Language_Analysis, source: string, offset: ssize,
+    analysis: *const Language_Analysis, source: str, offset: ssize,
 ) -> ssize {
     index := language_token_at(analysis, offset);
     if index < 0 || analysis.tokens[index].kind != 1 return -1;

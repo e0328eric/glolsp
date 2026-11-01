@@ -1,9 +1,9 @@
 // Run with: glosso tests/language.glo --run
-#load "../src/language.glo";
+#import "../src/language.glo";
 #import "Io";
 #import "Strings/Utf8";
 
-find_text :: (text: string, needle: string, from: ssize = 0) -> ssize {
+find_text :: (text: str, needle: str, from: ssize = 0) -> ssize {
     at := from;
     while at + needle.count <= text.count {
         if text.substring(at, at + needle.count) == needle return at;
@@ -12,7 +12,7 @@ find_text :: (text: string, needle: string, from: ssize = 0) -> ssize {
     return -1;
 }
 
-symbol_named :: (analysis: *const Language_Analysis, name: string) -> ssize {
+symbol_named :: (analysis: *const Language_Analysis, name: str) -> ssize {
     for i: 0..analysis.symbols.count if analysis.symbols[i].name == name return i;
     return -1;
 }

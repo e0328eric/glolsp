@@ -1,4 +1,4 @@
-#load "../src/layout.glo";
+#import "../src/layout.glo";
 #import "Io";
 #import "Strings";
 
@@ -21,7 +21,7 @@ main :: () {
     #assert tabs.contains("\n\tvalue");
     text := #string
         \\main :: () {
-        \\    string := "{ ; // not code }";
+        \\    str := "{ ; // not code }";
         \\    byte := #char "}";
         \\    /* outer /* inner */ comment */
         \\    raw := #string

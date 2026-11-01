@@ -1,8 +1,8 @@
 //! Error recovering syntax trees. Tokens and text borrow the parsed source.
 #export "model.glo";
-#load "model.glo";
+#import "model.glo";
 
-Syntax_Parser :: struct {
+#public Syntax_Parser :: struct {
     file: Parsed_File;
     at: ssize;
     scope: ssize;
@@ -15,7 +15,7 @@ Syntax_Parser :: struct {
     type_context: bool;
 }
 
-syntax_text :: (parser: *const Syntax_Parser, at: ssize = -1) -> string {
+#public syntax_text :: (parser: *const Syntax_Parser, at: ssize = -1) -> str {
     index := at;
     if index < 0 index = parser.at;
     if index < 0 || index >= parser.file.language.tokens.count return "";
@@ -23,27 +23,30 @@ syntax_text :: (parser: *const Syntax_Parser, at: ssize = -1) -> string {
     return parser.file.source.substring(token.start, token.end);
 }
 
-syntax_next :: (parser: *const Syntax_Parser, at: ssize) -> ssize {
+#public syntax_next :: (parser: *const Syntax_Parser, at: ssize) -> ssize {
+    // Recovery may advance after an incomplete directive at EOF. Keep the
+    // cursor at the sentinel so finishing a node cannot read past the tokens.
+    if at >= parser.file.language.tokens.count return parser.file.language.tokens.count;
     next := at + 1;
     while next < parser.file.language.tokens.count &&
           parser.file.language.tokens[next].kind == 4 next += 1;
     return next;
 }
 
-syntax_advance :: (parser: *Syntax_Parser) { parser.at = syntax_next(parser, parser.at); }
+#public syntax_advance :: (parser: *Syntax_Parser) { parser.at = syntax_next(parser, parser.at); }
 
-syntax_take :: (parser: *Syntax_Parser, text: string) -> bool {
+#public syntax_take :: (parser: *Syntax_Parser, text: str) -> bool {
     if syntax_text(parser) != text return false;
     syntax_advance(parser);
     return true;
 }
 
-syntax_offset :: (parser: *const Syntax_Parser) -> ssize {
+#public syntax_offset :: (parser: *const Syntax_Parser) -> ssize {
     if parser.at >= parser.file.language.tokens.count return parser.file.source.count;
     return parser.file.language.tokens[parser.at].start;
 }
 
-syntax_error :: (parser: *Syntax_Parser, message: string) {
+#public syntax_error :: (parser: *Syntax_Parser, message: str) {
     start := syntax_offset(parser);
     end := start;
     if parser.at < parser.file.language.tokens.count
@@ -53,11 +56,11 @@ syntax_error :: (parser: *Syntax_Parser, message: string) {
     });
 }
 
-syntax_expect :: (parser: *Syntax_Parser, text: string, message: string) {
+#public syntax_expect :: (parser: *Syntax_Parser, text: str, message: str) {
     if !syntax_take(parser, text) syntax_error(parser, message);
 }
 
-syntax_node :: (parser: *Syntax_Parser, kind: Syntax_Kind, token: ssize = -1) -> ssize {
+#public syntax_node :: (parser: *Syntax_Parser, kind: Syntax_Kind, token: ssize = -1) -> ssize {
     index := parser.file.nodes.count;
     at := token;
     if at < 0 at = parser.at;
@@ -74,14 +77,14 @@ syntax_node :: (parser: *Syntax_Parser, kind: Syntax_Kind, token: ssize = -1) ->
     return index;
 }
 
-syntax_finish :: (parser: *Syntax_Parser, node: ssize) {
+#public syntax_finish :: (parser: *Syntax_Parser, node: ssize) {
     previous := parser.at - 1;
     while previous >= 0 && parser.file.language.tokens[previous].kind == 4 previous -= 1;
     if previous >= 0
         parser.file.nodes[node].end = parser.file.language.tokens[previous].end;
 }
 
-syntax_child :: (parser: *Syntax_Parser, parent: ssize, child: ssize) {
+#public syntax_child :: (parser: *Syntax_Parser, parent: ssize, child: ssize) {
     if child < 0 return;
     last := parser.file.nodes[parent].last_child;
     if last < 0 parser.file.nodes[parent].first_child = child;
@@ -91,9 +94,9 @@ syntax_child :: (parser: *Syntax_Parser, parent: ssize, child: ssize) {
 }
 
 // Evaluate the child before indexing the arena: parsing may grow its storage.
-Syntax_Slot :: enum #derive(Clone, Copy) { Left; Right; Annotation; Value; }
+#public Syntax_Slot :: enum  { Left; Right; Annotation; Value; }
 
-syntax_store :: (parser: *Syntax_Parser, node: ssize, slot: Syntax_Slot, child: ssize) {
+#public syntax_store :: (parser: *Syntax_Parser, node: ssize, slot: Syntax_Slot, child: ssize) {
     if slot == {
         case .Left; parser.file.nodes[node].left = child;
         case .Right; parser.file.nodes[node].right = child;
@@ -102,7 +105,7 @@ syntax_store :: (parser: *Syntax_Parser, node: ssize, slot: Syntax_Slot, child: 
     }
 }
 
-syntax_scope :: (parser: *Syntax_Parser, owner: ssize) -> ssize {
+#public syntax_scope :: (parser: *Syntax_Parser, owner: ssize) -> ssize {
     index := parser.file.scopes.count;
     parser.file.scopes.push(.{
         .parent = parser.scope, .owner = owner,
@@ -111,7 +114,7 @@ syntax_scope :: (parser: *Syntax_Parser, owner: ssize) -> ssize {
     return index;
 }
 
-syntax_bind :: (parser: *Syntax_Parser, node: ssize, token: ssize, kind: s32) -> ssize {
+#public syntax_bind :: (parser: *Syntax_Parser, node: ssize, token: ssize, kind: s32) -> ssize {
     index := parser.file.symbols.count;
     current := parser.file.language.tokens[token];
     parser.file.symbols.push(.{
@@ -125,7 +128,7 @@ syntax_bind :: (parser: *Syntax_Parser, node: ssize, token: ssize, kind: s32) ->
     return index;
 }
 
-syntax_documentation :: (source: string, start: ssize) -> string {
+#public syntax_documentation :: (source: str, start: ssize) -> str {
     end := start;
     while end > 0 && source.bytes()[end - 1] != #char "\n" {
         byte := source.bytes()[end - 1];
@@ -148,7 +151,7 @@ syntax_documentation :: (source: string, start: ssize) -> string {
     return source.substring(first, end).trim();
 }
 
-syntax_precedence :: (text: string) -> ssize {
+#public syntax_precedence :: (text: str) -> ssize {
     if text == {
         case "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^="; return 1;
         case "||"; return 2;
@@ -174,7 +177,7 @@ syntax_precedence :: (text: string) -> ssize {
     }
 }
 
-syntax_is_procedure :: (parser: *const Syntax_Parser) -> bool {
+#public syntax_is_procedure :: (parser: *const Syntax_Parser) -> bool {
     if syntax_text(parser) != "(" return false;
     close := parser.file.language.tokens[parser.at].matching;
     if close < 0 return false;
@@ -188,7 +191,7 @@ syntax_is_procedure :: (parser: *const Syntax_Parser) -> bool {
     return false;
 }
 
-syntax_type_expression :: (parser: *Syntax_Parser, minimum: ssize) -> ssize {
+#public syntax_type_expression :: (parser: *Syntax_Parser, minimum: ssize) -> ssize {
     previous := parser.type_context;
     parser.type_context = true;
     result := syntax_expression(parser, minimum);
@@ -196,7 +199,7 @@ syntax_type_expression :: (parser: *Syntax_Parser, minimum: ssize) -> ssize {
     return result;
 }
 
-syntax_annotation :: (parser: *Syntax_Parser) {
+#public syntax_annotation :: (parser: *Syntax_Parser) {
     directive := syntax_text(parser);
     syntax_advance(parser);
     while syntax_take(parser, ",") {
@@ -218,7 +221,7 @@ syntax_annotation :: (parser: *Syntax_Parser) {
     }
 }
 
-syntax_parameter :: (parser: *Syntax_Parser, parent: ssize, bind: bool) -> ssize {
+#public syntax_parameter :: (parser: *Syntax_Parser, parent: ssize, bind: bool) -> ssize {
     start := parser.at;
     while syntax_text(parser).starts_with("#") && syntax_text(parser) != "#self" &&
           syntax_text(parser, syntax_next(parser, parser.at)) != ":"
@@ -278,7 +281,7 @@ syntax_parameter :: (parser: *Syntax_Parser, parent: ssize, bind: bool) -> ssize
     return node;
 }
 
-syntax_procedure :: (parser: *Syntax_Parser, owner: ssize) -> ssize {
+#public syntax_procedure :: (parser: *Syntax_Parser, owner: ssize) -> ssize {
     node := syntax_node(parser, .Procedure);
     annotation := parser.type_context;
     outer := parser.scope;
@@ -333,7 +336,7 @@ syntax_procedure :: (parser: *Syntax_Parser, owner: ssize) -> ssize {
     return node;
 }
 
-syntax_arguments :: (parser: *Syntax_Parser, parent: ssize, close: string) {
+#public syntax_arguments :: (parser: *Syntax_Parser, parent: ssize, close: str) {
     while syntax_text(parser) != "" && syntax_text(parser) != close {
         before := parser.at;
         argument: ssize = -1;
@@ -363,7 +366,7 @@ syntax_arguments :: (parser: *Syntax_Parser, parent: ssize, close: string) {
     syntax_expect(parser, close, "Expected a closing delimiter after arguments.");
 }
 
-syntax_matrix :: (parser: *Syntax_Parser) -> ssize {
+#public syntax_matrix :: (parser: *Syntax_Parser) -> ssize {
     node := syntax_node(parser, .Aggregate);
     syntax_advance(parser);
     if !syntax_take(parser, ".") || !syntax_take(parser, "[") {
@@ -399,7 +402,7 @@ syntax_matrix :: (parser: *Syntax_Parser) -> ssize {
     return node;
 }
 
-syntax_primary :: (parser: *Syntax_Parser) -> ssize {
+#public syntax_primary :: (parser: *Syntax_Parser) -> ssize {
     token := parser.at;
     text := syntax_text(parser);
     if text == "" || text == ";" || text == "," || text == ")" || text == "]" ||
@@ -538,7 +541,7 @@ syntax_primary :: (parser: *Syntax_Parser) -> ssize {
     return node;
 }
 
-syntax_expression :: (parser: *Syntax_Parser, minimum: ssize) -> ssize {
+#public syntax_expression :: (parser: *Syntax_Parser, minimum: ssize) -> ssize {
     if parser.depth > 128 {
         syntax_error(parser, "Expression nesting exceeds the parser limit.");
         syntax_advance(parser);
@@ -645,7 +648,7 @@ syntax_expression :: (parser: *Syntax_Parser, minimum: ssize) -> ssize {
     return left;
 }
 
-syntax_import :: (parser: *Syntax_Parser, symbol: ssize) -> ssize {
+#public syntax_import :: (parser: *Syntax_Parser, symbol: ssize) -> ssize {
     node := syntax_node(parser, .Import);
     directive := syntax_text(parser);
     start := syntax_offset(parser);
@@ -668,6 +671,32 @@ syntax_import :: (parser: *Syntax_Parser, symbol: ssize) -> ssize {
         if literal.count >= 2 path = literal.substring(1, literal.count - 1);
         syntax_advance(parser);
     } else syntax_error(parser, "Expected a quoted module or file path.");
+    if syntax_take(parser, "(") {
+        while syntax_text(parser) != "" && syntax_text(parser) != ")" {
+            before := parser.at;
+            // Argument labels are not references to caller declarations.
+            label := parser.at;
+            if syntax_text(parser, label) == "." label = syntax_next(parser, label);
+            next := syntax_next(parser, label);
+            if syntax_text(parser, next) == "=" {
+                parser.at = syntax_next(parser, next);
+            }
+            syntax_child(parser, node, syntax_expression(parser, 0));
+            if parser.at == before || !syntax_take(parser, ",") break;
+        }
+        syntax_expect(parser, ")", "Expected ')' after module arguments.");
+    }
+    if syntax_take(parser, "{") {
+        while syntax_text(parser) != "" && syntax_text(parser) != "}" {
+            before := parser.at;
+            // Selected names belong to the imported module, not local scope.
+            while parser.at < parser.file.language.tokens.count &&
+                  (parser.file.language.tokens[parser.at].kind == 1 || syntax_text(parser) == ".")
+                syntax_advance(parser);
+            if parser.at == before || !syntax_take(parser, ",") break;
+        }
+        syntax_expect(parser, "}", "Expected '}' after selected module names.");
+    }
     _ := syntax_take(parser, ";");
     syntax_finish(parser, node);
     parser.file.imports.push(.{
@@ -678,7 +707,35 @@ syntax_import :: (parser: *Syntax_Parser, symbol: ssize) -> ssize {
     return node;
 }
 
-syntax_aggregate :: (parser: *Syntax_Parser, owner: ssize) -> ssize {
+#public syntax_module_parameters :: (parser: *Syntax_Parser) -> ssize {
+    node := syntax_node(parser, .Statement);
+    syntax_advance(parser);
+    syntax_expect(parser, "(", "Expected '(' after #module_params.");
+    visibility := parser.is_public;
+    unit := parser.is_unit;
+    parser.is_public = false;
+    parser.is_unit = false;
+    while syntax_text(parser) != "" && syntax_text(parser) != ")" {
+        before := parser.at;
+        if parser.file.language.tokens[parser.at].kind != 1 {
+            syntax_error(parser, "Expected a module parameter name.");
+            break;
+        }
+        parameter := syntax_declaration(parser);
+        symbol := parser.file.nodes[parameter].symbol;
+        if symbol >= 0 parser.file.symbols[symbol].kind = 14;
+        syntax_child(parser, node, parameter);
+        if parser.at == before || !syntax_take(parser, ",") break;
+    }
+    parser.is_public = visibility;
+    parser.is_unit = unit;
+    syntax_expect(parser, ")", "Expected ')' after module parameters.");
+    syntax_expect(parser, ";", "Expected ';' after module parameters.");
+    syntax_finish(parser, node);
+    return node;
+}
+
+#public syntax_aggregate :: (parser: *Syntax_Parser, owner: ssize) -> ssize {
     token := parser.at;
     text := syntax_text(parser);
     kind := Syntax_Kind.Struct_Type;
@@ -758,7 +815,7 @@ syntax_aggregate :: (parser: *Syntax_Parser, owner: ssize) -> ssize {
     return node;
 }
 
-syntax_declaration :: (parser: *Syntax_Parser) -> ssize {
+#public syntax_declaration :: (parser: *Syntax_Parser) -> ssize {
     token := parser.at;
     node := syntax_node(parser, .Declaration);
     syntax_advance(parser);
@@ -790,7 +847,7 @@ syntax_declaration :: (parser: *Syntax_Parser) -> ssize {
     } else if text == "#import" || text == "#load" || text == "#export" || text == "#embed" {
         value = syntax_import(parser, symbol);
         parser.file.symbols[symbol].kind = 2;
-    } else if separator != "" && text != ";" && text != "}" {
+    } else if separator != "" && text != ";" && text != "}" && text != "," && text != ")" {
         value = syntax_expression(parser, 0);
         if value < 0 syntax_error(parser, "Expected an initializer after the declaration.");
     }
@@ -824,7 +881,7 @@ syntax_declaration :: (parser: *Syntax_Parser) -> ssize {
     return node;
 }
 
-syntax_inherent :: (parser: *Syntax_Parser, token: ssize, expression: ssize = -1) -> ssize {
+#public syntax_inherent :: (parser: *Syntax_Parser, token: ssize, expression: ssize = -1) -> ssize {
     node := syntax_node(parser, .Inherent, token);
     owner_node := expression;
     if owner_node < 0 owner_node = syntax_node(parser, .Identifier, token);
@@ -877,7 +934,7 @@ syntax_inherent :: (parser: *Syntax_Parser, token: ssize, expression: ssize = -1
     return node;
 }
 
-syntax_capture :: (
+#public syntax_capture :: (
     parser: *Syntax_Parser, pattern: ssize, subject: ssize,
     constructor: ssize = -1, argument: ssize = -1,
 ) {
@@ -922,7 +979,7 @@ syntax_capture :: (
     }
 }
 
-syntax_pattern_condition :: (parser: *Syntax_Parser, condition: ssize) {
+#public syntax_pattern_condition :: (parser: *Syntax_Parser, condition: ssize) {
     if condition < 0 return;
     expression := parser.file.nodes[condition];
     if expression.kind != .Binary || syntax_text(parser, expression.token) != "=" ||
@@ -932,7 +989,7 @@ syntax_pattern_condition :: (parser: *Syntax_Parser, condition: ssize) {
         syntax_capture(parser, pattern.left, expression.right);
 }
 
-syntax_pattern_binding_ahead :: (parser: *const Syntax_Parser) -> bool {
+#public syntax_pattern_binding_ahead :: (parser: *const Syntax_Parser) -> bool {
     cursor := syntax_next(parser, parser.at);
     while cursor < parser.file.language.tokens.count {
         text := syntax_text(parser, cursor);
@@ -958,7 +1015,7 @@ syntax_pattern_binding_ahead :: (parser: *const Syntax_Parser) -> bool {
     return false;
 }
 
-syntax_pattern_binding :: (parser: *Syntax_Parser) -> ssize {
+#public syntax_pattern_binding :: (parser: *Syntax_Parser) -> ssize {
     node := syntax_node(parser, .Pattern_Binding);
     syntax_advance(parser);
     pattern := syntax_expression(parser, 2);
@@ -979,7 +1036,7 @@ syntax_pattern_binding :: (parser: *Syntax_Parser) -> ssize {
     return node;
 }
 
-syntax_switch_subject :: (parser: *Syntax_Parser, condition: ssize) -> ssize {
+#public syntax_switch_subject :: (parser: *Syntax_Parser, condition: ssize) -> ssize {
     previous := parser.at - 1;
     while previous >= 0 && parser.file.language.tokens[previous].kind == 4 previous -= 1;
     if syntax_text(parser, previous) != "==" return -1;
@@ -993,7 +1050,7 @@ syntax_switch_subject :: (parser: *Syntax_Parser, condition: ssize) -> ssize {
     return result;
 }
 
-syntax_block :: (
+#public syntax_block :: (
     parser: *Syntax_Parser, nested: bool = true, subject: ssize = -1,
 ) -> ssize {
     node := syntax_node(parser, .Block);
@@ -1032,7 +1089,7 @@ syntax_block :: (
     return node;
 }
 
-syntax_control :: (
+#public syntax_control :: (
     parser: *Syntax_Parser, kind: Syntax_Kind, transparent: bool = false,
 ) -> ssize {
     node := syntax_node(parser, kind);
@@ -1080,7 +1137,7 @@ syntax_control :: (
     return node;
 }
 
-syntax_visibility :: (parser: *Syntax_Parser) -> ssize {
+#public syntax_visibility :: (parser: *Syntax_Parser) -> ssize {
     at := parser.at;
     visible := parser.is_public;
     unit := parser.is_unit;
@@ -1108,7 +1165,7 @@ syntax_visibility :: (parser: *Syntax_Parser) -> ssize {
     return node;
 }
 
-syntax_multi_declaration :: (parser: *Syntax_Parser) -> ssize {
+#public syntax_multi_declaration :: (parser: *Syntax_Parser) -> ssize {
     group := syntax_node(parser, .Statement);
     names: [..]ssize;
     while syntax_text(parser) != "" {
@@ -1140,7 +1197,7 @@ syntax_multi_declaration :: (parser: *Syntax_Parser) -> ssize {
     return group;
 }
 
-syntax_statement :: (parser: *Syntax_Parser) -> ssize {
+#public syntax_statement :: (parser: *Syntax_Parser) -> ssize {
     if parser.depth > 128 {
         syntax_error(parser, "Statement nesting exceeds the parser limit.");
         syntax_advance(parser);
@@ -1164,7 +1221,7 @@ syntax_statement :: (parser: *Syntax_Parser) -> ssize {
                 syntax_text(parser, syntax_next(parser, parser.at)) == "(";
             if trusted || legacy {
                 if !trusted
-                    syntax_error(parser, "Use #memory,trusted { ... } for a trusted block.");
+                    syntax_error(parser, "Use { ... } for a trusted block.");
                 if !syntax_take(parser, "trusted")
                     syntax_error(parser, "Expected 'trusted' after '#memory,'.");
                 if syntax_text(parser) == "(" {
@@ -1205,6 +1262,7 @@ syntax_statement :: (parser: *Syntax_Parser) -> ssize {
         case "for"; return syntax_control(parser, .For);
         case "#pattern";
             if syntax_pattern_binding_ahead(parser) return syntax_pattern_binding(parser);
+        case "#module_params"; return syntax_module_parameters(parser);
         case "#import", "#load", "#export", "#embed";
             return syntax_import(parser, -1);
         case "return";
@@ -1290,8 +1348,7 @@ syntax_statement :: (parser: *Syntax_Parser) -> ssize {
 }
 
 /// Parses incomplete editor buffers and always advances after a malformed statement.
-#public
-parse_file :: (source: string) -> Parsed_File {
+#public parse_file :: (source: str) -> Parsed_File {
     parser: Syntax_Parser = .{
         .file = .{ .source = source, .language = tokenize_language(source) },
         .scope = 0, .at = 0,

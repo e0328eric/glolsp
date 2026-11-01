@@ -1,8 +1,8 @@
-#load "../src/syntax.glo";
+#import "../src/syntax.glo";
 #import "Io";
 #import "String_Builder";
 
-symbol_named :: (file: *const Parsed_File, name: string) -> ssize {
+symbol_named :: (file: *const Parsed_File, name: str) -> ssize {
     for i: 0..file.symbols.count if file.symbols[i].name == name return i;
     return -1;
 }
@@ -146,7 +146,7 @@ main :: () {
         \\    '==' :: (left: T, right: T) -> bool #operator(left, 8);
         \\}
         \\#if OUT.os == .Linux { linux_value :: 1; }
-        \\pair :: () -> (ssize, string) { return 1, "value"; }
+        \\pair :: () -> (ssize, str) { return 1, "value"; }
         \\factory :: () -> (value: ssize) -> ssize { return identity; }
         \\main :: () {
         \\    values: [..]ssize;
@@ -257,6 +257,22 @@ main :: () {
     #assert incomplete_binding.language.diagnostics.count > 0;
     #assert symbol_named(&incomplete_binding, "after") >= 0;
     destroy_parsed_file(&incomplete_binding);
+
+    parameterized := parse_file(#string
+        \\#module_params(REQUIRED: str, COUNT: ssize = 3, ENABLED := true);
+        \\M :: #import "Foo"(REQUIRED="share", .COUNT=2) {value, Box};
+        \\#export "Bar"(ENABLED) {};
+    );
+    #assert parameterized.language.diagnostics.count == 0;
+    #assert parameterized.imports.count == 2;
+    for name: .["REQUIRED", "COUNT", "ENABLED"] {
+        index := symbol_named(&parameterized, name);
+        #assert index >= 0;
+        #assert parameterized.symbols[index].kind == 14;
+        #assert !parameterized.symbols[index].is_public;
+    }
+    #assert symbol_named(&parameterized, "M") >= 0;
+    destroy_parsed_file(&parameterized);
 
     // Nested parse calls repeatedly grow the arena while their parent nodes stay live.
     generated: String_Builder;

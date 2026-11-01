@@ -1,8 +1,8 @@
 //! Token colors follow the resolved declaration, including imported members.
-#load "semantic.glo";
-#load "workspace.glo";
-#load "analysis.glo";
-#load "model.glo";
+#import "semantic.glo";
+#import "workspace.glo";
+#import "analysis.glo";
+#import "model.glo";
 #import "String_Builder";
 
 #public write_resolved_semantic_tokens :: (

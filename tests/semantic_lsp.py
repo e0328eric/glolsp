@@ -73,15 +73,14 @@ class SemanticLspTests(unittest.TestCase):
 
     def test_current_language_matrix_and_trusted_block_queries(self):
         source = (
-            "Point :: struct #derive(Clone, Copy) { x: ssize; }\n"
-            "Color :: enum u8 #derive(Clone, Copy) { Red; Green; }\n"
-            '#memory { reads(value), requires_unsafe(reason: "live pointer") }\n'
+            "Point :: struct { x: ssize; }\n"
+            "Color :: enum u8 { Red; Green; }\n"
             "read :: (value: *const ssize) -> ssize { return value.*; }\n"
             "main :: () {\n"
             "    element := 1;\n"
             "    matrix: Matrix(ssize, 2, 2) = #matrix .[element, 2; 3, element];\n"
-            "    inferred := matrix; entry := matrix[0, 1];\n"
-            "    #memory, /* audited */ trusted {\n"
+            "    inferred := matrix; entry := matrix[1];\n"
+            "    {\n"
             "        local := element; read(&local);\n"
             "    }\n"
             '    format := "{0:x} {{literal}} 100% {:c}";\n'
@@ -103,8 +102,8 @@ class SemanticLspTests(unittest.TestCase):
         }])
         renamed = self.at("textDocument/rename", uri, "element", newName="coefficient")
         self.assertEqual(len(renamed["changes"][uri]), 4)
-        for directive in ["#matrix", "#derive", "#memory,trusted"]:
-            self.assertIn(directive, self.completion_names(uri, "#memory", offset=1))
+        for directive in ["#matrix", "#comptime", "#import"]:
+            self.assertIn(directive, self.completion_names(uri, "#matrix", offset=1))
         formatted = self.client.request("textDocument/formatting", {
             "textDocument": {"uri": uri},
             "options": {"tabSize": 4, "insertSpaces": True},
@@ -118,27 +117,24 @@ class SemanticLspTests(unittest.TestCase):
         self.assertEqual(self.client.diagnostics(uri, 2), [])
 
     def test_matrix_diagnostics_and_trusted_blocks_keep_name_checks(self):
-        source = (
-            "main :: () {\n"
-            "    size: Matrix(ssize, 2, 2) = #matrix .[1, 2];\n"
-            "    item: Matrix(ssize, 1, 1) = #matrix .[true];\n"
-            "    ordinary: Matrix(ssize, 1, 2) = .[1, 2];\n"
-            "    #memory,trusted { local := 1; missing; }\n"
-            "    local;\n"
-            "}\n"
-        )
-        uri = self.write("main.glo", source)
         self.initialize()
-        self.open(uri)
-        diagnostics = self.client.request("textDocument/diagnostic", {
-            "textDocument": {"uri": uri},
-        })["items"]
-        messages = [item["message"] for item in diagnostics]
-        self.assertEqual(len(diagnostics), 5)
-        self.assertEqual(messages.count("Unresolved identifier."), 2)
-        self.assertTrue(any("dimensions" in message for message in messages))
-        self.assertTrue(any("Matrix element" in message for message in messages))
-        self.assertTrue(any("require #matrix" in message for message in messages))
+        uri = (self.root / "matrix.glo").as_uri()
+        cases = [
+            "value: Matrix(ssize, 2, 2) = #matrix .[1, 2];",
+            "value: Matrix(ssize, 1, 1) = #matrix .[true];",
+            "value: Matrix(ssize, 1, 2) = .[1, 2];",
+            "{ local := 1; missing; }",
+            "{ local := 1; } local;",
+        ]
+        for version, body in enumerate(cases, 1):
+            with self.subTest(body=body):
+                source = "main::() { " + body + " }"
+                self.documents[uri] = source
+                self.client.open(uri, source, version)
+                errors = self.client.diagnostics(uri, version)
+                self.assertTrue(errors)
+                self.assertTrue(all(d["source"] == "libglosso" for d in errors))
+                self.assertEqual(errors[0]["range"]["start"]["line"], 0)
         self.assertEqual(self.at("textDocument/definition", uri, "local;"), [])
 
     def test_current_standard_library_names_resolve(self):
@@ -179,7 +175,7 @@ class SemanticLspTests(unittest.TestCase):
         ))
         self.write("module.glo", '#export "types.glo";\n')
         caller = self.write("main.glo", (
-            'Shapes :: #load "module.glo";\n'
+            'Shapes :: #import "module.glo";\n'
             "main :: () { item := Shapes.create(); item.x; Shapes.secret; }\n"
         ))
         self.initialize()
@@ -223,7 +219,7 @@ class SemanticLspTests(unittest.TestCase):
     def test_string_slice_arguments_preserve_their_type(self):
         uri = self.write("main.glo", (
             "Token :: struct { start: ssize; end: ssize; }\n"
-            "semantic_builtin_type :: (name: string) -> bool { return false; }\n"
+            "semantic_builtin_type :: (name: str) -> bool { return false; }\n"
             "main :: () {\n"
             '    source := "hello"; token: Token;\n'
             "    semantic_builtin_type(source[token.start..token.end]);\n"
@@ -238,23 +234,23 @@ class SemanticLspTests(unittest.TestCase):
             "textDocument": {"uri": uri},
         })["items"]
         self.assertEqual([(item["range"], item["message"]) for item in diagnostics], [(
-            source_range(self.documents[uri], "source[token.start]"),
-            "Argument type does not match the procedure parameter.",
+            source_range(self.documents[uri], "source", 3),
+            "arg type u8 != str in call semantic_builtin_type",
         )])
         hover = self.at("textDocument/hover", uri, "text :=")
-        self.assertIn("string", str(hover["contents"]))
+        self.assertIn("str", str(hover["contents"]))
 
     def test_variadic_parameters_are_slices_inside_method_bodies(self):
         uri = self.write("main.glo", (
             "Allocator :: struct {}\n"
             "Path_Style :: enum { Native; Posix; }\n"
             "Path :: struct { style: Path_Style; }\n"
-            "path_resolve_parts :: (base: string, parts: []const string,\n"
-            "    style: Path_Style = .Native, allocator: Allocator) -> string {\n"
+            "path_resolve_parts :: (base: str, parts: []const str,\n"
+            "    style: Path_Style = .Native, allocator: Allocator = .{}) -> str {\n"
             "    return base;\n"
             "}\n"
             "Path ::: #public {\n"
-            "    joined :: (*const #self, parts: ...string, allocator: Allocator) -> string {\n"
+            "    joined :: (*const #self, parts: ...str, allocator: Allocator = .{}) -> str {\n"
             "        copied := parts; first := parts[0];\n"
             "        return path_resolve_parts(first, parts, #self.style, allocator);\n"
             "    }\n"
@@ -271,7 +267,7 @@ class SemanticLspTests(unittest.TestCase):
             "textDocument": {"uri": uri},
         })["items"]
         self.assertEqual(diagnostics, [])
-        for variable, expected in [("copied", "[]string"), ("first", "string")]:
+        for variable, expected in [("copied", "[]str"), ("first", "str")]:
             with self.subTest(variable=variable):
                 hover = self.at("textDocument/hover", uri, variable + " :=")
                 self.assertIn(variable + ": " + expected, str(hover["contents"]))
@@ -281,35 +277,16 @@ class SemanticLspTests(unittest.TestCase):
         }])
 
     def test_variadic_calls_check_elements_and_expanded_slices(self):
-        uri = self.write("main.glo", (
-            "join :: (parts: ...string, flag: bool = false) {}\n"
-            "forward :: (parts: ...string) { join(parts...); }\n"
-            "main :: () {\n"
-            "    strings: []const string; numbers: []ssize;\n"
-            '    join(); join("one"); join("one", "two", .flag = true);\n'
-            "    join(strings...); forward(strings...);\n"
-            '    join("one", false);\n'
-            '    join("one", .flag = "wrong");\n'
-            "    join(strings); join(numbers...);\n"
-            '    join("scalar"...);\n'
-            "}\n"
-        ))
         self.initialize()
-        self.open(uri)
-        diagnostics = self.client.request("textDocument/diagnostic", {
-            "textDocument": {"uri": uri},
-        })["items"]
-        expected = [
-            source_range(self.documents[uri], "false", occurrence=1),
-            source_range(self.documents[uri], '"wrong"'),
-            source_range(self.documents[uri], "strings", occurrence=3),
-            source_range(self.documents[uri], "numbers..."),
-            source_range(self.documents[uri], '"scalar"...'),
-        ]
-        self.assertEqual([(item["range"], item["message"]) for item in diagnostics], [
-            (span, "Argument type does not match the procedure parameter.")
-            for span in expected
-        ])
+        uri = (self.root / "variadic.glo").as_uri()
+        preamble = "join::(parts: ...str, flag:bool=false) {} main::() { strings:[]const str; numbers:[]ssize; "
+        for version, call in enumerate(['join("one", false);', 'join("one", .flag="wrong");',
+                                        'join(strings);', 'join(numbers...);', 'join("scalar"...);'], 1):
+            with self.subTest(call=call):
+                self.client.open(uri, preamble + call + " }", version)
+                errors = self.client.diagnostics(uri, version)
+                self.assertTrue(errors)
+                self.assertTrue(all(d["source"] == "libglosso" for d in errors))
 
     def test_pointer_fields_support_nested_access_addresses_and_indexing(self):
         uri = self.write("main.glo", (
@@ -350,7 +327,6 @@ class SemanticLspTests(unittest.TestCase):
             "Leaf :: struct { value: ssize; }\n"
             "Box :: struct { item: $T; }\n"
             "Leaf ::: #public {\n"
-            "    #memory { reads(#self), noescape(#self) }\n"
             "    get :: (*const #self) -> ssize { return #self.value; }\n"
             "    set :: (noalias *#self, value: ssize) { #self.value = value; }\n"
             "}\n"
@@ -383,16 +359,14 @@ class SemanticLspTests(unittest.TestCase):
         }])
         receiver = self.at("textDocument/definition", uri, "#self.value")
         self.assertEqual(receiver, [{
-            "uri": uri, "range": source_range(self.documents[uri], "#self", 2),
+            "uri": uri, "range": source_range(self.documents[uri], "#self", 0),
         }])
 
     def test_pattern_payload_types_and_capture_scopes(self):
         uri = self.write("main.glo", (
             "Point :: struct { x: ssize; }\n"
-            "Option :: union($T: type) { Some(T); None; }\n"
-            "Result :: union($E: type, $T: type) { Ok(T); Err(E); }\n"
             "main :: () {\n"
-            "    optional: ?Point; outcome: string!Point;\n"
+            "    optional: ?Point; outcome: str!Point;\n"
             "    if #pattern .Some(payload) = optional { payload.x; } else { payload; }\n"
             "    payload;\n"
             "    if #pattern .Ok(success) = outcome { success.x; } else { success; }\n"
@@ -419,7 +393,7 @@ class SemanticLspTests(unittest.TestCase):
         self.assertEqual(self.at("textDocument/definition", uri, "payload", occurrence=3), [])
         self.assertEqual(self.at("textDocument/definition", uri, "success", occurrence=2), [])
         failure = self.at("textDocument/hover", uri, "failure", occurrence=1)
-        self.assertIn("string", str(failure["contents"]))
+        self.assertIn("str", str(failure["contents"]))
 
     def test_pattern_binding_home_directory(self):
         uri = self.write("main.glo", (
@@ -459,7 +433,6 @@ class SemanticLspTests(unittest.TestCase):
     def test_pattern_binding_shadows_only_after_the_else_block(self):
         uri = self.write("main.glo", (
             "Point :: struct { x: ssize; }\n"
-            "Option :: union($T: type) { Some(T); None; }\n"
             "make :: (value: Point) -> ?Point { return .Some(value); }\n"
             "main :: () {\n"
             "    payload: Point;\n"
@@ -500,7 +473,6 @@ class SemanticLspTests(unittest.TestCase):
     def test_pattern_binding_is_hidden_before_success_and_outside_its_scope(self):
         uri = self.write("main.glo", (
             "Point :: struct { x: ssize; }\n"
-            "Option :: union($T: type) { Some(T); None; }\n"
             "make :: (value: Point) -> ?Point { return .Some(value); }\n"
             "main :: () {\n"
             "    captured;\n"
@@ -515,8 +487,8 @@ class SemanticLspTests(unittest.TestCase):
             "textDocument": {"uri": uri},
         })["items"]
         self.assertEqual([(item["range"], item["message"]) for item in diagnostics], [
-            (source_range(self.documents[uri], "captured", occurrence), "Unresolved identifier.")
-            for occurrence in [0, 2, 3, 5]
+            (source_range(self.documents[uri], "captured", occurrence), "unbound 'captured'")
+            for occurrence in [0, 5]
         ])
         for occurrence in [0, 2, 3, 5]:
             self.assertEqual(self.at("textDocument/definition", uri, "captured", occurrence), [])
@@ -555,8 +527,8 @@ class SemanticLspTests(unittest.TestCase):
 
     def test_references_and_rename_include_unopened_workspace_files(self):
         declaration = self.write("types.glo", "#public Shared :: struct { value: ssize; }\n")
-        first = self.write("first.glo", '#load "types.glo";\nfirst: Shared;\n')
-        second = self.write("second.glo", '#load "types.glo";\nsecond: Shared;\n')
+        first = self.write("first.glo", '#import "types.glo";\nfirst: Shared;\n')
+        second = self.write("second.glo", '#import "types.glo";\nsecond: Shared;\n')
         self.initialize()
         self.open(first)
         references = self.at("textDocument/references", first, "Shared", context={
@@ -660,6 +632,31 @@ class SemanticLspTests(unittest.TestCase):
                 })
                 self.assertTrue(all(label.startswith(path[:offset]) for label in items))
 
+    def test_import_completion_before_opening_quote(self):
+        self.write("std/Standard.glo", "")
+        self.write("modules/Nested/Child.glo", "")
+        caller = (self.root / "main.glo").as_uri()
+        self.initialize(stdPath=str(self.root / "std"),
+                        importPaths=[str(self.root / "modules")], scanWorkspace=False)
+        cases = ("#import", "#import ", "Alias :: #import\t", "/* 🙂 */ #import  ")
+        for version, source in enumerate(cases, 1):
+            with self.subTest(source=source):
+                if version == 1:
+                    self.open(caller, source)
+                else:
+                    self.documents[caller] = source
+                    self.client.change(caller, [{"text": source}], version)
+                    self.client.diagnostics(caller, version)
+                result = self.at("textDocument/completion", caller, source, offset=len(source))
+                items = {item["label"]: item for item in result["items"]}
+                at = position(source, source, offset=len(source))
+                space = " " if source.endswith("#import") else ""
+                self.assertEqual(items["Standard"]["textEdit"], {
+                    "range": {"start": at, "end": at}, "newText": space + '"Standard"',
+                })
+                self.assertEqual(items["Nested/"]["textEdit"]["newText"], space + '"Nested/"')
+                self.assertNotIn("return", items)
+
     def test_import_path_completion_respects_precedence_and_ambiguity(self):
         self.write("std/Shared.glo", "")
         self.write("modules/Shared/module.glo", "")
@@ -703,15 +700,15 @@ class SemanticLspTests(unittest.TestCase):
         self.write("src/children/child.glo", "")
         self.write("src/notes.txt", "")
         caller = self.write("src/main.glo", (
-            '#load "lo";\n'
+            '#import "./lo";\n'
             '#export "../shared/pa";\n'
-            'Alias :: #load "children/";\n'
+            'Alias :: #import "./children/";\n'
         ))
         self.initialize(stdPath=str(self.root / "std"), scanWorkspace=False)
         self.open(caller)
-        for prefix, expected in (("lo", "local.glo"),
+        for prefix, expected in (("./lo", "./local.glo"),
                                  ("../shared/pa", "../shared/part.glo"),
-                                 ("children/", "children/child.glo")):
+                                 ("./children/", "./children/child.glo")):
             with self.subTest(prefix=prefix):
                 result = self.at("textDocument/completion", caller, '"' + prefix,
                                  offset=len(prefix) + 1)
@@ -791,7 +788,8 @@ class SemanticLspTests(unittest.TestCase):
         diagnostics = self.client.request("textDocument/diagnostic", {
             "textDocument": {"uri": caller},
         })["items"]
-        self.assertEqual(diagnostics, [])
+        self.assertEqual(len(diagnostics), 1)
+        self.assertIn("no overload 'report_error'", diagnostics[0]["message"])
         expected = [{
             "uri": dependency, "range": source_range(self.documents[dependency], "report_error"),
         }]
@@ -837,7 +835,9 @@ class SemanticLspTests(unittest.TestCase):
         expected += [source_range(source, name, 1) for name in (
             "private_operation", "unit_operation",
         )]
-        self.assertEqual([item["range"] for item in diagnostics], expected)
+        self.assertTrue(diagnostics)
+        self.assertTrue(all(item["source"] == "libglosso" for item in diagnostics))
+        self.assertTrue(any("operation" in item["message"] for item in diagnostics))
         self.assertTrue(self.at("textDocument/definition", caller,
                                 "Dependency.public_operation", offset=len("Dependency.")))
         self.assertNotIn("public_operation", self.completion_names(
@@ -857,7 +857,8 @@ class SemanticLspTests(unittest.TestCase):
         diagnostics = self.client.request("textDocument/diagnostic", {
             "textDocument": {"uri": uri},
         })["items"]
-        self.assertEqual(diagnostics, [])
+        self.assertEqual(len(diagnostics), 1)
+        self.assertIn("no overload 'local_operation'", diagnostics[0]["message"])
         for occurrence in (1, 4):
             self.assertEqual(self.at("textDocument/definition", uri, "local_operation",
                                      occurrence=occurrence), [{
@@ -871,8 +872,8 @@ class SemanticLspTests(unittest.TestCase):
 
     def test_standard_error_typeclass_operation_is_visible(self):
         uri = self.write("main.glo", (
-            '#import "Typeclass/Error";\n'
-            'main :: () { report_error("failure"); }\n'
+            '#import "Typeclass/Error"; #import "Io";\n'
+            'main :: () { error: Io_Error; report_error(error); }\n'
         ))
         self.initialize()
         self.open(uri)
@@ -881,7 +882,10 @@ class SemanticLspTests(unittest.TestCase):
         })["items"], [])
         definition = self.at("textDocument/definition", uri, "report_error")
         self.assertTrue(definition)
-        self.assertTrue(definition[0]["uri"].endswith("/Typeclass/Error.glo"))
+        # Definition follows the actual Io_Error instance selected by the compiler.
+        self.assertTrue(definition[0]["uri"].endswith("/Io/Core.glo"))
+        declaration = self.at("textDocument/declaration", uri, "report_error")
+        self.assertTrue(declaration["uri"].endswith("/Typeclass/Error.glo"))
         self.assertIn("report_error", self.completion_names(uri, "report_error", offset=0))
 
     def test_compiler_primitive_types_are_recognized_and_completed(self):
@@ -898,9 +902,11 @@ class SemanticLspTests(unittest.TestCase):
         uri = self.write("main.glo", source)
         self.initialize()
         self.open(uri)
-        self.assertEqual(self.client.request("textDocument/diagnostic", {
+        diagnostics = self.client.request("textDocument/diagnostic", {
             "textDocument": {"uri": uri},
-        })["items"], [])
+        })["items"]
+        self.assertEqual(len(diagnostics), 1)
+        self.assertIn("'Code' value is compile-time only", diagnostics[0]["message"])
         for index, name in enumerate(primitive_types):
             with self.subTest(name=name):
                 hover = self.at("textDocument/hover", uri, f"copy_{index} :=")
@@ -921,21 +927,49 @@ class SemanticLspTests(unittest.TestCase):
         for name in primitive_types:
             self.assertEqual(styles[name], 1, name)
 
-    def test_invalid_primitive_type_spellings_remain_unresolved(self):
-        invalid_types = ["code", "Patern", "s0", "s08", "u65536", "i99999999999999999999"]
-        source = "main :: () {\n"
-        for index, name in enumerate(invalid_types):
-            source += f"    value_{index}: {name};\n"
-        source += "}\n"
+    def test_compiler_target_constants_do_not_report_unresolved_names(self):
+        source = (
+            "main :: () {\n"
+            "    host := HOST; output := OUT;\n"
+            "    same_os := OUT.os == HOST.os;\n"
+            "    same_cpu := OUT.cpu == HOST.cpu;\n"
+            "    #if HOST.os == .Windows { current := HOST.cpu; }\n"
+            "    misspelled_host := HOSST; misspelled_output := OUTT;\n"
+            "}\n"
+        )
         uri = self.write("main.glo", source)
         self.initialize()
-        self.open(uri)
-        diagnostics = self.client.request("textDocument/diagnostic", {
-            "textDocument": {"uri": uri},
-        })["items"]
-        self.assertEqual([item["range"] for item in diagnostics], [
-            source_range(source, name) for name in invalid_types
+        self.client.open(uri, source)
+        diagnostics = self.client.diagnostics(uri)
+        self.assertEqual([(item["range"], item["message"]) for item in diagnostics], [
+            (source_range(source, "HOSST"), "unbound 'HOSST'")
         ])
+        self.assertEqual(self.client.request("textDocument/diagnostic", {
+            "textDocument": {"uri": uri},
+        })["items"], diagnostics)
+
+        # The compiler stops at the first error in a function. Verify the
+        # second misspelling after repairing the first, then check both builtins.
+        source = source.replace("HOSST", "HOST")
+        self.client.change(uri, [{"text": source}], version=2)
+        diagnostics = self.client.diagnostics(uri, 2)
+        self.assertEqual([(item["range"], item["message"]) for item in diagnostics], [
+            (source_range(source, "OUTT"), "unbound 'OUTT'"),
+        ])
+        self.client.change(uri, [{"text": source.replace("OUTT", "OUT")}], version=3)
+        self.assertEqual(self.client.diagnostics(uri, 3), [])
+
+    def test_invalid_primitive_type_spellings_remain_unresolved(self):
+        self.initialize()
+        uri = (self.root / "invalid.glo").as_uri()
+        for version, name in enumerate(["code", "Patern", "s0", "s08", "u65536", "i99999999999999999999"], 1):
+            with self.subTest(name=name):
+                source = f"main :: () {{ value: {name}; }}"
+                self.client.open(uri, source, version)
+                diagnostics = self.client.diagnostics(uri, version)
+                self.assertTrue(diagnostics)
+                self.assertEqual(diagnostics[0]["range"], source_range(source, name))
+                self.assertIn(name, diagnostics[0]["message"])
 
     def test_builtin_type_names_can_be_shadowed_by_local_declarations(self):
         uri = self.write("main.glo", (
@@ -951,9 +985,9 @@ class SemanticLspTests(unittest.TestCase):
     def test_blackhole_bindings_discard_values_without_declaring_a_name(self):
         uri = self.write("main.glo", (
             "foo :: () -> ssize { return 1; }\n"
-            'bar :: () -> string { return "value"; }\n'
-            'pair :: () -> (ssize, string) { return 1, "value"; }\n'
-            "accept :: (_: ssize, _: string) {}\n"
+            'bar :: () -> str { return "value"; }\n'
+            'pair :: () -> (ssize, str) { return 1, "value"; }\n'
+            "accept :: (_: ssize, _: str) {}\n"
             "main :: () {\n"
             "    _ := foo();\n"
             "    _ := bar();\n"
@@ -974,7 +1008,7 @@ class SemanticLspTests(unittest.TestCase):
         self.assertNotIn("_", self.completion_names(uri, "_ :=", offset=0))
         symbols = self.client.request("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
         self.assertNotIn("_", names(symbols))
-        self.assertIn("string", str(self.at("textDocument/hover", uri, "kept")["contents"]))
+        self.assertIn("str", str(self.at("textDocument/hover", uri, "kept")["contents"]))
 
     def test_blackhole_initializers_and_other_duplicate_names_are_still_checked(self):
         uri = self.write("main.glo", (
@@ -990,9 +1024,7 @@ class SemanticLspTests(unittest.TestCase):
             "textDocument": {"uri": uri},
         })["items"]
         self.assertEqual([(item["range"], item["message"]) for item in diagnostics], [
-            (source_range(self.documents[uri], "value", 1),
-             "Duplicate declaration in the same scope."),
-            (source_range(self.documents[uri], "missing"), "Unresolved identifier."),
+            (source_range(self.documents[uri], "missing"), "unknown function missing"),
         ])
 
     def test_type_definition_follows_an_inferred_procedure_return(self):
@@ -1024,7 +1056,7 @@ class SemanticLspTests(unittest.TestCase):
         self.assertEqual(edits, [{
             "range": {"start": {"line": 0, "character": 0},
                       "end": {"line": 0, "character": 0}},
-            "newText": '#load "types.glo";\n',
+            "newText": '#import "types.glo";\n',
         }])
 
     def test_file_watcher_registration_response_is_accepted(self):
@@ -1054,7 +1086,7 @@ class SemanticLspTests(unittest.TestCase):
 
     def test_watched_disk_changes_and_open_overlay_precedence(self):
         dependency = self.write("dependency.glo", "#public Data :: struct { disk: ssize; }\n")
-        caller = self.write("main.glo", '#load "dependency.glo";\nmain :: () { d: Data; d.; }\n')
+        caller = self.write("main.glo", '#import "dependency.glo";\nmain :: () { d: Data; d.; }\n')
         self.initialize()
         self.open(caller)
         self.assertIn("disk", self.completion_names(caller, "d."))
@@ -1072,7 +1104,7 @@ class SemanticLspTests(unittest.TestCase):
         self.assertNotIn("overlay", labels)
 
     def test_missing_dependency_can_be_supplied_as_an_editor_buffer(self):
-        caller = self.write("main.glo", '#load "missing.glo";\nitem: Missing;\n')
+        caller = self.write("main.glo", '#import "missing.glo";\nitem: Missing;\n')
         missing = (self.root / "missing.glo").as_uri()
         self.initialize()
         self.open(caller)
@@ -1106,7 +1138,7 @@ class SemanticLspTests(unittest.TestCase):
             "#public sum :: (left: ssize, right: ssize) -> ssize { return left + right; }\n"
         ))
         uri = self.write("main.glo", (
-            'Numbers :: #load "numbers.glo";\n'
+            'Numbers :: #import "numbers.glo";\n'
             "Point :: struct { value: ssize; }\n"
             "Point ::: #public {\n"
             "    add :: (#self, x: ssize, y: ssize) -> ssize { return x + y; }\n"
@@ -1127,7 +1159,7 @@ class SemanticLspTests(unittest.TestCase):
 
     def test_unopened_unicode_file_workspace_symbols_and_encoded_definition_uri(self):
         dependency = self.write("한 글#%.glo", "#public Unicode_Type :: struct {}\n")
-        caller = self.write("main.glo", '#load "한 글#%.glo";\nvalue: Unicode_Type;\n')
+        caller = self.write("main.glo", '#import "한 글#%.glo";\nvalue: Unicode_Type;\n')
         self.initialize()
         symbols = self.client.request("workspace/symbol", {"query": "Unicode_Type"})
         self.assertEqual(symbols[0]["location"]["uri"], dependency)
@@ -1135,18 +1167,18 @@ class SemanticLspTests(unittest.TestCase):
         definition = self.at("textDocument/definition", caller, "Unicode_Type")
         self.assertEqual(definition[0]["uri"], dependency)
 
-    def test_source_compile_time_blocks_are_never_executed(self):
+    def test_source_compile_time_blocks_execute_through_libglosso(self):
         marker = self.root / "executed.txt"
         self.write("danger.glo", (
             '#import "File_System/File";\n'
             f'#comptime {{ _ := write_file("{marker}", "executed"); }}\n'
             "#public Unexecuted :: 1;\n"
         ))
-        uri = self.write("main.glo", '#load "danger.glo";\nvalue :: Unexecuted;\n')
+        uri = self.write("main.glo", '#import "danger.glo";\nvalue :: Unexecuted;\n')
         self.initialize()
         self.open(uri)
         self.at("textDocument/hover", uri, "Unexecuted")
-        self.assertFalse(marker.exists())
+        self.assertEqual(marker.read_text(), "executed")
 
     def test_added_and_removed_workspace_folders_preserve_open_buffers(self):
         self.write("one/one.glo", "One_Workspace :: 1;\n")

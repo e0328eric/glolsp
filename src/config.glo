@@ -1,0 +1,109 @@
+//! User configuration uses Glosso's platform directory and TOML APIs.
+#import "File_System/Directory";
+#import "File_System/File";
+#import "File_System/Path";
+#import "File_System/System";
+#import "Serialization/Core";
+#import "Serialization/Toml";
+#import "Format";
+#import "Os";
+
+#public config_file_path :: () -> str {
+    if #pattern.Some(directory) = get_config_dir() {
+        defer directory.free();
+        base := directory.to_string();
+        defer base.free();
+        return path_join(base, "glolsp/config.toml");
+    }
+    return "".clone();
+}
+
+#public config_default_std_path :: () -> str {
+    if #pattern.Some(directory) = get_home_dir() {
+        defer directory.free();
+        base := directory.to_string();
+        defer base.free();
+        return path_join(base, ".local/glosso/std");
+    }
+    return "".clone();
+}
+
+config_report :: (path: str, message: str) {
+    output := File.stderr();
+    _ = output.write(tprint("glolsp: {}: {}\n", path, message));
+}
+
+config_resolve_compiler :: (value: str, file: str) -> str {
+    path := value.clone();
+    defer path.free();
+    if value.starts_with("~/") || value.starts_with("~\\") {
+        if #pattern.Some(directory) = get_home_dir() {
+            defer directory.free();
+            base := directory.to_string();
+            defer base.free();
+            path.free();
+            path = path_join(base, value[2..]);
+        }
+    } else if !path_is_absolute(path) {
+        path.free();
+        path = path_join(path_dirname(file), value);
+    }
+    // In particular, ~/.local/bin/glosso may link to another installation.
+    if canonical(path) == {
+        case .Ok(resolved); return resolved;
+        case .Err;
+    }
+    return path_clean(path);
+}
+
+config_compiler_std_path :: (compiler: str) -> str {
+    directory := path_dirname(compiler);
+    prefix := path_dirname(directory);
+    installed := path_join(prefix, "std");
+    if os_fs_is_directory(installed) return installed;
+    // Installed: <prefix>/bin/glosso. Development: <checkout>/build/bin/glosso.
+    if path_basename(directory) == "bin" && path_basename(prefix) == "build" {
+        installed.free();
+        return path_join(path_dirname(prefix), "std");
+    }
+    return installed;
+}
+
+/// Returns an owned std path, or empty when no usable compiler override exists.
+#public config_std_path :: () -> str {
+    file := config_file_path();
+    defer file.free();
+    if file.count == 0 return "".clone();
+    source: str;
+    if read_file_up_to(file, 1024 * 1024 + 1) == {
+        case .Err(failure);
+            if failure.kind != .Not_Found config_report(file, "could not read configuration");
+            return "".clone();
+        case .Ok(contents); source = contents;
+    }
+    defer source.free();
+    if source.count > 1024 * 1024 {
+        config_report(file, "configuration exceeds 1 MiB");
+        return "".clone();
+    }
+    if Serialization_Document.toml_document_from_string(source) == {
+        case .Err(failure);
+            config_report(file, tprint("invalid TOML at byte {}: {}", failure.offset, failure.message));
+        case .Ok(document);
+            defer document.destroy();
+            if #pattern.Some(field) = document.root.field_value("compiler_path") {
+                if #partial field.* == {
+                    case .text(value);
+                        if value.count > 0 && !path_has_nul(value) {
+                            compiler := config_resolve_compiler(value, file);
+                            defer compiler.free();
+                            if !os_fs_is_regular_file(compiler)
+                                config_report(file, tprint("compiler_path does not name a file: {}", compiler));
+                            return config_compiler_std_path(compiler);
+                        }
+                }
+                config_report(file, "compiler_path must be a nonempty path string without NUL bytes");
+            }
+    }
+    return "".clone();
+}

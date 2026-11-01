@@ -3,12 +3,12 @@
 #import "Memory/Ownership";
 #import "String_Builder";
 #import "Strings";
-#load "language.glo";
-#load "protocol.glo";
+#import "language.glo";
+#import "protocol.glo";
 
-#public Semantic_Style :: struct #derive(Clone, Copy) { token_type: ssize = -1; modifiers: ssize; }
+#public Semantic_Style :: struct  { token_type: ssize = -1; modifiers: ssize; }
 
-Semantic_Index :: struct { heads: [..]ssize; next: [..]ssize; }
+#public Semantic_Index :: struct { heads: [..]ssize; next: [..]ssize; }
 
 #public Semantic_Cursor :: struct {
     byte: ssize;
@@ -19,7 +19,7 @@ Semantic_Index :: struct { heads: [..]ssize; next: [..]ssize; }
     emitted: bool;
 }
 
-#public semantic_advance :: (source: string, cursor: *Semantic_Cursor, target: ssize) {
+#public semantic_advance :: (source: str, cursor: *Semantic_Cursor, target: ssize) {
     while cursor.byte < target && cursor.byte < source.count {
         byte := source[cursor.byte];
         if byte == #char "\r" || byte == #char "\n" {
@@ -63,7 +63,7 @@ Semantic_Index :: struct { heads: [..]ssize; next: [..]ssize; }
     cursor.emitted = true;
 }
 
-semantic_symbol_styles :: (analysis: *const Language_Analysis) -> [..]Semantic_Style {
+#public semantic_symbol_styles :: (analysis: *const Language_Analysis) -> [..]Semantic_Style {
     styles: [..]Semantic_Style;
     procedures: [..]ssize;
     for i: 0..analysis.symbols.count {
@@ -92,11 +92,11 @@ semantic_symbol_styles :: (analysis: *const Language_Analysis) -> [..]Semantic_S
     return styles;
 }
 
-#public semantic_builtin_type :: (name: string) -> bool {
+#public semantic_builtin_type :: (name: str) -> bool {
     return language_builtin_type(name);
 }
 
-semantic_name_hash :: (name: string, capacity: ssize) -> ssize {
+#public semantic_name_hash :: (name: str, capacity: ssize) -> ssize {
     hash: ssize = 0;
     for byte: name.bytes() hash = (hash * 31 + cast(ssize)byte) % capacity;
     return hash;
@@ -104,7 +104,7 @@ semantic_name_hash :: (name: string, capacity: ssize) -> ssize {
 
 // Group declarations by name once. Each identifier lookup then visits only
 // declarations with that spelling, instead of rescanning the whole document.
-semantic_make_index :: (analysis: *const Language_Analysis) -> Semantic_Index {
+#public semantic_make_index :: (analysis: *const Language_Analysis) -> Semantic_Index {
     result: Semantic_Index;
     capacity: ssize = 8;
     while capacity < analysis.symbols.count * 2 capacity *= 2;
@@ -121,9 +121,9 @@ semantic_make_index :: (analysis: *const Language_Analysis) -> Semantic_Index {
     return result;
 }
 
-semantic_resolve :: (
+#public semantic_resolve :: (
     analysis: *const Language_Analysis, names: *const Semantic_Index,
-    name: string, offset: ssize, source_count: ssize,
+    name: str, offset: ssize, source_count: ssize,
 ) -> ssize {
     bucket := semantic_name_hash(name, names.heads.count);
     while names.heads[bucket] >= 0 && analysis.symbols[names.heads[bucket]].name != name
@@ -149,8 +149,8 @@ semantic_resolve :: (
     return best;
 }
 
-semantic_identifier_style :: (
-    source: string, analysis: *const Language_Analysis, styles: []Semantic_Style,
+#public semantic_identifier_style :: (
+    source: str, analysis: *const Language_Analysis, styles: []Semantic_Style,
     names: *const Semantic_Index, index: ssize,
 ) -> Semantic_Style {
     token := analysis.tokens[index];
@@ -183,12 +183,9 @@ semantic_identifier_style :: (
 }
 
 /// Legend: namespace,type,function,variable,parameter,property,keyword,comment,
-/// string,number,operator,macro. Modifier bits: declaration=1, readonly=2.
-#public #memory {
-    invalidates(out), reads(out, source, analysis), writes(out), noescape(out, source, analysis)
-}
-write_semantic_tokens :: (
-    out: *String_Builder, source: string, analysis: *const Language_Analysis,
+/// str,number,operator,macro. Modifier bits: declaration=1, readonly=2.
+#public write_semantic_tokens :: (
+    out: *String_Builder, source: str, analysis: *const Language_Analysis,
 ) {
     styles := semantic_symbol_styles(analysis);
     names := semantic_make_index(analysis);

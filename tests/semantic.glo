@@ -1,6 +1,6 @@
 // Run with: glosso tests/semantic.glo --run --borrow-check error
-#load "../src/language.glo";
-#load "../src/semantic.glo";
+#import "../src/language.glo";
+#import "../src/semantic.glo";
 #import "String_Builder";
 #import "Io";
 
@@ -25,7 +25,7 @@ main :: () {
     ;
     destroy_language(&procedure);
 
-    // The directive and string text contain no document declarations.
+    // The directive and str text contain no document declarations.
     string_source := "#string\n\\\\😀\n\"a\nb\"";
     strings := analyze_language(string_source);
     string_tokens: String_Builder;

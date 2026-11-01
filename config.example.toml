@@ -1,0 +1,4 @@
+# Save as <config_dir>/glolsp/config.toml, then restart the language server.
+# Linux: $XDG_CONFIG_HOME/glolsp/config.toml or ~/.config/glolsp/config.toml.
+# The compiler installation supplies std; analysis uses the bundled libglosso.
+compiler_path = "~/.local/glosso/bin/glosso"

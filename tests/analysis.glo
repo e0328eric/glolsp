@@ -1,17 +1,17 @@
-#load "../src/analysis.glo";
-#load "../src/model.glo";
-#load "../src/workspace.glo";
+#import "../src/analysis.glo";
+#import "../src/model.glo";
+#import "../src/workspace.glo";
 #import "Io";
 #import "String_Builder";
 
-find_text :: (text: string, needle: string, from: ssize = 0) -> ssize {
+find_text :: (text: str, needle: str, from: ssize = 0) -> ssize {
     for at: from..text.count - needle.count + 1 {
         if text.substring(at, at + needle.count) == needle return at;
     }
     return -1;
 }
 
-symbol_named :: (workspace: *const Workspace, file: ssize, name: string) -> Symbol_Id {
+symbol_named :: (workspace: *const Workspace, file: ssize, name: str) -> Symbol_Id {
     for i: 0..workspace.files[file].syntax.symbols.count {
         if workspace.files[file].syntax.symbols[i].name == name
             return .{ .file = file, .symbol = i };
@@ -19,7 +19,7 @@ symbol_named :: (workspace: *const Workspace, file: ssize, name: string) -> Symb
     return .{};
 }
 
-type_text :: (workspace: *Workspace, symbol: Symbol_Id) -> string {
+type_text :: (workspace: *Workspace, symbol: Symbol_Id) -> str {
     out: String_Builder;
     analysis_write_type(&out, workspace, analysis_type(workspace, symbol));
     return out.into_string();
@@ -31,7 +31,7 @@ check_slice_types :: () {
         generated: String_Builder;
         generated.write_string(#string
             \\Point :: struct { x: ssize; }
-            \\take_text :: (value: string) {}
+            \\take_text :: (value: str) {}
             \\take_wide :: (value: string16) {}
             \\take_points :: (value: []Point) {}
             \\main :: () {
@@ -64,7 +64,7 @@ check_slice_types :: () {
         for name: .["source_slice", "wide_slice", "values_slice", "source_byte", "wide_unit"] {
             inferred := type_text(&workspace, symbol_named(&workspace, file, name));
             defer inferred.free();
-            expected := "string";
+            expected := "str";
             if name == {
                 case "wide_slice"; expected = "string16";
                 case "values_slice"; expected = "[]Point";
@@ -88,17 +88,17 @@ check_variadic_types :: () {
     source := #string
         \\Point :: struct { x: ssize; }
         \\Child :: struct { point: Point; }
-        \\take_parts :: (parts: []const string) {}
-        \\join :: (parts: ...string) {
+        \\take_parts :: (parts: []const str) {}
+        \\join :: (parts: ...str) {
         \\    take_parts(parts);
         \\    copied := parts; first := parts[0]; count := parts.count;
         \\    join(parts...);
         \\}
         \\identity :: (items: ...$T) -> T { return items[0]; }
-        \\pick :: (values: ...string) -> Point { result: Point; return result; }
+        \\pick :: (values: ...str) -> Point { result: Point; return result; }
         \\pick :: (values: ...bool) -> Child { result: Child; return result; }
         \\main :: () {
-        \\    strings: []const string; flags: []bool; points: []Point; point: Point;
+        \\    strings: []const str; flags: []bool; points: []Point; point: Point;
         \\    direct := identity(point); spread := identity(points...);
         \\    direct.x; spread.x;
         \\    text := pick("one", "two"); texts := pick(strings...);
@@ -118,8 +118,8 @@ check_variadic_types :: () {
         defer inferred.free();
         expected := "Point";
         if name == {
-            case "copied"; expected = "[]string";
-            case "first"; expected = "string";
+            case "copied"; expected = "[]str";
+            case "first"; expected = "str";
             case "count"; expected = "ssize";
             case "flag", "bools"; expected = "Child";
             else;
@@ -191,13 +191,13 @@ main :: () {
         \\Option :: union($T: type) { Some(T); None; }
         \\Result :: union($E: type, $T: type) { Ok(T); Err(E); }
         \\Style :: enum { Native; Unix; }
-        \\join :: (parts: ...string, style: Style = .Native) -> string { return ""; }
-        \\pick :: (parts: ...string, flag: bool = false) -> Point { result: Point; return result; }
+        \\join :: (parts: ...str, style: Style = .Native) -> str { return ""; }
+        \\pick :: (parts: ...str, flag: bool = false) -> Point { result: Point; return result; }
         \\pick :: (flag: bool) -> Child { result: Child; return result; }
         \\identity :: (value: $T) -> T { return value; }
         \\make :: () -> Point { return .{ .x = 1, .y = 2 }; }
         \\pair :: () -> (Point, Child) { point: Point; child: Child; return point, child; }
-        \\select :: (value: string) -> Child { result: Child; return result; }
+        \\select :: (value: str) -> Child { result: Child; return result; }
         \\select :: (value: s64) -> Point { return make(); }
         \\Point ::: #public {
         \\    read :: (#self) -> ssize { return #self.x; }
@@ -221,7 +221,7 @@ main :: () {
         \\    picked.x;
         \\    optional: ?Point;
         \\    if #pattern .Some(payload) = optional { payload.x; }
-        \\    outcome: string!Point;
+        \\    outcome: str!Point;
         \\    if #pattern .Ok(success) = outcome { success.x; }
         \\    first, second := pair();
         \\    first.x;
@@ -361,7 +361,7 @@ main :: () {
         find_text(fragment_source, "#self.value") + 6), member);
     variadic_invalid := #string
         \\Style :: enum { Native; Unix; }
-        \\join :: (parts: ...string, style: Style = .Native) -> string { return ""; }
+        \\join :: (parts: ...str, style: Style = .Native) -> str { return ""; }
         \\main :: () {
         \\    join("one", false);
         \\    join("one", .style = "wrong");

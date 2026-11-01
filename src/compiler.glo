@@ -1,0 +1,254 @@
+//! Cached compiler diagnostics, generated namespaces and checked source facts.
+#import "glosso.glo";
+#import "workspace.glo";
+#import "model.glo";
+#import "protocol.glo";
+#import "String_Builder";
+#import "Serialization/Core";
+#import "Strings/Utf8";
+
+compiler_position :: (out: *String_Builder, position: ?*Json) {
+    out.write_string("{\"line\":");
+    write_json_integer(out, json_integer(json_field(position, "line"), 0));
+    out.write_string(",\"character\":");
+    write_json_integer(out, json_integer(json_field(position, "character"), 0));
+    out.write_byte(125);
+}
+compiler_range :: (out: *String_Builder, range: ?*Json) {
+    out.write_string("{\"start\":"); compiler_position(out, json_field(range, "start"));
+    out.write_string(",\"end\":"); compiler_position(out, json_field(range, "end"));
+    out.write_byte(125);
+}
+compiler_failure :: (out: *String_Builder, message: str) {
+    out.write_string("[{\"range\":"); compiler_range(out, null);
+    out.write_string(",\"severity\":1,\"source\":\"libglosso\",\"message\":");
+    write_json_string(out, message); out.write_string("}]");
+}
+compiler_related :: (out: *String_Builder, location: ?*Json, message: str) {
+    out.write_string("{\"location\":{\"uri\":");
+    uri := workspace_path_to_uri(json_text(json_field(location, "file")));
+    defer uri.free(); write_json_string(out, uri);
+    out.write_string(",\"range\":"); compiler_range(out, json_field(location, "range"));
+    out.write_string("},\"message\":"); write_json_string(out, message); out.write_byte(125);
+}
+
+compiler_location_file :: (workspace: *Workspace, location: ?*Json) -> ssize {
+    return workspace_find_path(workspace, json_text(json_field(location, "file")));
+}
+compiler_location_start :: (location: ?*Json) -> ssize {
+    return json_integer(json_field(json_field(json_field(location, "range"), "start"), "byte"), -1);
+}
+compiler_preload_location :: (workspace: *Workspace, location: ?*Json) {
+    path := json_text(json_field(location, "file"));
+    if path.count > 0 && !path.starts_with("<") && workspace_find_path(workspace, path) < 0
+        _ = workspace_load(workspace, path);
+}
+compiler_symbol :: (workspace: *Workspace, location: ?*Json) -> Symbol_Id {
+    file := compiler_location_file(workspace, location);
+    if file < 0 return .{};
+    start := compiler_location_start(location);
+    for i: 0..workspace.files[file].syntax.symbols.count {
+        symbol := workspace.files[file].syntax.symbols[i];
+        if start >= symbol.selection_start && start < symbol.selection_end
+            return .{ .file = file, .symbol = i };
+    }
+    return .{};
+}
+compiler_apply :: (workspace: *Workspace, root: ?*Json) {
+    semantics := json_field(root, "semantics");
+    if #pattern.Some(sources) = json_array(json_field(semantics, "generated_sources")) {
+        for i: 0..sources.*.count {
+            item: ?*Json = .Some(&sources.*[i]);
+            path := json_text(json_field(item, "file"));
+            file := workspace_find_path(workspace, path);
+            if file < 0 {
+                uri := workspace_path_to_uri(path);
+                defer uri.free();
+                file = workspace_allocate(workspace, uri, path);
+            }
+            if file < 0 continue;
+            workspace.files[file].generated = true;
+            _ = workspace_replace_source(workspace, file, json_text(json_field(item, "text")));
+        }
+    }
+    // Loading a declaration can grow the file array and invalidate input state.
+    // Finish all loading before publishing borrowed symbol identities/facts.
+    if #pattern.Some(facts) = json_array(json_field(semantics, "facts")) {
+        for i: 0..facts.*.count {
+            item: ?*Json = .Some(&facts.*[i]);
+            compiler_preload_location(workspace, json_field(item, "definition"));
+            compiler_preload_location(workspace, json_field(item, "type_definition"));
+        }
+    }
+    if #pattern.Some(sources) = json_array(json_field(semantics, "generated_sources")) {
+        for i: 0..sources.*.count {
+            item: ?*Json = .Some(&sources.*[i]);
+            file := workspace_find_path(workspace, json_text(json_field(item, "file")));
+            if file < 0 continue;
+            if #pattern.Some(insertions) = json_array(json_field(item, "insertions")) {
+                if insertions.*.count == 0 continue;
+                owner := compiler_location_file(workspace, .Some(&insertions.*[insertions.*.count - 1]));
+                if owner < 0 || owner == file continue;
+                site: ?*Json = .Some(&insertions.*[insertions.*.count - 1]);
+                workspace.files[file].generated_origin = owner;
+                workspace.files[file].generated_start = compiler_location_start(site);
+                workspace.files[file].generated_end = json_integer(json_field(
+                    json_field(json_field(site, "range"), "end"), "byte"));
+                seen := false;
+                for other: workspace.files[owner].generated_files.view() if other == file seen = true;
+                if !seen workspace.files[owner].generated_files.push(file);
+            }
+        }
+    }
+    // Visibility may have been inherited from #public around the insertion.
+    // The generated text alone cannot recover that audience.
+    if #pattern.Some(declarations) = json_array(json_field(semantics, "generated_declarations")) {
+        for i: 0..declarations.*.count {
+            declaration: ?*Json = .Some(&declarations.*[i]);
+            symbol := compiler_symbol(workspace, json_field(declaration, "definition"));
+            if symbol.symbol < 0 continue;
+            target := &workspace.files[symbol.file].syntax.symbols[symbol.symbol];
+            target.is_public = json_boolean(json_field(declaration, "public")) ||
+                json_boolean(json_field(declaration, "unit"));
+            target.is_unit = json_boolean(json_field(declaration, "unit"));
+        }
+    }
+    if #pattern.Some(scopes) = json_array(json_field(semantics, "scopes")) {
+        for i: 0..scopes.*.count {
+            scope: ?*Json = .Some(&scopes.*[i]);
+            file := workspace_find_path(workspace, json_text(json_field(scope, "file")));
+            if file < 0 continue;
+            if #pattern.Some(bindings) = json_array(json_field(scope, "bindings")) {
+                for j: 0..bindings.*.count {
+                    binding: ?*Json = .Some(&bindings.*[j]);
+                    target := compiler_symbol(workspace, json_field(binding, "definition"));
+                    if target.symbol < 0 continue;
+                    name := json_text(json_field(binding, "name"));
+                    seen := false;
+                    for other: workspace.files[file].compiler_bindings.view() {
+                        if other.name == name && other.target.file == target.file &&
+                           other.target.symbol == target.symbol seen = true;
+                    }
+                    if !seen workspace.files[file].compiler_bindings.push(.{ .name = name.clone(), .target = target });
+                }
+            }
+        }
+    }
+    if #pattern.Some(facts) = json_array(json_field(semantics, "facts")) {
+        for i: 0..facts.*.count {
+            item: ?*Json = .Some(&facts.*[i]);
+            location := json_field(item, "location");
+            file := compiler_location_file(workspace, location);
+            if file < 0 continue;
+            start := compiler_location_start(location);
+            end := json_integer(json_field(json_field(json_field(location, "range"), "end"), "byte"), -1);
+            kind: s32 = 0;
+            if json_text(json_field(item, "kind")) == {
+                case "binding"; kind = 1;
+                case "expression"; kind = 2;
+                case "call"; kind = 3;
+                else; continue;
+            }
+            if start < 0 || end <= start || end > workspace.files[file].source.count continue;
+            seen := false;
+            for other: workspace.files[file].compiler_facts.view() {
+                if other.kind == kind && other.start == start && other.end == end seen = true;
+            }
+            if !seen workspace.files[file].compiler_facts.push(.{
+                .start = start, .end = end, .kind = kind,
+                .type_name = json_text(json_field(item, "type")).clone(),
+                .type_definition = compiler_symbol(workspace, json_field(item, "type_definition")),
+                .definition = compiler_symbol(workspace, json_field(item, "definition")),
+            });
+        }
+    }
+    workspace.analyzed_generation = -1;
+    workspace_refresh_relevance(workspace);
+}
+compiler_error :: (workspace: *Workspace, file: ssize, message: str) {
+    workspace.files[file].compiler_error = message.clone();
+    workspace.files[file].compiler_epoch = workspace.compiler_epoch;
+}
+#public compiler_refresh :: (workspace: *Workspace, index: ssize) {
+    if workspace.files[index].generated ||
+       workspace.files[index].compiler_epoch == workspace.compiler_epoch return;
+    if workspace.files[index].compiler_ready {
+        workspace.files[index].compiler_document.destroy();
+        workspace.files[index].compiler_ready = false;
+    }
+    workspace.files[index].compiler_error.free();
+    empty: str;
+    workspace.files[index].compiler_error = empty;
+    handle: Glosso_Handle;
+    if glosso_context_create(glosso_view(workspace.std_path), &handle) != 0 {
+        compiler_error(workspace, index, glosso_text(glosso_last_error())); return;
+    }
+    defer glosso_context_destroy(handle);
+    _ = glosso_context_set_step_limit(handle, workspace.compiler_step_limit);
+    for path: workspace.import_paths.view() _ = glosso_context_add_module_path(handle, glosso_view(path));
+    for path: workspace.roots.view() _ = glosso_context_add_module_path(handle, glosso_view(path));
+    for file: workspace.files.view() {
+        if file.open && !file.generated && file.path.count > 0 {
+            if glosso_context_set_file(handle, glosso_view(file.path), glosso_view(file.source)) != 0 {
+                compiler_error(workspace, index, glosso_text(glosso_last_error())); return;
+            }
+        }
+    }
+    result: Glosso_Handle;
+    if glosso_analyze(handle, glosso_view(workspace.files[index].path),
+        GLOSSO_NO_MAIN | GLOSSO_EXPORT_SEMANTICS, &result) != 0 {
+        compiler_error(workspace, index, glosso_text(glosso_last_error())); return;
+    }
+    defer glosso_result_destroy(result);
+    // Compile-time output stays in the result and cannot corrupt LSP stdout.
+    if json_parse_document(glosso_text(glosso_result_json(result))) == {
+        case .Err; compiler_error(workspace, index, "Invalid JSON from libglosso"); return;
+        case .Ok(document);
+            compiler_apply(workspace, .Some(&document.root));
+            workspace.files[index].compiler_document = document;
+            workspace.files[index].compiler_ready = true;
+            workspace.files[index].compiler_epoch = workspace.compiler_epoch;
+    }
+}
+#public compiler_write_diagnostics :: (out: *String_Builder, workspace: *Workspace, index: ssize) {
+    compiler_refresh(workspace, index);
+    file := &workspace.files[index];
+    if file.compiler_error.count > 0 { compiler_failure(out, file.compiler_error); return; }
+    if !file.compiler_ready { out.write_string("[]"); return; }
+    document := &file.compiler_document;
+    out.write_byte(91);
+    if #pattern.Some(diagnostics) = json_array(json_field(.Some(&document.root), "diagnostics")) {
+        for i: 0..diagnostics.*.count {
+            item: ?*Json = .Some(&diagnostics.*[i]);
+            location := json_field(item, "location");
+            origin := json_text(json_field(location, "file"));
+            range := json_field(location, "range");
+            foreign_file := origin.count > 0 && origin != json_text(json_field(.Some(&document.root), "file"));
+            if i > 0 out.write_byte(44);
+            out.write_string("{\"range\":");
+            if foreign_file compiler_range(out, null); else compiler_range(out, range);
+            out.write_string(",\"source\":\"libglosso\",\"severity\":");
+            severity: ssize = 1;
+            if #partial json_text(json_field(item, "severity")) == { case "warning"; severity = 2; }
+            write_json_integer(out, severity);
+            out.write_string(",\"message\":");
+            write_json_string(out, json_text(json_field(item, "message")));
+            out.write_string(",\"relatedInformation\":[");
+            related: ssize = 0;
+            if foreign_file {
+                compiler_related(out, location, "Error in imported source"); related += 1;
+            }
+            if #pattern.Some(notes) = json_array(json_field(item, "notes")) {
+                for j: 0..notes.*.count {
+                    note: ?*Json = .Some(&notes.*[j]);
+                    at := json_field(note, "location");
+                    if json_text(json_field(at, "file")).count == 0 continue;
+                    if related > 0 out.write_byte(44);
+                    compiler_related(out, at, json_text(json_field(note, "message"))); related += 1;
+                }
+            }
+            out.write_string("]}");
+        }
+    }
+    out.write_byte(93);
+}

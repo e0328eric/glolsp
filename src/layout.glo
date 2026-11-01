@@ -1,11 +1,12 @@
 //! Token-preserving whitespace layout. Formatting never evaluates source code.
-#load "language.glo";
-#load "protocol.glo";
-#load "positions.glo";
+#import "language.glo";
+#import "protocol.glo";
+#import "positions.glo";
 #import "String_Builder";
 #import "Strings";
+#import "Memory/Ownership";
 
-Layout_State :: struct {
+#public Layout_State :: struct {
     depth: ssize;
     parentheses: ssize;
     brackets: ssize;
@@ -15,7 +16,7 @@ Layout_State :: struct {
     line_start: bool = true;
 }
 
-layout_newline :: (state: *Layout_State, out: *String_Builder) {
+#public layout_newline :: (state: *Layout_State, out: *String_Builder) {
     while out.buf.count > 0 {
         last := out.buf[out.buf.count - 1];
         if last != #char " " && last != #char "\t" break;
@@ -26,8 +27,8 @@ layout_newline :: (state: *Layout_State, out: *String_Builder) {
     state.column = 0;
 }
 
-layout_write :: (
-    state: *Layout_State, out: *String_Builder, text: string, space: bool,
+#public layout_write :: (
+    state: *Layout_State, out: *String_Builder, text: str, space: bool,
 ) {
     if state.line_start {
         if state.insert_spaces {
@@ -45,7 +46,7 @@ layout_write :: (
     state.column += text.count;
 }
 
-layout_no_space_before :: (text: string) -> bool {
+#public layout_no_space_before :: (text: str) -> bool {
     if text == {
         case ",", ";", ")", "]", ":", ".";
         return true;
@@ -54,7 +55,7 @@ layout_no_space_before :: (text: string) -> bool {
     }
 }
 
-layout_no_space_after :: (text: string) -> bool {
+#public layout_no_space_after :: (text: str) -> bool {
     if text == {
         case "(", "[", ".", "$", "`", "``";
         return true;
@@ -64,15 +65,17 @@ layout_no_space_after :: (text: string) -> bool {
 }
 
 #public layout_format :: (
-    source: string,
+    source: str,
     tab_size: ssize = 4,
     insert_spaces: bool = true,
-) -> string {
+) -> str {
     scanned := tokenize_language(source);
+    defer destroy_language(&scanned);
     if scanned.diagnostics.count > 0 return source.clone();
     state: Layout_State = .{ .tab_size = tab_size, .insert_spaces = insert_spaces };
     if state.tab_size < 1 || state.tab_size > 16 state.tab_size = 4;
     out: String_Builder;
+    defer out.free();
     previous := "";
     previous_end: ssize = 0;
     previous_kind: s32 = 0;
@@ -132,6 +135,7 @@ layout_no_space_after :: (text: string) -> bool {
     layout_newline(&state, &out);
     formatted := out.to_string();
     verified := tokenize_language(formatted);
+    defer destroy_language(&verified);
     if verified.diagnostics.count > 0 || verified.tokens.count != scanned.tokens.count return
         source.clone();
     for i: 0..verified.tokens.count {
@@ -139,12 +143,12 @@ layout_no_space_after :: (text: string) -> bool {
         b := verified.tokens[i];
         if source[a.start..a.end] != formatted[b.start..b.end]return source.clone();
     }
-    return out.into_string();
+    return value_take(&out).into_string();
 }
 
 #public layout_write_edits :: (
     out: *String_Builder,
-    source: string,
+    source: str,
     tab_size: ssize,
     insert_spaces: bool = true,
 ) {
