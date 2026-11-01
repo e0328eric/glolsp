@@ -1,0 +1,80 @@
+//! Bounded event transport. Only the main thread owns the editor workspace.
+#import "compiler.glo";
+#import "protocol.glo";
+#import "Thread";
+#import "Memory/Object";
+#import "Memory/Ownership";
+#import "Context";
+#import "File_System/File";
+
+#public Server_Event :: union {
+    input: Rpc_Frame;
+    checked: Compiler_Result;
+}
+Server_Event ::: instance Freeable {
+    free :: (event: *#Self_Type) {
+        if event.* == {
+            case .input(frame); frame.body.free();
+            case .checked(completed); completed.free();
+        }
+    }
+}
+
+Compiler_Worker :: struct {
+    events: ?Channel(Server_Event);
+    jobs: ?Channel(Compiler_Input);
+}
+
+worker_read_input :: (raw: *void) -> ?*void #c_call {
+    state := cast(*?Channel(Server_Event))raw;
+    defer delete(state);
+    #pattern.Some(events) := state.* else { return null; };
+    input := File.stdin();
+    while true {
+        reset_temporary_storage();
+        frame := rpc_read_frame(&input);
+        // send takes ownership on both success and a closed channel.
+        if #pattern.Err = events.send(.input(frame)) break;
+        if frame.status <= 0 break;
+    }
+    return null;
+}
+
+worker_check :: (raw: *void) -> ?*void #c_call {
+    worker := cast(*Compiler_Worker)raw;
+    defer delete(worker);
+    #pattern.Some(jobs) := worker.jobs else { return null; };
+    #pattern.Some(events) := worker.events else { return null; };
+    while true {
+        reset_temporary_storage();
+        #pattern.Ok(received) := jobs.recv() else { break; };
+        #pattern.Some(input) := received else { break; };
+        defer input.free();
+        completed := compiler_run(&input);
+        if #pattern.Err = events.send(.checked(completed)) break;
+    }
+    return null;
+}
+
+#public worker_start_input :: (events: *const Channel(Server_Event)) -> bool {
+    #push_allocator(heap_allocator());
+    #pattern.Some(state) := new(?Channel(Server_Event)) else { return false; };
+    state.* = .Some(events.clone());
+    if Thread.spawn(worker_read_input, cast(*void)state) == {
+        case .Ok(thread); _ = thread.detach(); return true;
+        case .Err; delete(state); return false;
+    }
+}
+
+#public worker_start_compiler :: (
+    events: *const Channel(Server_Event), jobs: *const Channel(Compiler_Input),
+) -> bool {
+    #push_allocator(heap_allocator());
+    #pattern.Some(worker) := new(Compiler_Worker) else { return false; };
+    worker.events = .Some(events.clone());
+    worker.jobs = .Some(jobs.clone());
+    if Thread.spawn(worker_check, cast(*void)worker) == {
+        case .Ok(thread); _ = thread.detach(); return true;
+        case .Err; delete(worker); return false;
+    }
+}

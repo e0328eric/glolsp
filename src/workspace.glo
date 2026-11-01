@@ -60,6 +60,8 @@
         compiler_bindings: [..]Compiler_Binding;
         compiler_facts: [..]Compiler_Fact;
         compiler_epoch: ssize = -1;
+        compiler_requested: bool;
+        diagnostics_pending: bool;
         compiler_ready: bool;
         compiler_document: Serialization_Document;
         compiler_error: str;

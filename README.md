@@ -152,10 +152,18 @@ sandbox, and native calls are not interrupted by the instruction budget.
 Nested native-driver build operations are outside the frontend library's scope
 and report diagnostics.
 
-Analysis is synchronous. Diagnostics and editor requests share a compiler snapshot
-for each document at the current workspace input revision. Repeated requests do
-not reevaluate compile-time code. Source edits, imported buffer changes, watched
-files and configuration changes invalidate snapshots and generated bindings.
+Analysis uses the compiler's program roots: project functions are checked even
+when unused, and imported standard-library bodies are checked on demand.
+Compiler analysis runs on a background worker. Completion, navigation and other
+read-only features use the current document index while checking is in progress;
+completion reports `isIncomplete` until checked facts arrive. Diagnostics and
+rename wait for the current compiler snapshot without blocking other requests.
+Edits coalesce while the worker is busy, and results from obsolete input revisions
+are discarded. Pending requests support cancellation; shutdown does not wait for
+compile-time I/O. Repeated requests do not reevaluate compile-time code.
+Source edits, imported buffer changes, watched files and configuration changes
+invalidate snapshots and generated bindings. Clients that support refresh requests
+receive updated semantic tokens and inlay hints when checking finishes.
 External files read by compile-time code need an editor file-change notification
 or a source edit to refresh the snapshot. The next analysis creates a fresh
 compiler context; there is no cancellation of an in-progress native call yet.
@@ -166,6 +174,17 @@ compiler context; there is no cancellation of an in-progress native call yet.
 ~/.local/glosso/bin/glosso first.glo --cache-dir=build/cache -- test
 python3 tests/compiler_lsp.py --server build/glolsp
 ```
+
+Measure open, edit, and completion latency against a real project with:
+
+```sh
+python3 tests/performance_lsp.py ../focus-glosso/main.glo --server build/glolsp
+```
+
+The benchmark sends edits as unsaved overlays, leaves project files unchanged,
+and prints timings and medians as JSON lines, including completion while initial
+and edited diagnostics are pending. Use `--root` if the entry file is
+below the workspace root, or `--iterations` to change the number of edits.
 
 Seven native Glosso suites cover syntax, tokens, layout, protocol, workspace
 ownership, and navigation analysis. The stdio suites exercise editing, rename,
@@ -181,9 +200,10 @@ module completion with default editor initialization in the actual checkout.
 paths, installation layouts, native SDK lookup, override precedence, and invalid
 configuration.
 
-`src/compiler.glo` owns the libglosso snapshots and applies generated namespaces
-and checked facts. `language.glo` consumes
-compiler tokens; `syntax.glo`, `model.glo`, `workspace.glo`, `analysis.glo`, and
+`src/worker.glo` owns the input and compiler workers; the main event loop alone
+updates the workspace. `src/compiler.glo` owns the libglosso snapshots and applies
+generated namespaces and checked facts. `language.glo` consumes compiler tokens;
+`syntax.glo`, `model.glo`, `workspace.glo`, `analysis.glo`, and
 `ide.glo` maintain the editor index. `server.glo` and `protocol.glo` handle LSP.
 
 On Linux, `python3 tests/standalone.py` copies the executable and `share/` into

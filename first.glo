@@ -199,7 +199,9 @@ glolsp_build :: (
     options.output_executable_name = name;
 
     // Keep runtime bounds and overflow guards enabled in the server.
-    options.set_temp_allocator_size(64 * 1024 * 1024);
+    // This initial arena is thread-local. A large TLS buffer consumes most of
+    // a native worker's stack mapping; temporary storage can grow on the heap.
+    options.set_temp_allocator_size(1024 * 1024);
     options.add_compiler_arg(tprint("--cache-dir={}", cache_path));
     options.set_build_options(workspace);
     built := add_build_file(source, workspace);

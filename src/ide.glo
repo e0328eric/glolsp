@@ -377,7 +377,9 @@
             }
         }
     }
-    out.write_string("{\"isIncomplete\":false,\"items\":[");
+    if workspace.files[file].compiler_epoch != workspace.compiler_epoch
+        out.write_string("{\"isIncomplete\":true,\"items\":[");
+    else out.write_string("{\"isIncomplete\":false,\"items\":[");
     if index >= 0 {
         token := syntax.language.tokens[index];
         if token.kind == 3 || token.kind == 4 {

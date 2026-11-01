@@ -8,7 +8,7 @@
 #public write_resolved_semantic_tokens :: (
     out: *String_Builder, workspace: *Workspace, file: ssize,
 ) {
-    analyze_workspace(workspace);
+    analyze_document(workspace, file);
     source := workspace.files[file].source;
     syntax := &workspace.files[file].syntax;
     cursor: Semantic_Cursor;

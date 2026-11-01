@@ -1228,6 +1228,7 @@
     analysis_clear_file(&workspace.files[file].semantic);
     syntax := &workspace.files[file].syntax;
     semantics := &workspace.files[file].semantic;
+    semantics.revision = -1;
     for token: syntax.language.tokens.view() semantics.bindings.push(.{});
     for symbol: syntax.symbols.view() semantics.symbol_types.push(-1);
     for node: syntax.nodes.view() semantics.node_types.push(-1);
@@ -1484,8 +1485,8 @@
         !path_lexically_contains(workspace.std_path, document.path);
 }
 
-/// Rebuild once per workspace revision. Requests share the resulting semantic graph.
-#public analyze_workspace :: (workspace: *Workspace) {
+/// Prepare shared type and binding storage once per workspace revision.
+analysis_prepare :: (workspace: *Workspace) {
     if workspace.analyzed_generation == workspace.generation return;
     workspace_refresh_relevance(workspace);
     for i: 0..workspace.types.count {
@@ -1496,36 +1497,44 @@
     workspace.types.push(.{ .kind = .Unknown, .name = "unknown" });
     analysis_initialize_units(workspace);
     for i: 0..workspace.files.count analysis_initialize_file(workspace, i);
-    for file: 0..workspace.files.count {
-        if !analysis_eager_file(workspace, file) continue;
-        for symbol: 0..workspace.files[file].syntax.symbols.count
-            _ := analysis_type(workspace, .{ .file = file, .symbol = symbol });
-    }
-    for file: 0..workspace.files.count {
-        if !analysis_eager_file(workspace, file) continue;
-        for node: 0..workspace.files[file].syntax.nodes.count
-            _ := analysis_expression_type(workspace, file, node);
-        analysis_diagnostics(workspace, file);
-        workspace.files[file].semantic.revision = workspace.generation;
-    }
-    for file: 0..workspace.files.count {
-        for i: 0..workspace.files[file].compiler_facts.count {
-            fact := workspace.files[file].compiler_facts[i];
-            if !analysis_valid(workspace, fact.definition) continue;
-            token := language_token_at(&workspace.files[file].syntax.language, fact.start);
-            if token >= 0 && token < workspace.files[file].semantic.bindings.count {
-                workspace.files[file].compiler_facts[i].declaration = workspace.files[file].semantic.bindings[token];
-                workspace.files[file].semantic.bindings[token] = fact.definition;
-            }
+    workspace.analyzed_generation = workspace.generation;
+}
+
+/// Resolve the requested document. Imported types are inferred on demand;
+/// completion and navigation need not visit every expression in the project.
+#public analyze_document :: (workspace: *Workspace, file: ssize) {
+    analysis_prepare(workspace);
+    if file < 0 || file >= workspace.files.count return;
+    if workspace.files[file].semantic.revision == workspace.generation return;
+    for symbol: 0..workspace.files[file].syntax.symbols.count
+        _ := analysis_type(workspace, .{ .file = file, .symbol = symbol });
+    for node: 0..workspace.files[file].syntax.nodes.count
+        _ := analysis_expression_type(workspace, file, node);
+    analysis_diagnostics(workspace, file);
+    for i: 0..workspace.files[file].compiler_facts.count {
+        fact := workspace.files[file].compiler_facts[i];
+        if !analysis_valid(workspace, fact.definition) continue;
+        token := language_token_at(&workspace.files[file].syntax.language, fact.start);
+        if token >= 0 && token < workspace.files[file].semantic.bindings.count {
+            workspace.files[file].compiler_facts[i].declaration = workspace.files[file].semantic.bindings[token];
+            workspace.files[file].semantic.bindings[token] = fact.definition;
         }
     }
-    workspace.analyzed_generation = workspace.generation;
+    workspace.files[file].semantic.revision = workspace.generation;
+}
+
+/// References and rename need bindings from every relevant project document.
+#public analyze_workspace :: (workspace: *Workspace) {
+    analysis_prepare(workspace);
+    for file: 0..workspace.files.count {
+        if analysis_eager_file(workspace, file) analyze_document(workspace, file);
+    }
 }
 
 #public analysis_symbol_at :: (
     workspace: *Workspace, file: ssize, offset: ssize,
 ) -> Symbol_Id {
-    analyze_workspace(workspace);
+    analyze_document(workspace, file);
     if file < 0 || file >= workspace.files.count return .{};
     token := language_token_at(&workspace.files[file].syntax.language, offset);
     if token < 0 || token >= workspace.files[file].semantic.bindings.count return .{};
@@ -1581,7 +1590,7 @@
 #public analysis_visible_symbols :: (
     workspace: *Workspace, file: ssize, offset: ssize,
 ) -> [..]Symbol_Id {
-    analyze_workspace(workspace);
+    analyze_document(workspace, file);
     result: [..]Symbol_Id;
     if file < 0 || file >= workspace.files.count return result;
     syntax := &workspace.files[file].syntax;
@@ -1684,7 +1693,7 @@
 #public analysis_members_at :: (
     workspace: *Workspace, file: ssize, offset: ssize,
 ) -> [..]Symbol_Id {
-    analyze_workspace(workspace);
+    analyze_document(workspace, file);
     empty: [..]Symbol_Id;
     if file < 0 || file >= workspace.files.count return empty;
     syntax := &workspace.files[file].syntax;

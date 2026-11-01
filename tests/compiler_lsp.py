@@ -2,6 +2,8 @@
 """Real stdio requests exercising libglosso, including compile-time evaluation."""
 import argparse
 import json
+import sys
+import time
 from urllib.parse import unquote, urlparse
 import tempfile
 import unittest
@@ -16,12 +18,15 @@ class CompilerLsp(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="glolsp-compiler-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
+        self.start_client()
+
+    def start_client(self, step_limit=20000, capabilities=None):
         self.client = LspClient()
         self.addCleanup(self.client.stop)
         self.client.request("initialize", {
             "processId": None, "rootUri": self.root.as_uri(),
-            "capabilities": {},
-            "initializationOptions": {"scanWorkspace": False, "comptimeStepLimit": 20000},
+            "capabilities": capabilities or {},
+            "initializationOptions": {"scanWorkspace": False, "comptimeStepLimit": step_limit},
         })
         self.client.notify("initialized", {})
 
@@ -57,6 +62,18 @@ class CompilerLsp(unittest.TestCase):
         self.client.change(uri, [{"range": source_range(source, "missing"), "text": "42"}])
         self.assertEqual(self.client.diagnostics(uri, 2), [])
         self.assertEqual(self.pull(uri), [])
+
+    def test_unused_project_functions_are_checked(self):
+        (self.root / "dependency.glo").write_text(
+            '#public unused_dependency::()->s32 { return missing_dependency; }'
+        )
+        source = ('#import "Io"; #import "./dependency.glo";\n'
+                  'unused_local::()->s32 { return missing_local; }\n'
+                  'main::() {}')
+        uri, errors = self.open("unused.glo", source)
+        for name in ("missing_local", "missing_dependency"):
+            self.assertTrue(any(name in d["message"] for d in errors), errors)
+        self.assertEqual(self.pull(uri), errors)
 
     def test_incomplete_directives_keep_server_alive(self):
         uri, errors = self.open("incomplete.glo", "#import,")
@@ -318,6 +335,7 @@ answer::()->s32 {{ record:NativeRecord; return record.field; }}''')
         uri, errors = self.open("cached.glo", source)
         self.assertEqual(errors, [])
         self.assertEqual(marker.read_text(), "evaluated")
+
         marker.write_text("snapshot reused")
         for _ in range(3):
             self.assertEqual(self.pull(uri), [])
@@ -334,6 +352,102 @@ answer::()->s32 {{ record:NativeRecord; return record.field; }}''')
         })
         self.assertEqual(self.client.diagnostics(uri, 2), [])
         self.assertEqual(marker.read_text(), "evaluated")
+
+    def blocked_analysis(self, name):
+        """Hold actual compile-time I/O until the test releases it."""
+        self.client.stop()
+        self.start_client(step_limit=16777216)
+        started = self.root / f"{name}.started"
+        released = self.root / f"{name}.released"
+        script = self.root / f"{name}.py"
+        script.write_text(
+            "import time\nfrom pathlib import Path\n"
+            f"Path({str(started)!r}).touch()\n"
+            "deadline = time.monotonic() + 15\n"
+            f"while not Path({str(released)!r}).exists():\n"
+            "    if time.monotonic() > deadline: raise SystemExit(1)\n"
+            "    time.sleep(0.01)\n"
+        )
+        source = ('#import "Process/Command";\n'
+                  f'#comptime {{ _ := run_command({json.dumps(sys.executable)}, '
+                  f'{json.dumps(str(script))}); }}\n'
+                  'old_answer::()->s32 { return 42; }\n')
+        uri = (self.root / f"{name}.glo").as_uri()
+        self.client.open(uri, source)
+        deadline = time.monotonic() + 10
+        while not started.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not started.exists():
+            released.touch()
+            self.fail(f"Compile-time command did not start: {self.client.diagnostics(uri, 1)}")
+        return uri, source, released
+
+    def test_requests_and_latest_edit_while_compiler_is_busy(self):
+        uri, source, released = self.blocked_analysis("responsive")
+        try:
+            result = self.at("completion", uri, source, "old_answer", offset=3)
+            self.assertTrue(result["isIncomplete"])
+            self.assertIn("old_answer", {item["label"] for item in result["items"]})
+            self.assertIsNotNone(self.at("hover", uri, source, "old_answer"))
+            self.client.send({"jsonrpc": "2.0", "id": "pending-diagnostic",
+                              "method": "textDocument/diagnostic",
+                              "params": {"textDocument": {"uri": uri}}})
+            self.client.send({"jsonrpc": "2.0", "id": "pending-rename",
+                              "method": "textDocument/rename", "params": {
+                                  "textDocument": {"uri": uri},
+                                  "position": position(source, "old_answer"),
+                                  "newName": "renamed",
+                              }})
+            self.client.notify("$/cancelRequest", {"id": "pending-rename"})
+            cancelled = self.client.wait_for(lambda msg: msg.get("id") == "pending-rename")
+            self.assertEqual(cancelled["error"]["code"], -32800)
+            # Multiple edits coalesce while the original compile is still held.
+            self.client.change(uri, [{"text": "intermediate::()->s32 { return missing; }"}], 2)
+            updated = "latest_answer::()->s32 { return 7; }"
+            self.client.change(uri, [{"text": updated}], 3)
+            obsolete = self.client.wait_for(lambda msg: msg.get("id") == "pending-diagnostic")
+            self.assertEqual(obsolete["error"]["code"], -32801)
+            result = self.at("completion", uri, updated, "latest_answer", offset=3)
+            self.assertTrue(result["isIncomplete"])
+            self.assertEqual({item["label"] for item in result["items"]}, {"latest_answer"})
+        finally:
+            released.touch()
+        self.assertEqual(self.client.diagnostics(uri, 3), [])
+        self.assertEqual(self.pull(uri), [])
+        stale = [msg for msg in self.client.pending
+                 if msg.get("method") == "textDocument/publishDiagnostics"
+                 and msg.get("params", {}).get("uri") == uri]
+        self.assertEqual(stale, [])
+
+    def test_shutdown_does_not_wait_for_compiler_io(self):
+        _, _, released = self.blocked_analysis("shutdown")
+        try:
+            self.assertIsNone(self.client.request("shutdown"))
+            self.client.notify("exit")
+            self.assertEqual(self.client.process.wait(timeout=2), 0)
+        finally:
+            released.touch()
+
+    def test_checked_snapshot_refreshes_supported_editor_features(self):
+        self.client.stop()
+        self.start_client(capabilities={"workspace": {
+            "semanticTokens": {"refreshSupport": True},
+            "inlayHint": {"refreshSupport": True},
+        }})
+        uri, errors = self.open("refresh.glo", "answer::42;")
+        self.assertEqual(errors, [])
+        ids = set()
+        for version in (1, 2):
+            if version == 2:
+                self.client.change(uri, [{"text": "answer::43;"}], version)
+                self.assertEqual(self.client.diagnostics(uri, version), [])
+            for method in ("workspace/semanticTokens/refresh", "workspace/inlayHint/refresh"):
+                message = self.client.wait_for(lambda msg: msg.get("method") == method)
+                self.assertNotIn(message["id"], ids)
+                ids.add(message["id"])
+                self.client.send({"jsonrpc": "2.0", "id": message["id"], "result": None})
+        self.assertEqual(self.pull(uri), [])
+
 
 
 if __name__ == "__main__":

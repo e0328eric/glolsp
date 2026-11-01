@@ -1,4 +1,5 @@
 #import "compiler.glo";
+#import "worker.glo";
 //! Stdio transport, editor overlays, and requests against a semantic workspace.
 #import "Io";
 #import "File_System/File";
@@ -16,6 +17,8 @@
 #import "ide.glo";
 #import "highlight.glo";
 #import "layout.glo";
+#import "Thread";
+#import "Memory/Ownership";
 
 #public INITIALIZE_RESULT :: #string,oneline
     \\{"capabilities":{
@@ -51,6 +54,22 @@
     folding_line_only: bool;
     scan_roots: bool;
     register_watchers: bool;
+    refresh_semantic_tokens: bool;
+    refresh_inlay_hints: bool;
+    refresh_id: ssize;
+    events: ?Channel(Server_Event);
+    jobs: ?Channel(Compiler_Input);
+    compiler_busy: bool;
+    compiler_preferred: ssize = -1;
+    pending_requests: [..]Pending_Request;
+}
+
+#public Pending_Request :: struct {
+    body: str;
+    id: str;
+    file: ssize;
+    epoch: ssize;
+    cancelled: bool;
 }
 
 #public server_write_diagnostic :: (
@@ -88,7 +107,75 @@
 
 #public server_publish_open :: (server: *Server, output: *File) {
     for i: 0..server.workspace.files.count {
-        if server.workspace.files[i].open server_publish(server, output, i);
+        if !server.workspace.files[i].open continue;
+        server.workspace.files[i].diagnostics_pending = true;
+        if !server.workspace.files[i].generated &&
+           server.workspace.files[i].compiler_epoch != server.workspace.compiler_epoch
+            server.workspace.files[i].compiler_requested = true;
+    }
+    server_publish_ready(server, output);
+}
+
+server_publish_ready :: (server: *Server, output: *File) {
+    for i: 0..server.workspace.files.count {
+        file := &server.workspace.files[i];
+        if file.open && file.diagnostics_pending &&
+           (file.generated || file.compiler_epoch == server.workspace.compiler_epoch) {
+            file.diagnostics_pending = false;
+            server_publish(server, output, i);
+        }
+    }
+}
+
+server_refresh_analysis :: (server: *Server, output: *File) {
+    for method: .["workspace/semanticTokens/refresh", "workspace/inlayHint/refresh"] {
+        if method == "workspace/semanticTokens/refresh" && !server.refresh_semantic_tokens continue;
+        if method == "workspace/inlayHint/refresh" && !server.refresh_inlay_hints continue;
+        server.refresh_id += 1;
+        out: String_Builder;
+        defer out.free();
+        out.write_string("{\"jsonrpc\":\"2.0\",\"id\":\"glolsp-refresh-");
+        write_json_integer(&out, server.refresh_id);
+        out.write_string("\",\"method\":");
+        write_json_string(&out, method);
+        out.write_byte(#char "}");
+        _ = rpc_send(output, out.to_string());
+    }
+}
+
+server_start_analysis :: (server: *Server, output: *File) {
+    if server.compiler_busy || server.shutdown return;
+    index := server.compiler_preferred;
+    if index < 0 || index >= server.workspace.files.count ||
+       !server.workspace.files[index].compiler_requested || !server.workspace.files[index].active ||
+       server.workspace.files[index].generated ||
+       server.workspace.files[index].compiler_epoch == server.workspace.compiler_epoch
+        index = -1;
+    if index < 0 {
+        for i: 0..server.workspace.files.count {
+            if server.workspace.files[i].active && !server.workspace.files[i].generated &&
+               server.workspace.files[i].compiler_requested &&
+               server.workspace.files[i].compiler_epoch != server.workspace.compiler_epoch {
+                index = i; break;
+            }
+        }
+    }
+    if index < 0 return;
+    input := compiler_input(&server.workspace, index);
+    epoch := input.epoch;
+    version := input.version;
+    #pattern.Some(jobs) := server.jobs else { input.free(); return; };
+    if #pattern.Ok = jobs.send(input) {
+        server.compiler_busy = true;
+    } else {
+        failed: Compiler_Result = .{
+            .file = index, .epoch = epoch, .version = version,
+            .error = "Compiler worker is unavailable".clone(),
+        };
+        defer failed.free();
+        _ = compiler_accept(&server.workspace, &failed);
+        server.workspace.files[index].compiler_requested = false;
+        server_publish_ready(server, output);
     }
 }
 
@@ -98,7 +185,9 @@
     text := json_field(item, "text");
     version := json_field(item, "version");
     if uri.count == 0 || !json_is_text(text) || !json_is_integer(version) return;
-    if workspace_open(&server.workspace, uri, json_text(text), json_integer(version)) < 0 return;
+    index := workspace_open(&server.workspace, uri, json_text(text), json_integer(version));
+    if index < 0 return;
+    server.compiler_preferred = index;
     server_publish_open(server, output);
 }
 
@@ -139,7 +228,10 @@
             index,
             staged,
             json_integer(version)
-        ) server_publish_open(server, output);
+        ) {
+            server.compiler_preferred = index;
+            server_publish_open(server, output);
+        }
     }
 }
 
@@ -201,11 +293,21 @@
         index := workspace_find(&server.workspace, json_text(json_field(item, "uri")));
         if index >= 0 {
             server_publish(server, output, index, true);
+            server.workspace.files[index].diagnostics_pending = false;
+            server.workspace.files[index].compiler_requested = false;
             workspace_close(&server.workspace, index);
             server_publish_open(server, output);
         }
         case "textDocument/didSave";
         server_publish_open(server, output);
+        case "$/cancelRequest";
+        encoded: String_Builder;
+        defer encoded.free();
+        write_json_value(&encoded, json_field(params, "id"));
+        for i: 0..server.pending_requests.count {
+            if server.pending_requests[i].id == encoded.to_string()
+                server.pending_requests[i].cancelled = true;
+        }
         case "workspace/didChangeWatchedFiles";
         if #pattern.Some(changes) = json_array(json_field(params, "changes")) {
             for i: 0..changes.*.count {
@@ -306,8 +408,14 @@
     file: ssize,
 ) {
     workspace := &server.workspace;
-    compiler_refresh(workspace, file);
-    if method != "textDocument/diagnostic" analyze_workspace(workspace);
+    if !workspace.files[file].generated &&
+       workspace.files[file].compiler_epoch != workspace.compiler_epoch {
+        workspace.files[file].compiler_requested = true;
+        server.compiler_preferred = file;
+    }
+    if method == "textDocument/references" || method == "textDocument/rename"
+        analyze_workspace(workspace);
+    else if method != "textDocument/diagnostic" analyze_document(workspace, file);
     out: String_Builder;
     defer out.free();
     source := workspace.files[file].source;
@@ -462,6 +570,30 @@
 }
 
 // 0: continue; 1: successful exit; 2: unsuccessful exit.
+server_flush_pending :: (server: *Server, output: *File) {
+    pending := value_take(&server.pending_requests);
+    defer pending.free();
+    for request: pending.view() {
+        obsolete := request.epoch != server.workspace.compiler_epoch;
+        ready := server.workspace.files[request.file].compiler_epoch == server.workspace.compiler_epoch;
+        if !obsolete && !ready && !request.cancelled && !server.shutdown {
+            server.pending_requests.push(request);
+            continue;
+        }
+        defer request.body.free();
+        defer request.id.free();
+        if #pattern.Ok(document) = json_parse_document(request.body) {
+            defer document.destroy();
+            id := json_field(.Some(&document.root), "id");
+            if request.cancelled || server.shutdown
+                _ = rpc_error(output, id, -32800, "Request cancelled.");
+            else if obsolete
+                _ = rpc_error(output, id, -32801, "Document changed during analysis.");
+            else _ = server_process(server, output, &document.root);
+        }
+    }
+}
+
 #public server_process :: (server: *Server, output: *File, message: *Json) -> s32 {
     root: ?*Json = .Some(message);
     id := json_field(root, "id");
@@ -520,6 +652,10 @@
         server.initialized = true;
         text := json_field(json_field(params, "capabilities"), "textDocument");
         workspace_capabilities := json_field(json_field(params, "capabilities"), "workspace");
+        server.refresh_semantic_tokens = json_boolean(json_field(
+            json_field(workspace_capabilities, "semanticTokens"), "refreshSupport"));
+        server.refresh_inlay_hints = json_boolean(json_field(
+            json_field(workspace_capabilities, "inlayHint"), "refreshSupport"));
         server.register_watchers =
             json_boolean(
                 json_field(
@@ -584,6 +720,25 @@
         _ := rpc_error(output, id, -32602, "Document is unavailable.");
         return 0;
     }
+    // Diagnostics and edits that rename symbols require a checked snapshot.
+    // Read-only editor features can use the current error-tolerant index while
+    // the compiler runs. Retain these requests without blocking other traffic.
+    if (method == "textDocument/diagnostic" || method == "textDocument/rename" ||
+        method == "textDocument/prepareRename") &&
+       !server.workspace.files[file].generated &&
+       server.workspace.files[file].compiler_epoch != server.workspace.compiler_epoch {
+        body: String_Builder;
+        write_json_value(&body, root);
+        encoded_id: String_Builder;
+        write_json_value(&encoded_id, id);
+        server.pending_requests.push(.{
+            .body = body.into_string(), .id = encoded_id.into_string(),
+            .file = file, .epoch = server.workspace.compiler_epoch,
+        });
+        server.workspace.files[file].compiler_requested = true;
+        server.compiler_preferred = file;
+        return 0;
+    }
     server_document_request(server, output, id, params, method, file);
     return 0;
 }
@@ -606,33 +761,69 @@
             return 1;
         }
     }
-    input := File.stdin();
     output := File.stdout();
     server: Server;
+    #pattern.Ok(events) := Channel(Server_Event).new() else { return 1; };
+    #pattern.Ok(jobs) := Channel(Compiler_Input).new() else { events.free(); return 1; };
+    server.events = .Some(events);
+    server.jobs = .Some(jobs);
+    // Detached workers own channel references and all their inputs. Closing
+    // wakes blocked senders, and shutdown never waits for user compile-time I/O.
+    defer {
+        events.close();
+        events.free();
+        jobs.close();
+        jobs.free();
+        for request: server.pending_requests.view() {
+            request.body.free(); request.id.free();
+        }
+        server.pending_requests.free();
+    }
     workspace_init(&server.workspace);
     defer workspace_destroy(&server.workspace);
+    if !worker_start_compiler(&events, &jobs) return 1;
+    if !worker_start_input(&events) return 1;
     while true {
         // Request-local path conversion and formatting use temporary storage.
         // Persistent workspace data owns heap buffers or views of owned source.
         reset_temporary_storage();
-        frame := rpc_read_frame(&input);
-        defer frame.body.free();
-        if frame.status <= 0 {
-            if frame.status == 0 && server.shutdown return 0;
-            return 1;
+        #pattern.Ok(received) := events.recv() else { return 1; };
+        #pattern.Some(event) := received else { return 1; };
+        defer event.free();
+        if event == {
+            case .input(frame);
+                if frame.status <= 0 {
+                    if frame.status == 0 && server.shutdown return 0;
+                    return 1;
+                }
+                if !frame.body.bytes().utf8_is_valid() {
+                    _ := rpc_error(&output, null, -32700, "Message is not valid UTF-8.");
+                    continue;
+                }
+                if json_parse_document(frame.body) == {
+                    case .Err;
+                        if !rpc_error(&output, null, -32700, "Invalid JSON.") return 1;
+                    case .Ok(message);
+                        defer message.destroy();
+                        status := server_process(&server, &output, &message.root);
+                        if status == 1 return 0;
+                        if status == 2 return 1;
+                }
+            case .checked(completed);
+                server.compiler_busy = false;
+                if !server.shutdown && compiler_accept(&server.workspace, &completed) {
+                    server.workspace.files[completed.file].compiler_requested = false;
+                    // Applying facts can discover source files. That updates the
+                    // index revision, but does not change any editor input.
+                    for i: 0..server.pending_requests.count {
+                        if server.pending_requests[i].epoch == completed.epoch
+                            server.pending_requests[i].epoch = server.workspace.compiler_epoch;
+                    }
+                    server_publish_ready(&server, &output);
+                    server_refresh_analysis(&server, &output);
+                }
         }
-        if !frame.body.bytes().utf8_is_valid() {
-            _ := rpc_error(&output, null, -32700, "Message is not valid UTF-8.");
-            continue;
-        }
-        if json_parse_document(frame.body) == {
-            case .Err;
-            if !rpc_error(&output, null, -32700, "Invalid JSON.") return 1;
-            case .Ok(message);
-            defer message.destroy();
-            status := server_process(&server, &output, &message.root);
-            if status == 1 return 0;
-            if status == 2 return 1;
-        }
+        server_flush_pending(&server, &output);
+        server_start_analysis(&server, &output);
     }
 }
