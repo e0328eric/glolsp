@@ -1,0 +1,24 @@
+Foo :: struct { x: s32; y: s32; }
+Foo ::: {
+    bar :: (using foo: *Foo) { x = 3; y += x; }
+    sum :: (using #self) -> s32 { return x + y; }
+    scale :: (using *#self, factor: s32) { x *= factor; y *= factor; }
+    difference :: (using *const #self) -> s32 { return x - y; }
+    shift :: (noalias using *#self) { x += 1; }
+}
+reset :: (noalias using foo: *Foo) { x = 0; p := &y; p.* = 7; }
+bump :: (using noalias foo: *Foo) { x += 1; }
+stmt :: () {
+    foo: Foo;
+    p := &foo;
+    using p;
+    x = 4;
+    y = x + 1;
+}
+main :: () {
+    foo: Foo = .{ .x = 2, .y = 3 };
+    foo.scale(10);
+    foo.shift();
+    reset(&foo);
+    bump(&foo);
+}

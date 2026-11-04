@@ -95,7 +95,7 @@ main :: () {
     if json_parse_document(quoted.to_string()) == {
         case .Err; exit(1);
         case .Ok(document);
-            #assert json_text(.Some(&document.root)) == "\"\\\n\r\t😀한";
+            #assert json_text(?&document.root) == "\"\\\n\r\t😀한";
     }
     print("protocol tests passed\n");
 }

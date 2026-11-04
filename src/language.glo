@@ -116,7 +116,7 @@
        (byte >= #char "a" && byte <= #char "z") return true;
     if !first && byte >= #char "0" && byte <= #char "9" return true;
     if byte < 16#80 return false;
-    if #pattern .Some(codepoint) = source.rune_at(at) {
+    if #pattern ?codepoint = source.rune_at(at) {
         scalar := cast(u32)codepoint;
         if first return scalar.is_unicode_alpha();
         return scalar.is_unicode_alphanumeric();

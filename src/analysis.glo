@@ -363,6 +363,84 @@
     return .{};
 }
 
+#public analysis_procedure_scope :: (syntax: *const Parsed_File, scope: ssize) -> bool {
+    if scope < 0 || scope >= syntax.scopes.count return false;
+    owner := syntax.scopes[scope].owner;
+    return owner >= 0 && owner < syntax.nodes.count && syntax.nodes[owner].kind == .Procedure;
+}
+
+// Whether `scope` encloses `from` without leaving the innermost procedure:
+// a nested procedure sees neither its parent's locals nor its `using`s.
+#public analysis_local_scope :: (syntax: *const Parsed_File, from: ssize, scope: ssize) -> bool {
+    current := from;
+    while current >= 0 && current < syntax.scopes.count {
+        if current == scope return true;
+        if analysis_procedure_scope(syntax, current) return false;
+        current = syntax.scopes[current].parent;
+    }
+    return false;
+}
+
+// The struct, or pointer to one, that `usings[index]` opens for a bare name
+// at `offset` in `scope`; 0 when that `using` is not in effect there.
+#public analysis_using_owner :: (
+    workspace: *Workspace, file: ssize, scope: ssize, offset: ssize, index: ssize,
+) -> Type_Id {
+    node := workspace.files[file].syntax.nodes[workspace.files[file].syntax.usings[index]];
+    if node.end > offset ||
+       !analysis_local_scope(&workspace.files[file].syntax, scope, node.scope) return 0;
+    base: Type_Id = 0;
+    if node.kind == .Parameter {
+        if node.symbol < 0 return 0;
+        base = analysis_type(workspace, .{ .file = file, .symbol = node.symbol });
+    } else {
+        operand := node.first_child;
+        while operand >= 0 && workspace.files[file].syntax.nodes[operand].kind == .Statement
+            operand = workspace.files[file].syntax.nodes[operand].first_child;
+        base = analysis_expression_type(workspace, file, operand);
+    }
+    if base <= 0 return 0;
+    target := base;
+    if workspace.types[target].kind == .Pointer target = workspace.types[target].element;
+    if target <= 0 || analysis_type_view(workspace, target).kind != .Struct_Type return 0;
+    return base;
+}
+
+// The field a bare `name` denotes through a `using` parameter of the innermost
+// procedure or an earlier `using` statement around it; the latest wins.
+// `owner` receives the type the field is read from.
+#public analysis_using_field :: (
+    workspace: *Workspace, file: ssize, scope: ssize, name: str, offset: ssize,
+    owner: *Type_Id,
+) -> Symbol_Id {
+    index := workspace.files[file].syntax.usings.count;
+    while index > 0 {
+        index -= 1;
+        base := analysis_using_owner(workspace, file, scope, offset, index);
+        if base <= 0 continue;
+        field := analysis_member(workspace, base, name, file);
+        if !analysis_valid(workspace, field) ||
+           workspace.files[field.file].syntax.symbols[field.symbol].kind != 8 continue;
+        owner.* = base;
+        return field;
+    }
+    return .{};
+}
+
+// Whether a lexically found declaration shadows `using` fields. As in the
+// compiler, the procedure's locals and top-level values do; type names and
+// members of an enclosing aggregate do not.
+#public analysis_precedes_using :: (
+    workspace: *const Workspace, file: ssize, scope: ssize, symbol: Symbol_Id,
+) -> bool {
+    if !analysis_valid(workspace, symbol) return false;
+    syntax := &workspace.files[symbol.file].syntax;
+    declaration := syntax.symbols[symbol.symbol];
+    if symbol.file == file && analysis_local_scope(syntax, scope, declaration.scope) return true;
+    if declaration.kind == 23 || declaration.kind == 10 || declaration.kind == 11 return false;
+    return analysis_export_owner(syntax, symbol.symbol) >= 0;
+}
+
 #public analysis_bind :: (workspace: *Workspace, file: ssize, node: ssize, symbol: Symbol_Id) {
     if node < 0 || !analysis_valid(workspace, symbol) return;
     if workspace.files[symbol.file].syntax.symbols[symbol.symbol].name == "_" return;
@@ -435,6 +513,16 @@
         else;
     }
     symbol := analysis_lookup(workspace, file, expression.scope, name, expression.start);
+    if workspace.files[file].syntax.usings.count > 0 &&
+       !analysis_precedes_using(workspace, file, expression.scope, symbol) {
+        owner: Type_Id = 0;
+        field := analysis_using_field(
+            workspace, file, expression.scope, name, expression.start, &owner);
+        if analysis_valid(workspace, field) {
+            analysis_bind(workspace, file, node, field);
+            return analysis_member_type(workspace, owner, field);
+        }
+    }
     if analysis_valid(workspace, symbol) {
         analysis_bind(workspace, file, node, symbol);
         return analysis_type(workspace, symbol);
@@ -941,7 +1029,7 @@
                 wrapper := analysis_type_view(workspace, subject);
                 if wrapper.name == {
                     case "Option";
-                        if name == "Some" && wrapper.arguments.count == 1
+                        if (name == "?" || name == "Some") && wrapper.arguments.count == 1
                             result = wrapper.arguments[0];
                     case "Result";
                         if wrapper.arguments.count == 2 {
@@ -949,7 +1037,7 @@
                                 case "Err"; result = wrapper.arguments[0]; else; }
                         }
                     else;
-                        if name == "Some" result = subject;
+                        if name == "?" || name == "Some" result = subject;
                 }
             }
         case .Declaration, .Parameter;
@@ -1630,6 +1718,9 @@ analysis_prepare :: (workspace: *Workspace) {
             }
             if !shadowed analysis_push_unique(&result, .{ .file = file, .symbol = i });
         }
+        // Locals shadow the fields `using` brings in; those shadow the rest.
+        if analysis_procedure_scope(syntax, current)
+            analysis_push_using_fields(workspace, file, scope, offset, &result);
         current = syntax.scopes[current].parent;
     }
     for binding: workspace.files[file].compiler_bindings.view() {
@@ -1656,6 +1747,33 @@ analysis_prepare :: (workspace: *Workspace) {
     if workspace.prelude >= 0 && file != workspace.prelude
         analysis_collect_exports(workspace, workspace.prelude, true, &result, 0);
     return result;
+}
+
+#public analysis_push_using_fields :: (
+    workspace: *Workspace, file: ssize, scope: ssize, offset: ssize, result: *[..]Symbol_Id,
+) {
+    index := workspace.files[file].syntax.usings.count;
+    while index > 0 {
+        index -= 1;
+        base := analysis_using_owner(workspace, file, scope, offset, index);
+        if base <= 0 continue;
+        fields := analysis_members(workspace, base);
+        defer fields.free();
+        for field: fields.view() {
+            declaration := workspace.files[field.file].syntax.symbols[field.symbol];
+            if declaration.kind != 8 continue;
+            if field.file != file && (!declaration.is_public ||
+                (declaration.is_unit && !analysis_same_unit(workspace, field.file, file)))
+                continue;
+            shadowed := analysis_precedes_using(workspace, file, scope,
+                analysis_lookup(workspace, file, scope, declaration.name, offset));
+            for existing: result.*.view() {
+                if workspace.files[existing.file].syntax.symbols[existing.symbol].name ==
+                   declaration.name shadowed = true;
+            }
+            if !shadowed analysis_push_unique(result, field);
+        }
+    }
 }
 
 #public analysis_members :: (workspace: *Workspace, type_id: Type_Id) -> [..]Symbol_Id {

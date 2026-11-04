@@ -367,7 +367,7 @@ class SemanticLspTests(unittest.TestCase):
             "Point :: struct { x: ssize; }\n"
             "main :: () {\n"
             "    optional: ?Point; outcome: str!Point;\n"
-            "    if #pattern .Some(payload) = optional { payload.x; } else { payload; }\n"
+            "    if #pattern ?payload = optional { payload.x; } else { payload; }\n"
             "    payload;\n"
             "    if #pattern .Ok(success) = outcome { success.x; } else { success; }\n"
             "    if #pattern .Err(failure) = outcome { failure; }\n"
@@ -395,10 +395,72 @@ class SemanticLspTests(unittest.TestCase):
         failure = self.at("textDocument/hover", uri, "failure", occurrence=1)
         self.assertIn("str", str(failure["contents"]))
 
+    def test_using_parameters_and_statements_open_struct_fields(self):
+        uri = self.write("main.glo", (
+            "LIMIT :: 9;\n"
+            "Foo :: struct { x: s32; y: s32; LIMIT: s32; }\n"
+            "Bar :: struct { y: s32; }\n"
+            "Foo ::: { shift :: (noalias using *#self) { x += 1; } }\n"
+            "reset :: (noalias using foo: *Foo) { x = 0; }\n"
+            "bump :: (using noalias foo: *Foo, using bar: Bar) -> s32 { return y + LIMIT; }\n"
+            "shadow :: (using foo: Foo) -> s32 { x := 1; return x; }\n"
+            "nested :: (using foo: *Foo) { inner :: () { y; }; }\n"
+            "fill :: (using foo: *Foo) {\n"
+            "    \n"
+            "}\n"
+            "main :: () {\n"
+            "    foo: Foo;\n"
+            "    p := &foo;\n"
+            "    if true { using p; y = x; }\n"
+            "    y;\n"
+            "}\n"
+        ))
+        self.initialize()
+        self.open(uri)
+        source = self.documents[uri]
+
+        def target(needle, length=1):
+            return [{"uri": uri, "range": {
+                "start": position(source, needle), "end": position(source, needle, 0, length),
+            }}]
+
+        foo_x, foo_y, bar_y = target("x: s32"), target("y: s32"), target("y: s32; }\n")
+        for needle, offset, expected in [
+            ("x += 1", 0, foo_x),
+            ("x = 0", 0, foo_x),
+            ("return y + LIMIT", 7, bar_y),
+            ("y + LIMIT", 4, target("LIMIT :: 9", 5)),
+            ("return x; }", 7, target("x := 1")),
+            ("y = x", 0, foo_y),
+            ("y = x", 4, foo_x),
+            ("y; }; }", 0, []),
+            ("y;\n}", 0, []),
+        ]:
+            with self.subTest(needle=needle, offset=offset):
+                self.assertEqual(
+                    self.at("textDocument/definition", uri, needle, offset=offset), expected)
+        hover = self.at("textDocument/hover", uri, "x = 0")
+        self.assertIn("s32", str(hover["contents"]))
+        references = self.at(
+            "textDocument/references", uri, "x: s32", context={"includeDeclaration": True})
+        self.assertEqual(len(references), 4)
+        self.assertIn(target("x; }\n    y;")[0], references)
+        completion = self.client.request("textDocument/completion", {
+            "textDocument": {"uri": uri},
+            "position": position(source, "fill :: (using foo: *Foo) {\n    ", 0,
+                len("fill :: (using foo: *Foo) {\n    ")),
+        })
+        items = completion["items"] if isinstance(completion, dict) else completion
+        details = {item["label"]: item.get("detail", "") for item in items}
+        self.assertTrue({"x", "y", "foo", "LIMIT"} <= details.keys())
+        self.assertEqual(details["x"], "x: s32")
+        # The top-level constant takes precedence over the field, as in the compiler.
+        self.assertNotEqual(details["LIMIT"], "LIMIT: s32")
+
     def test_pattern_binding_home_directory(self):
         uri = self.write("main.glo", (
             "main :: () -> s8 {\n"
-            "    #pattern .Some(home) := get_home_dir() else {\n"
+            "    #pattern ?home := get_home_dir() else {\n"
             '        print("$HOME environment is not set\\n");\n'
             "        return FAILURE;\n"
             "    };\n"
@@ -433,12 +495,12 @@ class SemanticLspTests(unittest.TestCase):
     def test_pattern_binding_shadows_only_after_the_else_block(self):
         uri = self.write("main.glo", (
             "Point :: struct { x: ssize; }\n"
-            "make :: (value: Point) -> ?Point { return .Some(value); }\n"
+            "make :: (value: Point) -> ?Point { return ?value; }\n"
             "main :: () {\n"
             "    payload: Point;\n"
             "    {\n"
             "        payload.x;\n"
-            "        #pattern .Some(payload) := make(payload) else {\n"
+            "        #pattern ?payload := make(payload) else {\n"
             "            payload.x;\n"
             "            return;\n"
             "        };\n"
@@ -473,10 +535,10 @@ class SemanticLspTests(unittest.TestCase):
     def test_pattern_binding_is_hidden_before_success_and_outside_its_scope(self):
         uri = self.write("main.glo", (
             "Point :: struct { x: ssize; }\n"
-            "make :: (value: Point) -> ?Point { return .Some(value); }\n"
+            "make :: (value: Point) -> ?Point { return ?value; }\n"
             "main :: () {\n"
             "    captured;\n"
-            "    #pattern .Some(captured) := make(captured) else { captured; return; };\n"
+            "    #pattern ?captured := make(captured) else { captured; return; };\n"
             "    captured.x;\n"
             "}\n"
             "outside :: () { captured; }\n"

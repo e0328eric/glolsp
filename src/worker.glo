@@ -28,7 +28,7 @@ Compiler_Worker :: struct {
 worker_read_input :: (raw: *void) -> ?*void #c_call {
     state := cast(*?Channel(Server_Event))raw;
     defer delete(state);
-    #pattern.Some(events) := state.* else { return null; };
+    #pattern ?events := state.* else { return null; };
     input := File.stdin();
     while true {
         reset_temporary_storage();
@@ -43,12 +43,12 @@ worker_read_input :: (raw: *void) -> ?*void #c_call {
 worker_check :: (raw: *void) -> ?*void #c_call {
     worker := cast(*Compiler_Worker)raw;
     defer delete(worker);
-    #pattern.Some(jobs) := worker.jobs else { return null; };
-    #pattern.Some(events) := worker.events else { return null; };
+    #pattern ?jobs := worker.jobs else { return null; };
+    #pattern ?events := worker.events else { return null; };
     while true {
         reset_temporary_storage();
         #pattern.Ok(received) := jobs.recv() else { break; };
-        #pattern.Some(input) := received else { break; };
+        #pattern ?input := received else { break; };
         defer input.free();
         completed := compiler_run(&input);
         if #pattern.Err = events.send(.checked(completed)) break;
@@ -58,8 +58,8 @@ worker_check :: (raw: *void) -> ?*void #c_call {
 
 #public worker_start_input :: (events: *const Channel(Server_Event)) -> bool {
     #push_allocator(heap_allocator());
-    #pattern.Some(state) := new(?Channel(Server_Event)) else { return false; };
-    state.* = .Some(events.clone());
+    #pattern ?state := new(?Channel(Server_Event)) else { return false; };
+    state.* = ?events.clone();
     if Thread.spawn(worker_read_input, cast(*void)state) == {
         case .Ok(thread); _ = thread.detach(); return true;
         case .Err; delete(state); return false;
@@ -70,9 +70,9 @@ worker_check :: (raw: *void) -> ?*void #c_call {
     events: *const Channel(Server_Event), jobs: *const Channel(Compiler_Input),
 ) -> bool {
     #push_allocator(heap_allocator());
-    #pattern.Some(worker) := new(Compiler_Worker) else { return false; };
-    worker.events = .Some(events.clone());
-    worker.jobs = .Some(jobs.clone());
+    #pattern ?worker := new(Compiler_Worker) else { return false; };
+    worker.events = ?events.clone();
+    worker.jobs = ?jobs.clone();
     if Thread.spawn(worker_check, cast(*void)worker) == {
         case .Ok(thread); _ = thread.detach(); return true;
         case .Err; delete(worker); return false;

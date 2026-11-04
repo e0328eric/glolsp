@@ -100,9 +100,9 @@ compiler_symbol :: (workspace: *Workspace, location: ?*Json) -> Symbol_Id {
 }
 compiler_apply :: (workspace: *Workspace, root: ?*Json) {
     semantics := json_field(root, "semantics");
-    if #pattern.Some(sources) = json_array(json_field(semantics, "generated_sources")) {
+    if #pattern ?sources = json_array(json_field(semantics, "generated_sources")) {
         for i: 0..sources.*.count {
-            item: ?*Json = .Some(&sources.*[i]);
+            item: ?*Json = ?&sources.*[i];
             path := json_text(json_field(item, "file"));
             file := workspace_find_path(workspace, path);
             if file < 0 {
@@ -117,23 +117,23 @@ compiler_apply :: (workspace: *Workspace, root: ?*Json) {
     }
     // Loading a declaration can grow the file array and invalidate input state.
     // Finish all loading before publishing borrowed symbol identities/facts.
-    if #pattern.Some(facts) = json_array(json_field(semantics, "facts")) {
+    if #pattern ?facts = json_array(json_field(semantics, "facts")) {
         for i: 0..facts.*.count {
-            item: ?*Json = .Some(&facts.*[i]);
+            item: ?*Json = ?&facts.*[i];
             compiler_preload_location(workspace, json_field(item, "definition"));
             compiler_preload_location(workspace, json_field(item, "type_definition"));
         }
     }
-    if #pattern.Some(sources) = json_array(json_field(semantics, "generated_sources")) {
+    if #pattern ?sources = json_array(json_field(semantics, "generated_sources")) {
         for i: 0..sources.*.count {
-            item: ?*Json = .Some(&sources.*[i]);
+            item: ?*Json = ?&sources.*[i];
             file := workspace_find_path(workspace, json_text(json_field(item, "file")));
             if file < 0 continue;
-            if #pattern.Some(insertions) = json_array(json_field(item, "insertions")) {
+            if #pattern ?insertions = json_array(json_field(item, "insertions")) {
                 if insertions.*.count == 0 continue;
-                owner := compiler_location_file(workspace, .Some(&insertions.*[insertions.*.count - 1]));
+                owner := compiler_location_file(workspace, ?&insertions.*[insertions.*.count - 1]);
                 if owner < 0 || owner == file continue;
-                site: ?*Json = .Some(&insertions.*[insertions.*.count - 1]);
+                site: ?*Json = ?&insertions.*[insertions.*.count - 1];
                 workspace.files[file].generated_origin = owner;
                 workspace.files[file].generated_start = compiler_location_start(site);
                 workspace.files[file].generated_end = json_integer(json_field(
@@ -146,9 +146,9 @@ compiler_apply :: (workspace: *Workspace, root: ?*Json) {
     }
     // Visibility may have been inherited from #public around the insertion.
     // The generated text alone cannot recover that audience.
-    if #pattern.Some(declarations) = json_array(json_field(semantics, "generated_declarations")) {
+    if #pattern ?declarations = json_array(json_field(semantics, "generated_declarations")) {
         for i: 0..declarations.*.count {
-            declaration: ?*Json = .Some(&declarations.*[i]);
+            declaration: ?*Json = ?&declarations.*[i];
             symbol := compiler_symbol(workspace, json_field(declaration, "definition"));
             if symbol.symbol < 0 continue;
             target := &workspace.files[symbol.file].syntax.symbols[symbol.symbol];
@@ -157,14 +157,14 @@ compiler_apply :: (workspace: *Workspace, root: ?*Json) {
             target.is_unit = json_boolean(json_field(declaration, "unit"));
         }
     }
-    if #pattern.Some(scopes) = json_array(json_field(semantics, "scopes")) {
+    if #pattern ?scopes = json_array(json_field(semantics, "scopes")) {
         for i: 0..scopes.*.count {
-            scope: ?*Json = .Some(&scopes.*[i]);
+            scope: ?*Json = ?&scopes.*[i];
             file := workspace_find_path(workspace, json_text(json_field(scope, "file")));
             if file < 0 continue;
-            if #pattern.Some(bindings) = json_array(json_field(scope, "bindings")) {
+            if #pattern ?bindings = json_array(json_field(scope, "bindings")) {
                 for j: 0..bindings.*.count {
-                    binding: ?*Json = .Some(&bindings.*[j]);
+                    binding: ?*Json = ?&bindings.*[j];
                     target := compiler_symbol(workspace, json_field(binding, "definition"));
                     if target.symbol < 0 continue;
                     name := json_text(json_field(binding, "name"));
@@ -178,9 +178,9 @@ compiler_apply :: (workspace: *Workspace, root: ?*Json) {
             }
         }
     }
-    if #pattern.Some(facts) = json_array(json_field(semantics, "facts")) {
+    if #pattern ?facts = json_array(json_field(semantics, "facts")) {
         for i: 0..facts.*.count {
-            item: ?*Json = .Some(&facts.*[i]);
+            item: ?*Json = ?&facts.*[i];
             location := json_field(item, "location");
             file := compiler_location_file(workspace, location);
             if file < 0 continue;
@@ -222,7 +222,7 @@ compiler_capture_output :: (out: *String_Builder, result: Glosso_Handle, stream:
     cursor: ssize = 0;
     limit: ssize = 16384;
     while cursor < captured.count && cursor < limit {
-        if #pattern.Some(decoded) = captured.decode_at(cursor) {
+        if #pattern ?decoded = captured.decode_at(cursor) {
             if decoded.next > limit break;
             out.write_string(captured[cursor..decoded.next]);
             cursor = decoded.next;
@@ -304,7 +304,7 @@ compiler_capture_output :: (out: *String_Builder, result: Glosso_Handle, stream:
     if json_parse_document(completed.json) == {
         case .Err; compiler_error(workspace, index, "Invalid JSON from libglosso");
         case .Ok(document);
-            compiler_apply(workspace, .Some(&document.root));
+            compiler_apply(workspace, ?&document.root);
             workspace.files[index].compiler_output = completed.output.clone();
             workspace.files[index].compiler_document = document;
             workspace.files[index].compiler_ready = true;
@@ -328,13 +328,13 @@ compiler_capture_output :: (out: *String_Builder, result: Glosso_Handle, stream:
     if !file.compiler_ready { out.write_string("[]"); return; }
     document := &file.compiler_document;
     out.write_byte(91);
-    if #pattern.Some(diagnostics) = json_array(json_field(.Some(&document.root), "diagnostics")) {
+    if #pattern ?diagnostics = json_array(json_field(?&document.root, "diagnostics")) {
         for i: 0..diagnostics.*.count {
-            item: ?*Json = .Some(&diagnostics.*[i]);
+            item: ?*Json = ?&diagnostics.*[i];
             location := json_field(item, "location");
             origin := json_text(json_field(location, "file"));
             range := json_field(location, "range");
-            foreign_file := origin.count > 0 && origin != json_text(json_field(.Some(&document.root), "file"));
+            foreign_file := origin.count > 0 && origin != json_text(json_field(?&document.root, "file"));
             if i > 0 out.write_byte(44);
             out.write_string("{\"range\":");
             if foreign_file compiler_range(out, null); else compiler_range(out, range);
@@ -353,9 +353,9 @@ compiler_capture_output :: (out: *String_Builder, result: Glosso_Handle, stream:
             if foreign_file {
                 compiler_related(out, location, "Error in imported source"); related += 1;
             }
-            if #pattern.Some(notes) = json_array(json_field(item, "notes")) {
+            if #pattern ?notes = json_array(json_field(item, "notes")) {
                 for j: 0..notes.*.count {
-                    note: ?*Json = .Some(&notes.*[j]);
+                    note: ?*Json = ?&notes.*[j];
                     at := json_field(note, "location");
                     if json_text(json_field(at, "file")).count == 0 continue;
                     if related > 0 out.write_byte(44);

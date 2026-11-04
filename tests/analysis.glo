@@ -220,7 +220,7 @@ main :: () {
         \\    picked := pick("one", "two");
         \\    picked.x;
         \\    optional: ?Point;
-        \\    if #pattern .Some(payload) = optional { payload.x; }
+        \\    if #pattern ?payload = optional { payload.x; }
         \\    outcome: str!Point;
         \\    if #pattern .Ok(success) = outcome { success.x; }
         \\    first, second := pair();

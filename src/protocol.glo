@@ -25,12 +25,12 @@
     }
 
     json_field :: (value: ?*Json, name: str) -> ?*Json {
-        if #pattern.Some(pointer) = value return pointer.field_value(name);
+        if #pattern ?pointer = value return pointer.field_value(name);
         return null;
     }
 
     json_text :: (value: ?*Json) -> str {
-        if #pattern.Some(pointer) = value {
+        if #pattern ?pointer = value {
             if #partial pointer.* == {
                 case .text(text);
                 return text;
@@ -40,7 +40,7 @@
     }
 
     json_is_text :: (value: ?*Json) -> bool {
-        if #pattern.Some(pointer) = value {
+        if #pattern ?pointer = value {
             if #partial pointer.* == {
                 case .text;
                 return true;
@@ -50,7 +50,7 @@
     }
 
     json_is_object :: (value: ?*Json) -> bool {
-        if #pattern.Some(pointer) = value {
+        if #pattern ?pointer = value {
             if #partial pointer.* == {
                 case .map;
                 return true;
@@ -62,7 +62,7 @@
     }
 
     json_is_integer :: (value: ?*Json) -> bool {
-        if #pattern.Some(pointer) = value {
+        if #pattern ?pointer = value {
             if #partial pointer.* == {
                 case .signed_integer(n);
                 return n >= -2147483648 && n <= 2147483647;
@@ -75,7 +75,7 @@
 
     json_integer :: (value: ?*Json, fallback: ssize = -1) -> ssize {
         if !json_is_integer(value) return fallback;
-        if #pattern.Some(pointer) = value {
+        if #pattern ?pointer = value {
             if #partial pointer.* == {
                 case .signed_integer(n);
                 return cast(ssize)n;
@@ -87,7 +87,7 @@
     }
 
     json_boolean :: (value: ?*Json, fallback: bool = false) -> bool {
-        if #pattern.Some(pointer) = value {
+        if #pattern ?pointer = value {
             if #partial pointer.* == {
                 case .boolean(flag);
                 return flag;
@@ -97,10 +97,10 @@
     }
 
     json_array :: (value: ?*Json) -> ?*[..]Json {
-        if #pattern.Some(pointer) = value {
+        if #pattern ?pointer = value {
             if #partial pointer.* == {
                 case .sequence(*items);
-                return .Some(items);
+                return ?items;
             }
         }
         return null;
@@ -131,7 +131,7 @@
     }
 
     write_json_value :: (out: *String_Builder, value: ?*Json) {
-        if #pattern.Some(pointer) = value {
+        if #pattern ?pointer = value {
             if pointer.to_json_string() == {
                 case .Ok(text);
                 defer text.free();

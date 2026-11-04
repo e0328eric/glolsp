@@ -23,7 +23,7 @@ def main():
         relocated = Path(temporary) / "relocated bundle"
         if args.compiler:
             prefix = Path(temporary) / "install prefix"
-            command = [args.compiler, "first.glo", "--cache-dir=build/cache", "--",
+            command = [args.compiler, "compile", "first.glo", "--cache-dir=build/cache", "--",
                        "install", "--prefix", str(prefix)]
             subprocess.run(command, cwd=ROOT, check=True)
             # Installing again must replace existing executable and read-only headers.

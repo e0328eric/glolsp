@@ -226,13 +226,13 @@ main :: () {
 
     bindings := parse_file(#string
         \\main :: () {
-        \\    #pattern .Some(home) := get_home_dir() else { return; };
+        \\    #pattern ?home := get_home_dir() else { return; };
         \\    #pattern Point.{ .x = field, ... } := point else { return; };
         \\    #pattern .[first, second] := items else { return; };
-        \\    #pattern .Some(_) := optional else { return; };
-        \\    #pattern .Some(quoted);
-        \\    if #pattern .Some(branch) = optional { branch; }
-        \\    #pattern .Some(last) := optional else { return; }
+        \\    #pattern ?_ := optional else { return; };
+        \\    #pattern ?quoted;
+        \\    if #pattern ?branch = optional { branch; }
+        \\    #pattern ?last := optional else { return; }
         \\    after := home;
         \\}
     );
@@ -253,7 +253,7 @@ main :: () {
     destroy_parsed_file(&bindings);
 
     incomplete_binding := parse_file(
-        "main :: () { #pattern .Some(value) := optional else; after := 1; }");
+        "main :: () { #pattern ?value := optional else; after := 1; }");
     #assert incomplete_binding.language.diagnostics.count > 0;
     #assert symbol_named(&incomplete_binding, "after") >= 0;
     destroy_parsed_file(&incomplete_binding);
@@ -273,6 +273,24 @@ main :: () {
     }
     #assert symbol_named(&parameterized, "M") >= 0;
     destroy_parsed_file(&parameterized);
+
+    // `using` and `noalias` come in either order, on named and `#self` parameters.
+    usings := parse_file(#string
+        \\Foo :: struct { x: s32; }
+        \\Foo ::: { shift :: (noalias using *#self) { x += 1; } }
+        \\reset :: (noalias using foo: *Foo, plain: s32) { x = plain; }
+        \\bump :: (using noalias bar: *Foo) { using bar; x += 1; }
+    );
+    #assert usings.language.diagnostics.count == 0;
+    #assert usings.usings.count == 4;
+    for name: .["#self", "foo", "bar"] {
+        index := symbol_named(&usings, name);
+        #assert index >= 0 && usings.symbols[index].kind == 13;
+        #assert usings.nodes[usings.symbols[index].node].kind == .Parameter;
+    }
+    #assert usings.symbols[symbol_named(&usings, "foo")].detail == "noalias using foo: *Foo";
+    #assert usings.nodes[usings.usings[3]].kind == .Statement;
+    destroy_parsed_file(&usings);
 
     // Nested parse calls repeatedly grow the arena while their parent nodes stay live.
     generated: String_Builder;

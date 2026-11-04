@@ -9,7 +9,7 @@
 #import "Os";
 
 #public config_file_path :: () -> str {
-    if #pattern.Some(directory) = get_config_dir() {
+    if #pattern ?directory = get_config_dir() {
         defer directory.free();
         base := directory.to_string();
         defer base.free();
@@ -19,7 +19,7 @@
 }
 
 #public config_default_std_path :: () -> str {
-    if #pattern.Some(directory) = get_home_dir() {
+    if #pattern ?directory = get_home_dir() {
         defer directory.free();
         base := directory.to_string();
         defer base.free();
@@ -37,7 +37,7 @@ config_resolve_compiler :: (value: str, file: str) -> str {
     path := value.clone();
     defer path.free();
     if value.starts_with("~/") || value.starts_with("~\\") {
-        if #pattern.Some(directory) = get_home_dir() {
+        if #pattern ?directory = get_home_dir() {
             defer directory.free();
             base := directory.to_string();
             defer base.free();
@@ -91,7 +91,7 @@ config_compiler_std_path :: (compiler: str) -> str {
             config_report(file, tprint("invalid TOML at byte {}: {}", failure.offset, failure.message));
         case .Ok(document);
             defer document.destroy();
-            if #pattern.Some(field) = document.root.field_value("compiler_path") {
+            if #pattern ?field = document.root.field_value("compiler_path") {
                 if #partial field.* == {
                     case .text(value);
                         if value.count > 0 && !path_has_nul(value) {

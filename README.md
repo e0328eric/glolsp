@@ -12,7 +12,7 @@ Install Glosso with `./build.exe install` from the compiler repository, then
 build from this directory using the installed compiler:
 
 ```sh
-~/.local/glosso/bin/glosso first.glo --cache-dir=build/cache
+~/.local/glosso/bin/glosso compile first.glo --cache-dir=build/cache
 build/glolsp --stdio
 ```
 
@@ -22,7 +22,7 @@ No adjacent Glosso checkout is needed. For a custom installation prefix, use
 
 ```sh
 (cd ../glosso && ./build.exe libglosso)
-../glosso/build/bin/glosso first.glo --cache-dir=build/cache
+../glosso/build/bin/glosso compile first.glo --cache-dir=build/cache
 GLOSSO_STD="$PWD/../glosso/std" build/glolsp --stdio
 ```
 
@@ -44,11 +44,11 @@ Rebuild to update the bundled frontend and headers.
 To build and install into `$HOME/.local/glolsp`:
 
 ```sh
-glosso first.glo -- install
+glosso compile first.glo -- install
 ~/.local/glolsp/bin/glolsp --stdio
 ```
 
-Use `glosso first.glo -- install --prefix /path/to/glolsp` for another destination.
+Use `glosso compile first.glo -- install --prefix /path/to/glolsp` for another destination.
 Installation copies the executable into `bin/` and the bundled runtime into
 `share/`, preserving executable permissions. Windows also installs the DLL and
 Clang headers beside the executable under `bin/`, and uses `%USERPROFILE%` for
@@ -92,6 +92,13 @@ Definitions open the generated source when the compiler can materialize it;
 otherwise they point to the original `#insert`. Generated declarations cannot be
 renamed through LSP: change the generating source instead of modifying a cache
 artifact. Ordinary source rename retains lexical shadowing and workspace edits.
+
+Bare field names opened by `using` parameters (including `using #self`,
+`using *#self` and either `using`/`noalias` order) and block-scoped `using`
+statements on a struct or struct pointer resolve to the struct's fields for
+completion, hover, definition, references and rename. As in the compiler, the
+procedure's locals and top-level values take precedence, the latest `using`
+wins, and nested procedures do not inherit their parent's `using`s.
 
 The snapshot is not a complete compiler semantic graph. Generated symbols can be unavailable when lexing/parsing fails before checking.
 Statement-local generated bindings, audience-restricted exports, and some generic/typeclass projections
@@ -171,7 +178,7 @@ compiler context; there is no cancellation of an in-progress native call yet.
 ## Tests
 
 ```sh
-~/.local/glosso/bin/glosso first.glo --cache-dir=build/cache -- test
+~/.local/glosso/bin/glosso compile first.glo --cache-dir=build/cache -- test
 python3 tests/compiler_lsp.py --server build/glolsp
 ```
 

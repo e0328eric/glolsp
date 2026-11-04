@@ -236,7 +236,7 @@
     if environment_get(name) == {
         case .Ok(value);
             if value == {
-                case .Some(found); return found.value.clone();
+                case ?found; return found.value.clone();
                 case null;
             }
         case .Err;
@@ -713,7 +713,7 @@
         next := directory.next()?;
         if next == {
             case null; break;
-            case .Some(entry);
+            case ?entry;
                 if visited >= workspace.file_limit {
                     result.incomplete = true;
                     break;
@@ -870,7 +870,7 @@
 }
 
 #public workspace_walk_visit :: (path: str, entry: Directory_Entry, depth: ssize) -> Walk_Control {
-    if #pattern.Some(pointer) = context.user_ptr {
+    if #pattern ?pointer = context.user_ptr {
         workspace := cast(*Workspace)pointer;
         if workspace.files.count >= workspace.file_limit {
             workspace.truncated = true;
@@ -922,7 +922,7 @@
     defer path.free();
     if path.count == 0 || !os_fs_is_directory(path) return;
     scoped := context;
-    scoped.user_ptr = .Some(cast(*void)workspace);
+    scoped.user_ptr = ?(cast(*void)workspace);
     #push_context scoped {
         _ := walk(path, workspace_walk_visit);
     }

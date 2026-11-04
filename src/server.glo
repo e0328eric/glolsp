@@ -164,7 +164,7 @@ server_start_analysis :: (server: *Server, output: *File) {
     input := compiler_input(&server.workspace, index);
     epoch := input.epoch;
     version := input.version;
-    #pattern.Some(jobs) := server.jobs else { input.free(); return; };
+    #pattern ?jobs := server.jobs else { input.free(); return; };
     if #pattern.Ok = jobs.send(input) {
         server.compiler_busy = true;
     } else {
@@ -198,11 +198,11 @@ server_start_analysis :: (server: *Server, output: *File) {
     version := json_field(item, "version");
     if !json_is_integer(version) || json_integer(version) <= server.workspace.files[index].version
         return;
-    if #pattern.Some(changes) = json_array(json_field(params, "contentChanges")) {
+    if #pattern ?changes = json_array(json_field(params, "contentChanges")) {
         staged := server.workspace.files[index].source.clone();
         defer staged.free();
         for i: 0..changes.*.count {
-            change: ?*Json = .Some(&changes.*[i]);
+            change: ?*Json = ?&changes.*[i];
             text_value := json_field(change, "text");
             if !json_is_text(text_value) return;
             text := json_text(text_value);
@@ -210,7 +210,7 @@ server_start_analysis :: (server: *Server, output: *File) {
             start: ssize = 0;
             end := staged.count;
             range := json_field(change, "range");
-            if #pattern.Some(range_pointer) = range {
+            if #pattern ?range_pointer = range {
                 start = json_offset(staged, json_field(range, "start"));
                 end = json_offset(staged, json_field(range, "end"));
                 if start < 0 || end < start return;
@@ -246,15 +246,15 @@ server_start_analysis :: (server: *Server, output: *File) {
     server.scan_roots = json_boolean(json_field(options, "scanWorkspace"), false);
     limit := json_integer(json_field(options, "maxFiles"));
     if limit > 0 server.workspace.file_limit = limit;
-    if #pattern.Some(paths) = json_array(json_field(options, "importPaths")) {
+    if #pattern ?paths = json_array(json_field(options, "importPaths")) {
         for i: 0..paths.*.count {
-            path: ?*Json = .Some(&paths.*[i]);
+            path: ?*Json = ?&paths.*[i];
             if json_is_text(path) workspace_add_import_path(&server.workspace, json_text(path));
         }
     }
-    if #pattern.Some(folders) = json_array(json_field(params, "workspaceFolders")) {
+    if #pattern ?folders = json_array(json_field(params, "workspaceFolders")) {
         for i: 0..folders.*.count {
-            folder: ?*Json = .Some(&folders.*[i]);
+            folder: ?*Json = ?&folders.*[i];
             workspace_add_root(&server.workspace, json_text(json_field(folder, "uri")));
         }
     } else if json_is_text(json_field(params, "rootUri"))
@@ -309,24 +309,24 @@ server_start_analysis :: (server: *Server, output: *File) {
                 server.pending_requests[i].cancelled = true;
         }
         case "workspace/didChangeWatchedFiles";
-        if #pattern.Some(changes) = json_array(json_field(params, "changes")) {
+        if #pattern ?changes = json_array(json_field(params, "changes")) {
             for i: 0..changes.*.count {
-                item: ?*Json = .Some(&changes.*[i]);
+                item: ?*Json = ?&changes.*[i];
                 workspace_watch(&server.workspace, json_text(json_field(item, "uri")));
             }
             server_publish_open(server, output);
         }
         case "workspace/didChangeWorkspaceFolders";
         event := json_field(params, "event");
-        if #pattern.Some(removed) = json_array(json_field(event, "removed")) {
+        if #pattern ?removed = json_array(json_field(event, "removed")) {
             for i: 0..removed.*.count {
-                item: ?*Json = .Some(&removed.*[i]);
+                item: ?*Json = ?&removed.*[i];
                 workspace_remove_root(&server.workspace, json_text(json_field(item, "uri")));
             }
         }
-        if #pattern.Some(added) = json_array(json_field(event, "added")) {
+        if #pattern ?added = json_array(json_field(event, "added")) {
             for i: 0..added.*.count {
-                item: ?*Json = .Some(&added.*[i]);
+                item: ?*Json = ?&added.*[i];
                 uri := json_text(json_field(item, "uri"));
                 workspace_add_root(&server.workspace, uri);
                 if server.scan_roots workspace_scan_root(&server.workspace, uri);
@@ -458,9 +458,9 @@ server_start_analysis :: (server: *Server, output: *File) {
             return;
         }
         out.write_byte(#char "[");
-        if #pattern.Some(positions) = json_array(json_field(params, "positions")) {
+        if #pattern ?positions = json_array(json_field(params, "positions")) {
             for i: 0..positions.*.count {
-                offset := json_offset(source, .Some(&positions.*[i]));
+                offset := json_offset(source, ?&positions.*[i]);
                 if offset < 0 {
                     _ := rpc_error(output, id, -32602, "Invalid selection position.");
                     return;
@@ -584,7 +584,7 @@ server_flush_pending :: (server: *Server, output: *File) {
         defer request.id.free();
         if #pattern.Ok(document) = json_parse_document(request.body) {
             defer document.destroy();
-            id := json_field(.Some(&document.root), "id");
+            id := json_field(?&document.root, "id");
             if request.cancelled || server.shutdown
                 _ = rpc_error(output, id, -32800, "Request cancelled.");
             else if obsolete
@@ -595,15 +595,15 @@ server_flush_pending :: (server: *Server, output: *File) {
 }
 
 #public server_process :: (server: *Server, output: *File, message: *Json) -> s32 {
-    root: ?*Json = .Some(message);
+    root: ?*Json = ?message;
     id := json_field(root, "id");
     method_value := json_field(root, "method");
     // Responses to server requests, such as file watcher registration, carry
     // an id and a result/error instead of a method.
-    if #pattern.Some(response_id) = id {
+    if #pattern ?response_id = id {
         if !json_is_text(method_value) {
-            if #pattern.Some(result) = json_field(root, "result") return 0;
-            if #pattern.Some(error) = json_field(root, "error") return 0;
+            if #pattern ?result = json_field(root, "result") return 0;
+            if #pattern ?error = json_field(root, "error") return 0;
         }
     }
     if !json_is_object(root) || json_text(json_field(root, "jsonrpc")) != "2.0" ||
@@ -612,7 +612,7 @@ server_flush_pending :: (server: *Server, output: *File) {
         return 0;
     }
     request := false;
-    if #pattern.Some(pointer) = id {
+    if #pattern ?pointer = id {
         request = true;
         valid_id := json_is_text(id) || json_is_integer(id);
         if #partial pointer.* == {
@@ -765,8 +765,8 @@ server_flush_pending :: (server: *Server, output: *File) {
     server: Server;
     #pattern.Ok(events) := Channel(Server_Event).new() else { return 1; };
     #pattern.Ok(jobs) := Channel(Compiler_Input).new() else { events.free(); return 1; };
-    server.events = .Some(events);
-    server.jobs = .Some(jobs);
+    server.events = ?events;
+    server.jobs = ?jobs;
     // Detached workers own channel references and all their inputs. Closing
     // wakes blocked senders, and shutdown never waits for user compile-time I/O.
     defer {
@@ -788,7 +788,7 @@ server_flush_pending :: (server: *Server, output: *File) {
         // Persistent workspace data owns heap buffers or views of owned source.
         reset_temporary_storage();
         #pattern.Ok(received) := events.recv() else { return 1; };
-        #pattern.Some(event) := received else { return 1; };
+        #pattern ?event := received else { return 1; };
         defer event.free();
         if event == {
             case .input(frame);

@@ -29,7 +29,7 @@
                 cursor.byte += 1;
             cursor.line += 1;
             cursor.character = 0;
-        } else if #pattern .Some(decoded) = source.decode_at(cursor.byte) {
+        } else if #pattern ?decoded = source.decode_at(cursor.byte) {
             cursor.byte = decoded.next;
             cursor.character += 1;
             if cast(u32)decoded.rune > 65535 cursor.character += 1;

@@ -19,7 +19,7 @@
                 result.line += 1;
                 result.character = 0;
                 cursor = next;
-            } else if #pattern .Some(decoded) = source.decode_at(cursor) {
+            } else if #pattern ?decoded = source.decode_at(cursor) {
                 // A byte offset inside a UTF-8 scalar rounds down to its
                 // boundary instead of jumping past the requested offset.
                 if decoded.next > offset break;
@@ -52,7 +52,7 @@
               source[cursor] != #char "\n" && column < character {
             width: ssize = 1;
             next := cursor + 1;
-            if #pattern .Some(decoded) = source.decode_at(cursor) {
+            if #pattern ?decoded = source.decode_at(cursor) {
                 next = decoded.next;
                 if cast(u32)decoded.rune > 65535 width = 2;
             }

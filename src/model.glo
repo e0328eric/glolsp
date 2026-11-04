@@ -104,6 +104,8 @@
         symbols: [..]Syntax_Symbol;
         scopes: [..]Syntax_Scope;
         imports: [..]Syntax_Import;
+        // `using` parameter and statement nodes, in source order.
+        usings: [..]ssize;
     }
 
     Symbol_Id :: struct  { file: ssize = -1; symbol: ssize = -1; }

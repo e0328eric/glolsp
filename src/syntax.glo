@@ -226,8 +226,12 @@
     while syntax_text(parser).starts_with("#") && syntax_text(parser) != "#self" &&
           syntax_text(parser, syntax_next(parser, parser.at)) != ":"
         syntax_advance(parser);
-    _ := syntax_take(parser, "using");
-    _ := syntax_take(parser, "noalias");
+    // The compiler accepts `using` and `noalias` in either order.
+    uses := false;
+    while syntax_text(parser) == "using" || syntax_text(parser) == "noalias" {
+        if syntax_text(parser) == "using" uses = true;
+        syntax_advance(parser);
+    }
     generic := syntax_take(parser, "$");
     token := parser.at;
     receiver := token;
@@ -243,6 +247,7 @@
         (parser.stop_pipe && (syntax_text(parser, next) == "|" ||
          syntax_text(parser, next) == "|->" || syntax_text(parser, next) == ","));
     node := syntax_node(parser, .Parameter, token);
+    if uses parser.file.usings.push(node);
     if start < parser.file.language.tokens.count
         parser.file.nodes[node].start = parser.file.language.tokens[start].start;
     if generic || named || syntax_text(parser) == "#self" {
@@ -572,6 +577,15 @@
             continue;
         }
         if text == "?" {
+            // `x ?y` - a space before the `?`, none after, an operand next - is
+            // the present value `?y` starting the next expression (the
+            // compiler's spacing rule: `ifx c ?a else null`), not a try on `x`.
+            question := parser.file.language.tokens[parser.at];
+            after := syntax_next(parser, parser.at);
+            if parser.file.nodes[left].end < question.start &&
+               after < parser.file.language.tokens.count &&
+               parser.file.language.tokens[after].start == question.end &&
+               syntax_starts_operand(parser, after) break;
             node := syntax_node(parser, .Unary);
             parser.file.nodes[node].left = left;
             parser.file.nodes[node].start = parser.file.nodes[left].start;
@@ -973,9 +987,24 @@
         text := syntax_text(parser, expression.token);
         if text == "*" || text == "&" || text == "#pattern"
             syntax_capture(parser, expression.left, subject, constructor, argument);
+        // `?p` matches a present option; `p` captures from its payload.
+        else if text == "?" syntax_capture(parser, expression.left, subject, pattern, 0);
     } else if expression.kind == .Binary && syntax_text(parser, expression.token) == "@" {
         syntax_capture(parser, expression.left, subject);
         syntax_capture(parser, expression.right, subject, constructor, argument);
+    }
+}
+
+// Whether the token at `at` can begin an operand.
+#public syntax_starts_operand :: (parser: *const Syntax_Parser, at: ssize) -> bool {
+    token := parser.file.language.tokens[at];
+    if token.kind == 1 || token.kind == 2 || token.kind == 3 || token.kind == 7 return true;
+    if syntax_text(parser, at) == {
+        case "(", "[", ".", ".{", ".[", "?", "*", "&", "!", "-", "~", "$", "cast", "acast", "ifx",
+             "struct", "union", "enum", "null", "true", "false";
+            return true;
+        else;
+            return false;
     }
 }
 
@@ -1280,6 +1309,7 @@
             return node;
         case "defer", "using", "context";
             node := syntax_node(parser, .Statement);
+            if text == "using" parser.file.usings.push(node);
             syntax_advance(parser);
             syntax_child(parser, node, syntax_statement(parser));
             syntax_finish(parser, node);
@@ -1386,6 +1416,7 @@
         },
         .nodes = parser.file.nodes.take(), .symbols = parser.file.symbols.take(),
         .scopes = parser.file.scopes.take(), .imports = parser.file.imports.take(),
+        .usings = parser.file.usings.take(),
     };
 }
 
@@ -1395,4 +1426,5 @@
     file.symbols.free();
     file.scopes.free();
     file.imports.free();
+    file.usings.free();
 }
