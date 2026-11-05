@@ -5,8 +5,12 @@
 #import "Serialization/Json";
 #import "Serialization/Core";
 #import "String_Builder";
+#import "Thread";
+#import "File_System/File";
+#import "File_System/Temporary";
 #import "../src/protocol.glo";
 #import "../src/positions.glo";
+#import "../src/worker.glo";
 
 assert_position :: (
     source: str,
@@ -17,6 +21,59 @@ assert_position :: (
     position := position_at(source, offset);
     #assert position.line == line;
     #assert position.character == character;
+}
+
+// Every offset agrees with a fresh scan, including inside CRLF and scalars.
+assert_cached_positions :: (source: str) {
+    for offset: -1..source.count + 2 {
+        position_cache_disable();
+        expected := position_at(source, offset);
+        later := position_at(source, offset + 1);
+        position_cache_reset();
+        first := position_at(source, offset);
+        #assert first.line == expected.line && first.character == expected.character;
+        // A later offset continues the remembered scan; an earlier one must not.
+        next := position_at(source, offset + 1);
+        #assert next.line == later.line && next.character == later.character;
+        again := position_at(source, offset);
+        #assert again.line == expected.line && again.character == expected.character;
+    }
+    position_cache_disable();
+}
+
+// The cache is per thread and off until a thread resets it.
+position_thread :: (raw: *void) -> ?*void #c_call {
+    source := "x\r\n😀y\rz";
+    position := position_at(source, 8);
+    if position.line != 1 || position.character != 3 return raw;
+    return null;
+}
+
+// Each frame passes its buffer to the next, so every frame stays in memory:
+// 100000 levels need about 60 MiB, beyond any default thread stack.
+stack_depth :: (depth: ssize, parent: *[512]u8) -> ssize {
+    frame: [512]u8;
+    frame[0] = cast(u8)(depth % 200);
+    if depth == 0 return cast(ssize) parent.*[0];
+    return stack_depth(depth - 1, &frame) + cast(ssize) parent.*[0];
+}
+
+stack_thread :: (raw: *void) -> ?*void #c_call {
+    done := cast(*Channel(ssize)) raw;
+    root: [512]u8;
+    _ = done.send(stack_depth(100000, &root));
+    return null;
+}
+
+frame_file :: (text: str) -> File {
+    #pattern.Ok(temporary) := Temporary_File.create_temporary_file("") else { exit(1); };
+    if write_file(temporary.path, text) == {
+        case .Err; exit(1);
+        case .Ok;
+    }
+    #pattern.Ok(file) := File.open(temporary.path) else { exit(1); };
+    _ = temporary.close();
+    return file;
 }
 
 main :: () {
@@ -48,7 +105,14 @@ main :: () {
     #assert offset_at(source, 2, 1) == 14;
     #assert offset_at(source, 3, 0) == 15;
     #assert offset_at(source, 3, 100) == 15;
-    #assert offset_at(source, 4, 0) == -1;
+    // Any line past the last one is the end of the document.
+    #assert offset_at(source, 4, 0) == 15;
+    #assert offset_at(source, 4, 7) == 15;
+    #assert offset_at(source, 5, 0) == 15;
+    #assert offset_at(source, 999, 3) == 15;
+    #assert offset_at("alpha;\nbeta;", 2, 0) == 12;
+    #assert offset_at("alpha;\nbeta;", 3, 0) == 12;
+    #assert offset_at("", 7, 0) == 0;
     #assert offset_at(source, -1, 0) == -1;
     #assert offset_at(source, 0, -1) == -1;
     #assert offset_at("", 0, 5) == 0;
@@ -60,8 +124,17 @@ main :: () {
     #assert rpc_content_length("content-length:\t0 \r\n\r\n") == 0;
     #assert rpc_content_length(
         "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n" +
-        "Content-Length: 16777216\r\n\r\n") == MAX_MESSAGE_BYTES;
-    #assert rpc_content_length("Content-Length: 16777217\r\n\r\n") == -1;
+        "Content-Length: 67108864\r\n\r\n") == MAX_MESSAGE_BYTES;
+    #assert MAX_MESSAGE_BYTES >= 3 * 16 * 1024 * 1024;
+    #assert rpc_content_length("Content-Length: 67108865\r\n\r\n") == -1;
+    // Oversized and unsupported bodies keep their length so they can be skipped.
+    oversized := rpc_parse_header("Content-Length: 67108865\r\n\r\n");
+    #assert oversized.length == 67108865 && oversized.reason.count > 0;
+    latin1 := rpc_parse_header("Content-Type: text/plain; charset=latin1\r\nContent-Length: 3\r\n\r\n");
+    #assert latin1.length == 3 && latin1.reason.count > 0;
+    #assert rpc_parse_header("Content-Length: 3\r\n\r\n").reason.count == 0;
+    #assert rpc_parse_header("Content-Length: 9999999999999999999\r\n\r\n").length == -1;
+    #assert rpc_parse_header("X-Test: value\r\n\r\n").reason == "missing Content-Length";
     #assert rpc_content_length("Content-Length: 9999999999999999999\r\n\r\n") == -1;
     #assert rpc_content_length("Content-Length: -1\r\n\r\n") == -1;
     #assert rpc_content_length("Content-Length: +1\r\n\r\n") == -1;
@@ -97,5 +170,77 @@ main :: () {
         case .Ok(document);
             #assert json_text(?&document.root) == "\"\\\n\r\t😀한";
     }
-    print("protocol tests passed\n");
+
+    assert_cached_positions(source);
+    assert_cached_positions("");
+    assert_cached_positions("\r\r\n\n\r");
+    assert_cached_positions("😀😀\n\xff\xfeé\r\n\r");
+    assert_cached_positions("plain text without breaks");
+
+    // An index is keyed by address and length, so an in-place edit needs a reset.
+    edited: String_Builder;
+    edited.write_string("ab\ncd");
+    position_cache_reset();
+    #assert position_at(edited.to_string(), 4).line == 1;
+    edited.buf[2] = #char "x";
+    position_cache_reset();
+    #assert position_at(edited.to_string(), 4).line == 0;
+    #assert position_at(edited.to_string(), 4).character == 4;
+    edited.free();
+
+    marker: s32;
+    #pattern.Ok(worker) := Thread.spawn(position_thread, cast(*void) &marker) else { exit(1); };
+    #pattern.Ok(failed) := worker.join() else { exit(1); };
+    #assert failed == null;
+
+    // Lone surrogate escapes become U+FFFD; pairs and escaped backslashes stay.
+    #assert rpc_repair_surrogates("{\"a\":\"\\ud800\"}") == "{\"a\":\"\\ufffd\"}";
+    #assert rpc_repair_surrogates("[\"\\udc00x\",\"\\uD800\\u0041\"]") ==
+        "[\"\\ufffdx\",\"\\ufffd\\u0041\"]";
+    #assert rpc_repair_surrogates("\"\\ud83d\\ude00\"").count == 0;
+    #assert rpc_repair_surrogates("\"\\\\ud800\"").count == 0;
+    #assert rpc_repair_surrogates("{\"a\":1}").count == 0;
+    repaired := rpc_repair_surrogates("{\"t\":\"x\\udbff\"}");
+    if json_parse_document(repaired) == {
+        case .Err; exit(1);
+        case .Ok(document);
+            #assert json_text(json_field(?&document.root, "t")) == "x\u{FFFD}";
+    }
+    repaired.free();
+
+    // Frames: a skipped body keeps the stream aligned for the next message.
+    input := frame_file(
+        "Content-Type: application/json; charset=latin1\r\nContent-Length: 5\r\n\r\nhello" +
+        "Content-Length: 2\r\n\r\n{}" +
+        "Content-Length: 9\r\n\r\n{}"
+    );
+    skipped := rpc_read_frame(&input);
+    #assert skipped.status == 2 && skipped.length == 5 && skipped.reason.count > 0;
+    read := rpc_read_frame(&input);
+    #assert read.status == 1 && read.body == "{}";
+    read.body.free();
+    truncated := rpc_read_frame(&input);
+    #assert truncated.status == -1 && truncated.reason.count > 0;
+    _ = input.close();
+    empty := frame_file("");
+    #assert rpc_read_frame(&empty).status == 0;
+    _ = empty.close();
+    // The compiler worker's large stack, on every platform's thread API.
+    #pattern.Ok(done) := Channel(ssize).new() else { exit(1); };
+    #assert worker_spawn(stack_thread, cast(*void) &done, WORKER_COMPILER_STACK);
+    #pattern.Ok(depth) := done.recv() else { exit(1); };
+    #assert depth != null;
+
+    // Last: afterwards this process's standard output is its stderr. The LSP
+    // handles are private copies; the standard input reads nothing.
+    stdio := worker_private_stdio();
+    #assert stdio.input.handle != File.stdin().handle;
+    #assert stdio.output.handle != File.stdout().handle;
+    standard := File.stdin();
+    if standard.read_byte() == {
+        case .Ok; exit(1);
+        case .Err(failure); #assert failure.kind == .End_Of_File;
+    }
+    print("standard output now reaches stderr\n");
+    _ = stdio.output.write("protocol tests passed\n");
 }

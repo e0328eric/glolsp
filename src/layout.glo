@@ -6,37 +6,66 @@
 #import "Strings";
 #import "Memory/Ownership";
 
+// An open `(`, `[` or `{`: the indentation level of the line that opened it.
+// Blocks hold statements; aggregate braces and brackets hold expressions.
+// A block written on one source line stays on one line.
+#public Layout_Open :: struct {
+    level: ssize;
+    block: bool;
+    inline: bool;
+}
+
+// How the previous token constrains the space before the next one.
+#public Layout_Spacing :: enum { Normal; None; Preserve; }
+
 #public Layout_State :: struct {
-    depth: ssize;
-    parentheses: ssize;
-    brackets: ssize;
     tab_size: ssize;
     insert_spaces: bool;
     column: ssize;
+    // The indentation level of the current line, and of the line that began
+    // its statement. A block opened on a continuation line indents from the latter.
+    level: ssize;
+    statement_level: ssize;
     line_start: bool = true;
+    // A line break owed before the next token. It is written lazily, so a
+    // trailing comment can stay on the line that a `;` or a brace ended.
+    pending: bool;
+    blank: bool;
+    newline: str = "\n";
+    open: [..]Layout_Open;
+    // The number of open one-line blocks; inside them no line is broken.
+    inline: ssize;
 }
 
-#public layout_newline :: (state: *Layout_State, out: *String_Builder) {
-    while out.buf.count > 0 {
-        last := out.buf[out.buf.count - 1];
-        if last != #char " " && last != #char "\t" break;
-        _ := out.pop_byte();
-    }
-    if !state.line_start out.write_byte(#char "\n");
+#public layout_newline :: (state: *Layout_State) {
+    if state.line_start return;
+    state.pending = true;
     state.line_start = true;
-    state.column = 0;
+}
+
+// Keeps one blank line where the source had at least one.
+#public layout_blank_line :: (state: *Layout_State) {
+    layout_newline(state);
+    if state.pending state.blank = true;
 }
 
 #public layout_write :: (
-    state: *Layout_State, out: *String_Builder, text: str, space: bool,
+    state: *Layout_State, out: *String_Builder, text: str, space: bool, level: ssize,
 ) {
     if state.line_start {
-        if state.insert_spaces {
-            for 0..state.depth * state.tab_size out.write_byte(#char " ");
-        } else {
-            for 0..state.depth out.write_byte(#char "\t");
+        if state.pending {
+            out.write_string(state.newline);
+            if state.blank out.write_string(state.newline);
         }
-        state.column = state.depth * state.tab_size;
+        state.pending = false;
+        state.blank = false;
+        state.level = level;
+        if state.insert_spaces {
+            for 0..level * state.tab_size out.write_byte(#char " ");
+        } else {
+            for 0..level out.write_byte(#char "\t");
+        }
+        state.column = level * state.tab_size;
         state.line_start = false;
     } else if space {
         out.write_byte(#char " ");
@@ -48,20 +77,93 @@
 
 #public layout_no_space_before :: (text: str) -> bool {
     if text == {
-        case ",", ";", ")", "]", ":", ".";
+        case ",", ",,", ";", ")", "]", ":";
         return true;
         else;
         return false;
     }
 }
 
-#public layout_no_space_after :: (text: str) -> bool {
+#public layout_prefix_operator :: (text: str) -> bool {
     if text == {
-        case "(", "[", ".", "$", "`", "``";
+        case "*", "&", "!", "-", "+", "~", "**", "!!";
         return true;
         else;
         return false;
     }
+}
+
+// Built-in punctuation and operators. Any other operator token may be a
+// user-defined suffix or prefix operator, whose meaning depends on spacing.
+#public layout_known_operator :: (text: str) -> bool {
+    if text == {
+        case "(", ")", "[", "]", "{", "}", ",", ",,", ";", ":", "::", ":=", "::=", ":::",
+             ".", "..", "..=", "...", "->", "=", "==", "!=", "<", ">", "<=", ">=", "+", "-",
+             "*", "/", "%", "&", "|", "^", "~", "!", "<<", ">>", "&&", "||", "+=", "-=", "*=",
+             "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", "+%", "-%", "*%", "+|", "-|", "*|",
+             "?", "$", "@", "**", "!!", "|->", "||->";
+        return true;
+        else;
+        return text.starts_with("'") || text.starts_with("`");
+    }
+}
+
+// The compiler reads `x ?y`, `x? y` and `x ? y` differently, and the same holds
+// for user-defined suffix operators, so adjacency around them must not change.
+#public layout_spacing_sensitive :: (token: Language_Token, text: str) -> bool {
+    return text == "?" || (token.kind == 6 && !layout_known_operator(text));
+}
+
+// Whether the token can end an operand, so that a following operator is binary.
+#public layout_operand_end :: (text: str, kind: s32) -> bool {
+    if kind == 1 {
+        if text == {
+            case "const", "volatile", "distinct", "opaque", "then", "instance", "typeclass";
+            return false;
+            else;
+            return true;
+        }
+    }
+    if kind == 2 || kind == 3 return true;
+    if text == {
+        case ")", "]", "}", "#self", "#Self_Type";
+        return true;
+        else;
+        return text.starts_with("'") || text.starts_with("`");
+    }
+}
+
+#public layout_line_breaks :: (gap: str) -> ssize {
+    count: ssize = 0;
+    at: ssize = 0;
+    while at < gap.count {
+        if gap[at] == #char "\r" {
+            count += 1;
+            if at + 1 < gap.count && gap[at + 1] == #char "\n" at += 1;
+        } else if gap[at] == #char "\n" count += 1;
+        at += 1;
+    }
+    return count;
+}
+
+// Whether the source has a line break between two offsets.
+#public layout_breaks_between :: (source: str, start: ssize, end: ssize) -> bool {
+    for at: start..end {
+        if source[at] == #char "\n" || source[at] == #char "\r" return true;
+    }
+    return false;
+}
+
+// The source's first line break decides the output's line endings.
+#public layout_line_ending :: (source: str) -> str {
+    for at: 0..source.count {
+        if source[at] == #char "\n" return "\n";
+        if source[at] == #char "\r" {
+            if at + 1 < source.count && source[at + 1] == #char "\n" return "\r\n";
+            return "\n";
+        }
+    }
+    return "\n";
 }
 
 #public layout_format :: (
@@ -73,66 +175,160 @@
     defer destroy_language(&scanned);
     if scanned.diagnostics.count > 0 return source.clone();
     state: Layout_State = .{ .tab_size = tab_size, .insert_spaces = insert_spaces };
+    defer state.open.free();
     if state.tab_size < 1 || state.tab_size > 16 state.tab_size = 4;
+    state.newline = layout_line_ending(source);
     out: String_Builder;
     defer out.free();
+    // Keep a byte order mark; the lexer reports it as no token.
+    if source.count >= 3 && source[0] == 16#EF && source[1] == 16#BB && source[2] == 16#BF
+        out.write_string(source[0..3]);
     previous := "";
     previous_end: ssize = 0;
     previous_kind: s32 = 0;
+    previous_operand := false;
+    after := Layout_Spacing.Normal;
+    // Whether only a trailing comment follows the last block's `{`.
+    block_opened := false;
+    // Whether the current statement is a `case` or `else` arm label, whose
+    // `;` keeps a body that follows on the same source line.
+    arm_label := false;
     for i: 0..scanned.tokens.count {
         token := scanned.tokens[i];
         text := source[token.start..token.end];
         gap := source[previous_end..token.start];
-        had_newline := gap.contains("\n") || gap.contains("\r");
-        // Preserve line-sensitive raw literals and source directives.
-        if had_newline && state.parentheses == 0 && state.brackets == 0
-            layout_newline(&state, &out);
-        if text == "}" {
-            if state.depth > 0 state.depth -= 1;
-            layout_newline(&state, &out);
+        breaks := layout_line_breaks(gap);
+        original_space := i > 0 && gap.count > 0;
+        statements := state.open.count == 0 ||
+            (state.open[state.open.count - 1].block && !state.open[state.open.count - 1].inline);
+        if breaks > 0 {
+            if breaks > 1 && statements && !block_opened && text != "}"
+                layout_blank_line(&state);
+            else layout_newline(&state);
         }
-        adjacent_operators := i > 0 && previous_end == token.start && token.kind == 6 &&
-            previous_kind == 6;
-        space := i > 0 && !layout_no_space_before(text) && !layout_no_space_after(previous);
-        if text == "." && (previous == "#matrix" || previous == "#simd") space = true;
-        if adjacent_operators space = false;
-        if text == "(" && previous_kind == 1 space = false;
-        if previous_kind == 7 && text == "(" space = false;
-        if state.column + text.count > 100 &&
-            (previous == "," || previous == "||" || previous == "&&") layout_newline(&state, &out);
-        layout_write(&state, &out, text, space);
-        if text == {
+        trailing := token.kind == 4 && breaks == 0;
+        if !trailing block_opened = false;
+        // A closer at the start of a line returns to its opener's indentation.
+        closed_level: ssize = -1;
+        aggregate_close := false;
+        if (text == "}" || text == ")" || text == "]") && state.open.count > 0 {
+            closed := array_pop_last(&state.open);
+            closed_level = closed.level;
+            aggregate_close = text == "}" && !closed.block;
+            if closed.inline state.inline -= 1;
+            else if text == "}" && closed.block layout_newline(&state);
+        }
+        // A trailing comment stays on the line that the layout ended; the line
+        // break then follows the comment.
+        moved_break := trailing && i > 0 && state.pending;
+        if moved_break {
+            state.pending = false;
+            state.line_start = false;
+        }
+        level: ssize = 0;
+        continuation := false;
+        if closed_level >= 0 level = closed_level;
+        else {
+            if state.open.count > 0 level = state.open[state.open.count - 1].level + 1;
+            continuation = i > 0 && (state.open.count == 0 ||
+                state.open[state.open.count - 1].block) &&
+                previous != ";" && previous != "{" && previous != "}" && previous_kind != 4 &&
+                text != ";";
+            if continuation level += 1;
+        }
+
+        // Keep the source's spacing where it is meaningful or ambiguous.
+        preserve := false;
+        if text == "?" || text == ".." || text == "..=" || text == "|" || text == "||" ||
+           text == "|->" || text == "||->" || (token.kind == 6 && !layout_known_operator(text))
+            preserve = true;
+        else if layout_prefix_operator(text) &&
+                (previous == ")" || previous == "]" || previous == "}")
+            preserve = true; // `[]*T` or `a[i] * b`
+        else if text == "!" && previous_operand
+            preserve = true; // `Error!Value`
+        else if text == "." && previous_kind == 7 && !previous_operand
+            preserve = true; // `#matrix .[` or `#caller_location.line`
+        else if text == "(" && (previous == ")" || previous == "]")
+            preserve = true;
+        else if previous == "]" && (token.kind != 6 || text == "$")
+            preserve = true; // `[4]T` or `if a[i] f();`
+        else if text == "}" && previous == "{"
+            preserve = true;
+        unary := layout_prefix_operator(text) && !preserve && !previous_operand && previous != ".";
+        space := i > 0;
+        if preserve || after == .Preserve space = original_space;
+        else if layout_no_space_before(text) || after == .None space = false;
+        else if (text == "." || text == "[" || text == "...") && previous_operand space = false;
+        else if text == "(" && (previous_kind == 1 || previous_kind == 7 || previous == "cast" ||
+                previous == "acast" || previous == "struct" || previous == "union")
+            space = false;
+        // Never glue two operators that the source kept apart.
+        if !space && original_space && previous_kind == 6 && token.kind == 6 &&
+           !layout_no_space_before(text) && previous != "(" && previous != "[" && previous != "{"
+            space = true;
+        if state.inline == 0 && state.column + text.count > 100 &&
+            (previous == "," || previous == "||" || previous == "&&") layout_newline(&state);
+        written := text;
+        if token.kind == 4 && text.ends_with("\r") && state.newline == "\r\n"
+            written = text.substring(0, text.count - 1);
+        new_line := state.line_start;
+        layout_write(&state, &out, written, space, level);
+        if new_line && !continuation state.statement_level = level;
+
+        if #partial text == {
             case "{";
-            state.depth += 1;
-            layout_newline(&state, &out);
+            block := previous != ".";
+            opened := state.level;
+            if block opened = state.statement_level;
+            inline := block && token.matching >= 0 && !layout_breaks_between(
+                source, token.start, scanned.tokens[token.matching].end);
+            state.open.push(.{ .level = opened, .block = block, .inline = inline });
+            if inline state.inline += 1;
+            else if block layout_newline(&state);
+            block_opened = block && !inline;
+            case "(", "[";
+            state.open.push(.{ .level = state.level, .block = false });
             case "}";
-            if i + 1 < scanned.tokens.count {
+            if !aggregate_close && state.inline == 0 && i + 1 < scanned.tokens.count {
                 next := scanned.tokens[i + 1];
                 next_text := source[next.start..next.end];
-                if next_text != ";" && next_text != "," && next_text != ")" && next_text != "else"
-                    layout_newline(&state, &out);
+                if next_text != ";" && next_text != "," && next_text != ")" &&
+                   next_text != "]" && next_text != "else"
+                    layout_newline(&state);
             }
-            case "(";
-            state.parentheses += 1;
-            case ")";
-            if state.parentheses > 0 state.parentheses -= 1;
-            case "[";
-            state.brackets += 1;
-            case "]";
-            if state.brackets > 0 state.brackets -= 1;
             case ";";
-            {
-                if state.parentheses == 0 && state.brackets == 0 layout_newline(&state, &out);
-            } else;
-            {}
+            // `case X; body;` stays on one line when the source has it so.
+            arm_body := arm_label && i + 1 < scanned.tokens.count &&
+                !layout_breaks_between(source, token.end, scanned.tokens[i + 1].start);
+            arm_label = false;
+            if statements && !arm_body layout_newline(&state);
+            case "case";
+            arm_label = true;
+            case "else";
+            arm_label = i + 1 < scanned.tokens.count &&
+                source[scanned.tokens[i + 1].start..scanned.tokens[i + 1].end] == ";";
         }
-        if token.kind == 4 && text.starts_with("//") layout_newline(&state, &out);
-        if token.kind == 3 && text.starts_with("\\\\") layout_newline(&state, &out);
+        if moved_break || (token.kind == 4 && text.starts_with("//")) layout_newline(&state);
+        if token.kind == 3 && text.starts_with("\\\\") layout_newline(&state);
+
+        // What this token asks of the next one.
+        operand := layout_operand_end(text, token.kind);
+        if (text == "*" || text == "&") && previous == "." operand = true; // `p.*`
+        if text == "?" operand = previous_operand && !original_space; // `x?`
+        if text == "..." operand = previous_operand; // `values...`
+        after = .Normal;
+        if text == "(" || text == "[" || text == "." || text == "$" || unary after = .None;
+        else if preserve after = .Preserve;
+        else if text == "," && previous_kind == 7 && !previous_operand && !original_space &&
+                i + 1 < scanned.tokens.count && scanned.tokens[i + 1].start == token.end
+            after = .Preserve; // `#string,oneline`
         previous = text;
         previous_end = token.end;
         previous_kind = token.kind;
+        previous_operand = operand;
     }
-    layout_newline(&state, &out);
+    if !state.line_start || state.pending out.write_string(state.newline);
     formatted := out.to_string();
     verified := tokenize_language(formatted);
     defer destroy_language(&verified);
@@ -141,7 +337,14 @@
     for i: 0..verified.tokens.count {
         a := scanned.tokens[i];
         b := verified.tokens[i];
-        if source[a.start..a.end] != formatted[b.start..b.end]return source.clone();
+        if source[a.start..a.end] != formatted[b.start..b.end] return source.clone();
+        if i == 0 continue;
+        // Spacing changes the meaning of `?` and user-defined operators.
+        before_a := scanned.tokens[i - 1];
+        before_b := verified.tokens[i - 1];
+        if (layout_spacing_sensitive(a, source[a.start..a.end]) ||
+            layout_spacing_sensitive(before_a, source[before_a.start..before_a.end])) &&
+           (before_a.end == a.start) != (before_b.end == b.start) return source.clone();
     }
     return value_take(&out).into_string();
 }

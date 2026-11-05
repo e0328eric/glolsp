@@ -3,7 +3,7 @@
 #import "Strings";
 
 main :: () {
-    source := "main :: () {value:=1;other:=value;}";
+    source := "main :: () {value:=1;\nother:=value;}";
     formatted := layout_format(source);
     defer formatted.free();
     #assert formatted == #string
@@ -50,5 +50,120 @@ main :: () {
     unchanged := layout_format(malformed);
     defer unchanged.free();
     #assert malformed == unchanged;
+    check_spacing();
+    check_one_line();
     print("layout tests passed\n");
+}
+
+formats_to :: (source: str, expected: str) {
+    formatted := layout_format(source);
+    defer formatted.free();
+    if formatted != expected print("formatted:\n{}\nexpected:\n{}\n", formatted, expected);
+    #assert formatted == expected;
+    again := layout_format(formatted);
+    defer again.free();
+    #assert again == formatted;
+}
+
+check_spacing :: () {
+    // `x ?y`, `x? y` and `x ? y` mean different things to the compiler.
+    formats_to(
+        "pick :: (c: bool) -> ?ssize {\nreturn ifx c ?1 else null;\n}\n",
+        "pick :: (c: bool) -> ?ssize {\n    return ifx c ?1 else null;\n}\n");
+    formats_to("y := x?.field;\nz := x? + 1;\n", "y := x?.field;\nz := x? + 1;\n");
+    // User-defined operators keep their spacing too.
+    formats_to("x := c ++a;\n", "x := c ++a;\n");
+    // Prefix, postfix and member punctuation.
+    operators := #string
+        \\f :: (p: *T, t: [..]*u8) {
+        \\    x := *p + -1;
+        \\    y := !x && &z != null;
+        \\    v := a[i] * 0..n;
+        \\    e := cast(s32) x;
+        \\    k: Error!Value;
+        \\    q := p.*;
+        \\}
+        \\
+    ;
+    formats_to(operators, operators);
+    formats_to(
+        "m :: () {\n    if x == .Red return .{ .x = 1 };\n    if c == {\n" +
+        "    case .A;\n    f(.B);\n}\n}\n",
+        "m :: () {\n    if x == .Red return .{ .x = 1 };\n    if c == {\n        case .A;\n" +
+        "        f(.B);\n    }\n}\n");
+    literals := "e := .{};\nf(a, .{ .x = 1 }, .[1, 2]);\n";
+    formats_to(literals, literals);
+    formats_to("s :: #string,oneline\n\\\\ text\n;\n", "s :: #string,oneline\n    \\\\ text\n;\n");
+    // One blank line survives; trailing comments stay on their line.
+    formats_to("a :: 1;\n\n\n\nb :: 2; // two\nc :: () { // body\n\n    x := 1; /* one */\n}\n",
+        "a :: 1;\n\nb :: 2; // two\nc :: () { // body\n    x := 1; /* one */\n}\n");
+    formats_to("d :: () { /* body */\n x := 1; /* one */ y := 2; }\n",
+        "d :: () { /* body */\n    x := 1; /* one */\n    y := 2;\n}\n");
+    // Whitespace inside a token is part of the token.
+    formats_to("main :: () {\n  x := 1; // note \n}\n", "main :: () {\n    x := 1; // note \n}\n");
+    formats_to("s :: #string\n\\\\ keep  \n;\n", "s :: #string\n    \\\\ keep  \n;\n");
+    // Line endings and the byte order mark are kept.
+    formats_to("main :: () {\r\n\tx := 1; // c\r\n  /* a\r\n b */\r\n}\r\n",
+        "main :: () {\r\n    x := 1; // c\r\n    /* a\r\n b */\r\n}\r\n");
+    formats_to("\u{feff}main :: () {\nx := 1;\n}\n", "\u{feff}main :: () {\n    x := 1;\n}\n");
+    // Lines broken inside brackets stay broken, indented once.
+    formats_to(
+        "f :: (\n    a: s32,\n    b: s32,\n) -> s32 {\n    return g(a,\n        b);\n}\n",
+        "f :: (\n    a: s32,\n    b: s32,\n) -> s32 {\n    return g(a,\n        b);\n}\n");
+    formats_to("main :: () {\n    if a &&\n    b {\n        c();\n    }\n}\n",
+        "main :: () {\n    if a &&\n        b {\n        c();\n    }\n}\n");
+}
+
+// Constructs written on one source line stay on one line.
+check_one_line :: () {
+    formats_to("main :: () {value:=1;other:=value;}",
+        "main :: () { value := 1; other := value; }\n");
+    formats_to(
+        "P::struct{x:s32;y:s32;}\nColor :: enum u8 {Red;Green;}\nU :: union { A; B(v: s32); }\n",
+        "P :: struct { x: s32; y: s32; }\nColor :: enum u8 { Red; Green; }\n" +
+        "U :: union { A; B(v: s32); }\n");
+    formats_to("f :: () -> s32 {return 1;}\ng :: () {}\n",
+        "f :: () -> s32 { return 1; }\ng :: () {}\n");
+    arms := #string
+        \\main :: () {
+        \\    if c { a(); } else { b(); }
+        \\    if v == {
+        \\        case .A; f(); // arm
+        \\        case .B, .C; g(.{ .x = 1 }); h();
+        \\        case .D;
+        \\        i();
+        \\        else; return;
+        \\    }
+        \\    if v == { case 1; b(); case 2; c(); }
+        \\    x := foo(.{ .a = 1 }, |y| { return y; });
+        \\}
+        \\
+    ;
+    expected := #string
+        \\main :: () {
+        \\    if c { a(); } else { b(); }
+        \\    if v == {
+        \\        case .A; f(); // arm
+        \\        case .B, .C; g(.{ .x = 1 });
+        \\        h();
+        \\        case .D;
+        \\        i();
+        \\        else; return;
+        \\    }
+        \\    if v == { case 1; b(); case 2; c(); }
+        \\    x := foo(.{ .a = 1 }, |y| { return y; });
+        \\}
+        \\
+    ;
+    formats_to(arms, expected);
+    // A one-line block in a multi-line body still ends its line.
+    formats_to("main :: () {\n    if c { a(); } b();\n}\n",
+        "main :: () {\n    if c { a(); }\n    b();\n}\n");
+    // Multi-line bodies are still reindented.
+    formats_to("P :: struct {\nx: s32; y: s32;\n}\n",
+        "P :: struct {\n    x: s32;\n    y: s32;\n}\n");
+    // A long one-line body is not wrapped, so a second pass keeps it on one line.
+    long := "f :: () { g(aaaaaaaaaa, bbbbbbbbbb, cccccccccc, dddddddddd, eeeeeeeeee, " +
+        "ffffffffff, gggggggggg, hhh); }\n";
+    formats_to(long, long);
 }

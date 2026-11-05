@@ -1,36 +1,151 @@
 //! Translate byte offsets to the UTF-16 positions required by LSP.
 #import "Strings";
 #import "String_Builder";
+#import "Memory/Object";
+#import "Context";
 #import "protocol.glo";
+
+POSITION_CACHE_ENTRIES :: 8;
+
+// Line starts of one source buffer, identified by its address and length.
+// The last answer lets nondecreasing offsets on one line continue a scan.
+Position_Index :: struct {
+    data: usize;
+    count: ssize;
+    used: ssize;
+    starts: [..]ssize;
+    last_line: ssize;
+    last_cursor: ssize;
+    last_character: ssize;
+}
+
+Position_Cache :: struct {
+    clock: ssize;
+    entries: [POSITION_CACHE_ENTRIES]Position_Index;
+}
+
+// Null until position_cache_reset runs on a thread; other threads always scan.
+#thread_local position_cache: ?*Position_Cache = null;
+
+// Scans from `cursor`, which starts a line or ends an earlier scan of it.
+// Returns the position and the boundary where the scan stopped.
+position_scan :: (source: str, cursor: ssize, start: Text_Position, offset: ssize) -> (Text_Position, ssize) {
+    result := start;
+    while cursor < source.count && cursor < offset {
+        if source[cursor] == #char "\r" || source[cursor] == #char "\n" {
+            next := cursor + 1;
+            if source[cursor] == #char "\r" && next < source.count &&
+               source[next] == #char "\n" next += 1;
+            // Neither byte inside CRLF advances to the following line.
+            if next > offset break;
+            result.line += 1;
+            result.character = 0;
+            cursor = next;
+        } else if #pattern ?decoded = source.decode_at(cursor) {
+            // A byte offset inside a UTF-8 scalar rounds down to its
+            // boundary instead of jumping past the requested offset.
+            if decoded.next > offset break;
+            result.character += 1;
+            if cast(u32)decoded.rune > 65535 result.character += 1;
+            cursor = decoded.next;
+        } else {
+            cursor += 1;
+            result.character += 1;
+        }
+    }
+    return result, cursor;
+}
+
+position_index :: (source: str) -> ?*Position_Index {
+    #pattern ?cache := position_cache else { return null; };
+    if source.count == 0 return null;
+    key := cast(usize) source.data;
+    cache.clock += 1;
+    slot: ssize = 0;
+    for i: 0..cache.entries.count {
+        entry := &cache.entries[i];
+        if entry.count == source.count && entry.data == key {
+            entry.used = cache.clock;
+            return ?entry;
+        }
+        if entry.used < cache.entries[slot].used slot = i;
+    }
+    entry := &cache.entries[slot];
+    entry.data = key;
+    entry.count = source.count;
+    entry.used = cache.clock;
+    entry.last_line = -1;
+    #push_allocator(heap_allocator());
+    entry.starts.clear();
+    entry.starts.push(0);
+    cursor: ssize = 0;
+    while cursor < source.count {
+        byte := source[cursor];
+        cursor += 1;
+        if byte == #char "\r" && cursor < source.count && source[cursor] == #char "\n" cursor += 1;
+        if byte == #char "\r" || byte == #char "\n" entry.starts.push(cursor);
+    }
+    return ?entry;
+}
 
 #public {
     Text_Position :: struct  { line: ssize; character: ssize; }
 
-    position_at :: (source: str, offset: ssize) -> Text_Position {
-        result: Text_Position;
-        cursor: ssize = 0;
-        while cursor < source.count && cursor < offset {
-            if source[cursor] == #char "\r" || source[cursor] == #char "\n" {
-                next := cursor + 1;
-                if source[cursor] == #char "\r" && next < source.count &&
-                   source[next] == #char "\n" next += 1;
-                // Neither byte inside CRLF advances to the following line.
-                if next > offset break;
-                result.line += 1;
-                result.character = 0;
-                cursor = next;
-            } else if #pattern ?decoded = source.decode_at(cursor) {
-                // A byte offset inside a UTF-8 scalar rounds down to its
-                // boundary instead of jumping past the requested offset.
-                if decoded.next > offset break;
-                result.character += 1;
-                if cast(u32)decoded.rune > 65535 result.character += 1;
-                cursor = decoded.next;
-            } else {
-                cursor += 1;
-                result.character += 1;
-            }
+    /// Enables a per-thread line index for position_at and drops cached ones.
+    /// Indexes identify buffers by address and length, so call this whenever
+    /// a source buffer may have been replaced; the server calls it per event.
+    position_cache_reset :: () {
+        if position_cache == null {
+            #push_allocator(heap_allocator());
+            #pattern ?created := new(Position_Cache) else { return; };
+            position_cache = ?created;
         }
+        #pattern ?cache := position_cache else { return; };
+        for i: 0..cache.entries.count {
+            cache.entries[i].data = 0;
+            cache.entries[i].count = 0;
+            cache.entries[i].used = 0;
+        }
+        cache.clock = 0;
+    }
+
+    /// Releases this thread's line indexes; position_at scans again.
+    position_cache_disable :: () {
+        #pattern ?cache := position_cache else { return; };
+        position_cache = null;
+        #push_allocator(heap_allocator());
+        for i: 0..cache.entries.count cache.entries[i].starts.reset();
+        delete(cache);
+    }
+
+    position_at :: (source: str, offset: ssize) -> Text_Position {
+        start: Text_Position;
+        #pattern ?index := position_index(source) else {
+            result, _ := position_scan(source, 0, start, offset);
+            return result;
+        };
+        // The last line start at or before the offset; offsets inside a line
+        // break stay on the line before it, as in the scan.
+        target := offset;
+        if target > source.count target = source.count;
+        if target <= 0 return start;
+        low: ssize = 0;
+        high := index.starts.count - 1;
+        while low < high {
+            middle := low + (high - low + 1) / 2;
+            if index.starts[middle] <= target low = middle;
+            else high = middle - 1;
+        }
+        cursor := index.starts[low];
+        start.line = low;
+        if index.last_line == low && index.last_cursor <= target {
+            cursor = index.last_cursor;
+            start.character = index.last_character;
+        }
+        result, stopped := position_scan(source, cursor, start, target);
+        index.last_line = low;
+        index.last_cursor = stopped;
+        index.last_character = result.character;
         return result;
     }
 
@@ -46,7 +161,10 @@
             }
             cursor += 1;
         }
-        if current != line return -1;
+        // A line past the last one is the end of the document, as a character
+        // past the end of a line is the end of that line. Clients address a
+        // whole buffer as {line = line count}, also without a final line break.
+        if current < line return source.count;
         column: ssize = 0;
         while cursor < source.count && source[cursor] != #char "\r" &&
               source[cursor] != #char "\n" && column < character {

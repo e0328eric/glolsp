@@ -2,6 +2,7 @@
 #import "../src/language.glo";
 #import "Io";
 #import "Strings/Utf8";
+#import "String_Builder";
 
 find_text :: (text: str, needle: str, from: ssize = 0) -> ssize {
     at := from;
@@ -64,6 +65,9 @@ main :: () {
     #assert !language_identifier_valid("2name");
     #assert !language_identifier_valid("if");
     #assert !language_identifier_valid("a b");
+    // Rename must not produce a discard or a literal.
+    for reserved: .["_", "true", "false", "null"] #assert !language_identifier_valid(reserved);
+    #assert language_identifier_valid("_x") && language_identifier_valid("nullable");
     destroy_language(&analysis);
 
     methods_source := #string
@@ -106,5 +110,73 @@ main :: () {
     invalid := analyze_language("main :: () { /* never closes");
     #assert invalid.diagnostics.count == 2;
     destroy_language(&invalid);
+    check_lexical_recovery();
     print("language analysis passed\n");
+}
+
+token_named :: (analysis: *const Language_Analysis, source: str, text: str) -> ssize {
+    for i: 0..analysis.tokens.count {
+        token := analysis.tokens[i];
+        if source.substring(token.start, token.end) == text return i;
+    }
+    return -1;
+}
+
+// libglosso reports everything after the first lexical error as one token.
+// The lexer recovers that token and keeps lexing after it.
+check_lexical_recovery :: () {
+    hash := tokenize_language("#\nlater :: 1;\n");
+    #assert hash.diagnostics.count == 1 && hash.diagnostics[0].start == 0;
+    #assert hash.tokens.count == 5 && hash.tokens[0].kind == 7 && hash.tokens[0].end == 1;
+    #assert token_named(&hash, "#\nlater :: 1;\n", "later") >= 0;
+    destroy_language(&hash);
+
+    escape_source := "p :: \"C:\\q\";\nlater :: 1;\n";
+    escape := tokenize_language(escape_source);
+    string := token_named(&escape, escape_source, "\"C:\\q\"");
+    #assert string >= 0 && escape.tokens[string].kind == 3;
+    #assert token_named(&escape, escape_source, "later") >= 0;
+    destroy_language(&escape);
+
+    for source: .["z :: 0x;\nlater :: 1;\n", "'\nlater :: 1;\n", "c :: #char \"\nlater :: 1;\n",
+                  "s :: '' ;\nlater :: 1;\n"] {
+        recovered := tokenize_language(source);
+        #assert recovered.diagnostics.count >= 1;
+        #assert token_named(&recovered, source, "later") >= 0;
+        #assert token_named(&recovered, source, ";") >= 0;
+        destroy_language(&recovered);
+    }
+    number := tokenize_language("z :: 0x;");
+    #assert number.tokens[2].kind == 2 && number.tokens[2].end == 7;
+    destroy_language(&number);
+
+    // Unterminated strings and comments still run to the end of the file.
+    open_string := tokenize_language("x :: \"abc\nlater :: 1;\n");
+    #assert open_string.tokens.count == 3 && open_string.tokens[2].kind == 3;
+    destroy_language(&open_string);
+    open_comment := tokenize_language("x :: 1; /* open\nlater :: 1;\n");
+    #assert open_comment.tokens[open_comment.tokens.count - 1].kind == 4;
+    #assert open_comment.tokens.count == 5;
+    destroy_language(&open_comment);
+
+    // More stray dots than the old recursion limit allowed.
+    dots: String_Builder;
+    for 0..40 dots.write_string("a.\n");
+    dots.write_string("zz := 1;\n");
+    many := dots.into_string();
+    stray := tokenize_language(many);
+    #assert stray.diagnostics.count == 40;
+    #assert token_named(&stray, many, "zz") >= 0;
+    destroy_language(&stray);
+    many.free();
+
+    // An opener left unclosed inside a body does not unmatch the body's braces.
+    unclosed_source := "a :: () {\n    foo(\n}\nb :: () {}\n";
+    unclosed := tokenize_language(unclosed_source);
+    open := token_named(&unclosed, unclosed_source, "{");
+    #assert unclosed.tokens[open].matching >= 0;
+    #assert unclosed_source.substring(unclosed.tokens[unclosed.tokens[open].matching].start,
+        unclosed.tokens[unclosed.tokens[open].matching].end) == "}";
+    #assert unclosed.diagnostics.count == 1;
+    destroy_language(&unclosed);
 }

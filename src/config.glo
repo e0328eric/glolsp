@@ -3,6 +3,7 @@
 #import "File_System/File";
 #import "File_System/Path";
 #import "File_System/System";
+#import "File_System/Metadata";
 #import "Serialization/Core";
 #import "Serialization/Toml";
 #import "Format";
@@ -60,7 +61,7 @@ config_compiler_std_path :: (compiler: str) -> str {
     directory := path_dirname(compiler);
     prefix := path_dirname(directory);
     installed := path_join(prefix, "std");
-    if os_fs_is_directory(installed) return installed;
+    if is_directory(installed).unwrap_or(false) return installed;
     // Installed: <prefix>/bin/glosso. Development: <checkout>/build/bin/glosso.
     if path_basename(directory) == "bin" && path_basename(prefix) == "build" {
         installed.free();
@@ -97,7 +98,7 @@ config_compiler_std_path :: (compiler: str) -> str {
                         if value.count > 0 && !path_has_nul(value) {
                             compiler := config_resolve_compiler(value, file);
                             defer compiler.free();
-                            if !os_fs_is_regular_file(compiler)
+                            if !is_regular_file(compiler).unwrap_or(false)
                                 config_report(file, tprint("compiler_path does not name a file: {}", compiler));
                             return config_compiler_std_path(compiler);
                         }

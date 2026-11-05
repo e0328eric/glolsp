@@ -635,9 +635,10 @@ class SemanticLspTests(unittest.TestCase):
         self.write("modules/notes.txt", "")
         self.write("modules/build/Generated.glo", "")
         caller = self.write("main.glo", '#import "";\n')
+        # Workspace-root modules are opt-in, as `glosso compile` does not search roots.
         capabilities = self.initialize(stdPath=str(self.root / "std"),
                                        importPaths=[str(self.root / "modules")],
-                                       scanWorkspace=False)
+                                       scanWorkspace=False, rootsAsModulePaths=True)
         self.assertTrue({'"', '/'}.issubset(
             capabilities["completionProvider"]["triggerCharacters"]))
         self.open(caller)
@@ -743,7 +744,8 @@ class SemanticLspTests(unittest.TestCase):
 
     def test_import_path_completion_includes_unsaved_modules_and_disk_changes(self):
         caller = self.write("main.glo", '#import "Fresh";\n')
-        self.initialize(stdPath=str(self.root / "std"), scanWorkspace=False)
+        self.initialize(stdPath=str(self.root / "std"), scanWorkspace=False,
+                        rootsAsModulePaths=True)
         self.open(caller)
         self.assertEqual(self.completion_names(caller, '"Fresh'), set())
         module = (self.root / "Fresh" / "module.glo").as_uri()

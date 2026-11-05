@@ -9,6 +9,9 @@
 #import "File_System/Path";
 #import "Glosso/Paths";
 #import "File_System/System";
+#import "File_System/Metadata";
+#import "File_System/Copy";
+#import "File_System/Types";
 #import "Format";
 #import "Io";
 #import "Os";
@@ -19,20 +22,20 @@
 // Use the compile-time filesystem primitives; ordinary File copy operations
 // require native file handles unavailable in the build VM.
 glolsp_copy_tree :: (source: str, destination: str) -> bool {
-    if !os_fs_is_directory(source) {
+    if !is_directory(source).unwrap_or(false) {
         // Clang headers retain read-only installation permissions. Replace
         // their directory entries so a second build can update them too.
-        if os_fs_exists(destination) || os_fs_is_symlink(destination) {
-            if !os_fs_remove_path(destination) {
+        if exists(destination).unwrap_or(false) || is_symlink(destination).unwrap_or(false) {
+            if remove(destination).is_err() {
                 print("could not replace {}\n", destination);
                 return false;
             }
         }
-        if os_fs_copy_file(source, destination, false) return true;
+        if copy_file(source, destination, Copy_Policy.Fail_If_Exists).is_ok() return true;
         print("could not copy {} to {}\n", source, destination);
         return false;
     }
-    if !os_fs_is_directory(destination) && !os_fs_create_directories(destination) {
+    if !is_directory(destination).unwrap_or(false) && create_directory(destination, File_Permissions.Default_Directory, true).is_err() {
         print("could not create {}\n", destination);
         return false;
     }
@@ -56,8 +59,8 @@ glolsp_copy_tree :: (source: str, destination: str) -> bool {
 glolsp_remove_bundled_std :: (resources: str) -> bool {
     standard := path_join(resources, "std");
     defer standard.free();
-    if os_fs_exists(standard) || os_fs_is_symlink(standard) {
-        if os_fs_remove_all(standard) < 0 {
+    if exists(standard).unwrap_or(false) || is_symlink(standard).unwrap_or(false) {
+        if remove_all(standard).is_err() {
             print("could not remove obsolete bundled std: {}\n", standard);
             return false;
         }
@@ -68,14 +71,14 @@ glolsp_remove_bundled_std :: (resources: str) -> bool {
 // Bundle the matching frontend and Bindgen headers. Standard modules are
 // resolved at runtime from GLOSSO_STD or the user's Glosso installation.
 glolsp_bundle :: () -> bool {
-    if (!os_fs_is_directory("share") && !os_fs_create_directories("share")) ||
-       (!os_fs_is_directory("build") && !os_fs_create_directories("build")) {
+    if (!is_directory("share").unwrap_or(false) && create_directory("share", File_Permissions.Default_Directory, true).is_err()) ||
+       (!is_directory("build").unwrap_or(false) && create_directory("build", File_Permissions.Default_Directory, true).is_err()) {
         print("could not create bundle directories\n");
         return false;
     }
     prefix := path_dirname(GLOSSO_STANDARD_DIRECTORY);
     library := glosso_library_path(prefix);
-    if !os_fs_is_regular_file(library) {
+    if !is_regular_file(library).unwrap_or(false) {
         print("libglosso is missing: {}. Build the SDK with build.exe libglosso first.\n", library);
         return false;
     }
@@ -84,12 +87,12 @@ glolsp_bundle :: () -> bool {
     if !glolsp_copy_tree(library, destination) return false;
     if !glolsp_remove_bundled_std("share") return false;
     resources := path_join(path_dirname(library), "lib/clang");
-    if !os_fs_is_directory(resources) resources = path_join(prefix, "lib/clang");
-    if !os_fs_is_directory(resources) {
+    if !is_directory(resources).unwrap_or(false) resources = path_join(prefix, "lib/clang");
+    if !is_directory(resources).unwrap_or(false) {
         print("Clang resource headers are missing: {}\n", resources);
         return false;
     }
-    if !os_fs_is_directory("share/lib") && !os_fs_create_directories("share/lib") return false;
+    if !is_directory("share/lib").unwrap_or(false) && create_directory("share/lib", File_Permissions.Default_Directory, true).is_err() return false;
     resource_destination := "share/lib/clang";
     #if OUT.os == .Windows resource_destination = "build/lib/clang";
     if !glolsp_copy_tree(resources, resource_destination) return false;
@@ -125,9 +128,9 @@ glolsp_install_config :: () -> bool {
         defer folder.free();
         file := path_join(folder, "config.toml");
         defer file.free();
-        if os_fs_exists(file) || os_fs_is_symlink(file) return true;
-        if (!os_fs_is_directory(folder) && !os_fs_create_directories(folder)) ||
-           !os_fs_copy_file("config.example.toml", file, false) {
+        if exists(file).unwrap_or(false) || is_symlink(file).unwrap_or(false) return true;
+        if (!is_directory(folder).unwrap_or(false) && create_directory(folder, File_Permissions.Default_Directory, true).is_err()) ||
+           copy_file("config.example.toml", file, Copy_Policy.Fail_If_Exists).is_err() {
             print("could not create {}\n", file);
             return false;
         }
@@ -152,7 +155,7 @@ glolsp_install :: (prefix: str) -> bool {
                 return false;
             }
     }
-    if !os_fs_is_directory(binaries) && !os_fs_create_directories(binaries) {
+    if !is_directory(binaries).unwrap_or(false) && create_directory(binaries, File_Permissions.Default_Directory, true).is_err() {
         print("could not create {}\n", binaries);
         return false;
     }
@@ -180,7 +183,7 @@ glolsp_build :: (
     source: str = "main.glo",
     name: str = "glolsp",
 ) -> bool {
-    if !os_fs_is_directory("build") && !os_fs_create_directories("build") {
+    if !is_directory("build").unwrap_or(false) && create_directory("build", File_Permissions.Default_Directory, true).is_err() {
         print("could not create build/\n");
         return false;
     }
@@ -332,6 +335,16 @@ glolsp_test :: () {
     config_status := glolsp_run_command(&config_command);
     config_command.destroy();
     if config_status != 0 exit(config_status);
+    // Regression suites for fixed bugs, grouped by the module that owns them.
+    for area: .["server", "workspace", "analysis", "syntax"] {
+        regress_command := Command.command_make("python3");
+        regress_command.add_argument(tprint("tests/regress_{}.py", area));
+        regress_command.add_argument("--server");
+        regress_command.add_argument(glolsp_executable());
+        regress_status := glolsp_run_command(&regress_command);
+        regress_command.destroy();
+        if regress_status != 0 exit(regress_status);
+    }
 }
 
 #comptime glolsp_task();

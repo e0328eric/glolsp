@@ -1,6 +1,7 @@
 #import "../src/syntax.glo";
 #import "Io";
 #import "String_Builder";
+#import "Format";
 
 symbol_named :: (file: *const Parsed_File, name: str) -> ssize {
     for i: 0..file.symbols.count if file.symbols[i].name == name return i;
@@ -73,8 +74,105 @@ check_current_syntax :: () {
     }
 }
 
+find_text :: (text: str, needle: str) -> ssize {
+    at: ssize = 0;
+    while at + needle.count <= text.count {
+        if text.substring(at, at + needle.count) == needle return at;
+        at += 1;
+    }
+    return -1;
+}
+
+// Incomplete buffers must neither crash the parser nor swallow the delimiters
+// that end the enclosing declaration.
+check_recovery :: () {
+    for source: .["x := |$", "S :: struct($", "main :: () {\n    f := |a, $", "x := |a: int, $"] {
+        trailing := parse_file(source);
+        #assert trailing.language.diagnostics.count > 0;
+        destroy_parsed_file(&trailing);
+    }
+    // `$` without a name neither binds `)` nor consumes it.
+    dollar := parse_file("f :: ($) { inner := 1; }\nafter := 2;");
+    #assert symbol_named(&dollar, ")") == -1;
+    #assert symbol_named(&dollar, "after") >= 0;
+    procedure := dollar.symbols[symbol_named(&dollar, "f")];
+    #assert scope_includes(&dollar, dollar.symbols[symbol_named(&dollar, "inner")].scope,
+        procedure.body_scope);
+    destroy_parsed_file(&dollar);
+
+    // An incomplete `p.`, `.`, call or tuple ends at the body's `}`.
+    for body: .["p.", "x := .", "foo(", "x := (1,", "f(a, g("] {
+        text := tprint("a :: () {{\n    secret := 1;\n    {}\n}}\nb :: () {{ y := 2; }}\n", body);
+        incomplete := parse_file(text);
+        a := incomplete.symbols[symbol_named(&incomplete, "a")];
+        y := incomplete.symbols[symbol_named(&incomplete, "y")];
+        #assert symbol_named(&incomplete, "b") >= 0;
+        #assert !scope_includes(&incomplete, y.scope, a.body_scope);
+        #assert a.end < find_text(text, "b ::");
+        destroy_parsed_file(&incomplete);
+    }
+    member := parse_file("main :: () { value := p.name; other := Color.Red; }");
+    #assert member.language.diagnostics.count == 0;
+    names: ssize = 0;
+    for node: member.nodes.view() if node.kind == .Member && node.right >= 0 names += 1;
+    #assert names == 2;
+    destroy_parsed_file(&member);
+
+    // A lexical error no longer hides the declarations after it.
+    for prefix: .["#\n", "'\n", "z :: 0x;\n", "p :: \"C:\\q\";\n", "c :: #char \"\n"] {
+        text := tprint("{}main :: () {{ later := 1; }}\n", prefix);
+        lexed := parse_file(text);
+        #assert lexed.language.diagnostics.count > 0;
+        #assert symbol_named(&lexed, "main") >= 0 && symbol_named(&lexed, "later") >= 0;
+        destroy_parsed_file(&lexed);
+    }
+    dots: String_Builder;
+    dots.write_string("f :: () {\n");
+    for 0..40 dots.write_string("    a.\n");
+    dots.write_string("    zz := 1;\n}\n");
+    many := dots.into_string();
+    stray := parse_file(many);
+    #assert symbol_named(&stray, "zz") >= 0;
+    destroy_parsed_file(&stray);
+    many.free();
+
+    // `#string` takes `oneline` and `escape` in either order.
+    for modifiers: .[",escape", ",oneline,escape", ",escape,oneline"] {
+        text := tprint("S :: #string{}\n\\\\ tab\\there\n;\nafter :: 1;\n", modifiers);
+        string := parse_file(text);
+        #assert string.language.diagnostics.count == 0;
+        #assert string.symbols[symbol_named(&string, "S")].end > find_text(text, "\\\\ tab");
+        #assert symbol_named(&string, "escape") == -1 && symbol_named(&string, "after") >= 0;
+        destroy_parsed_file(&string);
+    }
+
+    // `@` and `?` capture chains are walked without recursion, in source order.
+    order := parse_file("main :: () { if v == { case .Some(first @ second); } }");
+    first := order.symbols[symbol_named(&order, "first")];
+    second := order.symbols[symbol_named(&order, "second")];
+    #assert symbol_named(&order, "first") < symbol_named(&order, "second");
+    #assert order.nodes[first.value_node].right == -1;
+    #assert order.nodes[second.value_node].right >= 0;
+    destroy_parsed_file(&order);
+    chain: String_Builder;
+    chain.write_string("main :: () { if v == { case #pattern ?deep");
+    for 0..30000 chain.write_byte(#char "?");
+    chain.write_string("; case head");
+    for 0..20000 chain.write_string(" @ tail");
+    chain.write_string("; } }\n");
+    deep_source := chain.into_string();
+    deep := parse_file(deep_source);
+    #assert symbol_named(&deep, "deep") >= 0 && symbol_named(&deep, "head") >= 0;
+    tails: ssize = 0;
+    for symbol: deep.symbols.view() if symbol.name == "tail" tails += 1;
+    #assert tails == 20000;
+    destroy_parsed_file(&deep);
+    deep_source.free();
+}
+
 main :: () {
     check_current_syntax();
+    check_recovery();
     source := #string
         \\#public {
         \\Point :: struct { x: f64; y: f64; }

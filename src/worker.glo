@@ -6,6 +6,7 @@
 #import "Memory/Ownership";
 #import "Context";
 #import "File_System/File";
+#import "File_System/Types";
 
 #public Server_Event :: union {
     input: Rpc_Frame;
@@ -20,19 +21,190 @@ Server_Event ::: instance Freeable {
     }
 }
 
+/// The descriptors that carry LSP frames.
+#public Server_Stdio :: struct {
+    input: File;
+    output: File;
+}
+
+// libglosso recurses on deeply nested expressions. The compiler executable
+// runs its frontend on a 256 MiB stack; match it. Untouched pages stay free.
+#public WORKER_COMPILER_STACK :: 256 * 1024 * 1024;
+
+Input_Worker :: struct {
+    events: ?Channel(Server_Event);
+    input: File;
+}
+
 Compiler_Worker :: struct {
     events: ?Channel(Server_Event);
     jobs: ?Channel(Compiler_Input);
 }
 
+#if OUT.os == .Windows {
+    worker_kernel32 :: #library,system "kernel32";
+    // The executable's C runtime. glosso.dll may write through its descriptors.
+    worker_msvcrt :: #library,system "msvcrt";
+    // Handles are pointer-sized; u64 keeps them comparable with File.handle.
+    worker_GetStdHandle :: (which: u32) -> u64 #foreign worker_kernel32 "GetStdHandle";
+    worker_SetStdHandle :: (which: u32, handle: u64) -> s32 #foreign worker_kernel32 "SetStdHandle";
+    worker_GetCurrentProcess :: () -> u64 #foreign worker_kernel32 "GetCurrentProcess";
+    worker_DuplicateHandle :: (
+        source_process: u64, source: u64, target_process: u64, target: *u64,
+        access: u32, inherit: s32, options: u32,
+    ) -> s32 #foreign worker_kernel32 "DuplicateHandle";
+    worker_CreateThread :: (
+        security: ?*void, stack_size: usize, proc: Thread_Proc, data: *void,
+        flags: u32, thread_id: *u32,
+    ) -> u64 #foreign worker_kernel32 "CreateThread";
+    worker_CloseHandle :: (handle: u64) -> s32 #foreign worker_kernel32 "CloseHandle";
+    worker_open_osfhandle :: (handle: u64, flags: s32) -> s32 #foreign worker_msvcrt "_open_osfhandle";
+    worker_crt_dup2 :: (from: s32, to: s32) -> s32 #foreign worker_msvcrt "_dup2";
+    worker_crt_close :: (fd: s32) -> s32 #foreign worker_msvcrt "_close";
+
+    // STD_INPUT_HANDLE, STD_OUTPUT_HANDLE and STD_ERROR_HANDLE are -10, -11, -12.
+    WORKER_STD_INPUT :: 4294967286;
+    WORKER_STD_OUTPUT :: 4294967285;
+    WORKER_STD_ERROR :: 4294967284;
+    WORKER_INVALID_HANDLE :: 18446744073709551615;
+    WORKER_DUPLICATE_SAME_ACCESS :: 2;
+    WORKER_STACK_SIZE_PARAM_IS_A_RESERVATION :: 65536;
+
+    // A private, non-inheritable handle onto the same object, or 0.
+    worker_private_handle :: (handle: u64) -> u64 {
+        if handle == 0 || handle == WORKER_INVALID_HANDLE return 0;
+        process := worker_GetCurrentProcess();
+        copy: u64 = 0;
+        if worker_DuplicateHandle(process, handle, process, &copy, 0, 0, WORKER_DUPLICATE_SAME_ACCESS) == 0
+            return 0;
+        return copy;
+    }
+} else #if OUT.os != .Wasm {
+    worker_libc :: #library "c";
+    worker_pthread :: #library,system "pthread";
+    // C declares fcntl variadic; pass its argument as the promoted int.
+    worker_fcntl :: (fd: s32, command: s32, ...) -> s32 #foreign worker_libc "fcntl";
+    worker_dup2 :: (from: s32, to: s32) -> s32 #foreign worker_libc "dup2";
+    worker_close :: (fd: s32) -> s32 #foreign worker_libc "close";
+    worker_pthread_attr_init :: (attr: *void) -> s32 #foreign worker_pthread "pthread_attr_init";
+    worker_pthread_attr_destroy :: (attr: *void) -> s32 #foreign worker_pthread "pthread_attr_destroy";
+    worker_pthread_attr_setstacksize :: (attr: *void, size: usize) -> s32
+        #foreign worker_pthread "pthread_attr_setstacksize";
+    worker_pthread_create :: (thread: *?*void, attr: ?*void, proc: Thread_Proc, data: *void) -> s32
+        #foreign worker_pthread "pthread_create";
+    worker_pthread_detach :: (thread: *void) -> s32 #foreign worker_pthread "pthread_detach";
+
+    // F_DUPFD, F_SETFD and FD_CLOEXEC share these values on Linux, macOS and BSD.
+    worker_private_descriptor :: (fd: s32) -> s32 {
+        copy := worker_fcntl(fd, 0, cast(s32) 3);
+        if copy >= 0 _ = worker_fcntl(copy, 2, cast(s32) 1);
+        return copy;
+    }
+}
+
+/// Moves the LSP streams to private, non-inheritable handles. Compile-time
+/// code and its subprocesses share this process's standard streams: reading
+/// stdin would consume frame bytes, and writing stdout would corrupt them.
+/// Afterwards standard input reads /dev/null (NUL on Windows) and standard
+/// output writes to stderr. Without that support the standard streams carry
+/// LSP frames directly.
+#public worker_private_stdio :: () -> Server_Stdio {
+    stdio: Server_Stdio = .{ .input = File.stdin(), .output = File.stdout() };
+    #if OUT.os == .Windows {
+        // File handles 0, 1 and 2 resolve through GetStdHandle on each use,
+        // so redirecting the standard handles cannot reach the private copies.
+        input := worker_private_handle(worker_GetStdHandle(WORKER_STD_INPUT));
+        output := worker_private_handle(worker_GetStdHandle(WORKER_STD_OUTPUT));
+        if input == 0 || output == 0 {
+            if input != 0 _ = worker_CloseHandle(input);
+            if output != 0 _ = worker_CloseHandle(output);
+            rpc_report("could not isolate standard input and output");
+            return stdio;
+        }
+        stdio.input = .{ .handle = input, .valid = true };
+        stdio.output = .{ .handle = output, .valid = true };
+        errors := worker_GetStdHandle(WORKER_STD_ERROR);
+        // The C runtime bound descriptors 0 and 1 to the original handles at
+        // startup. _dup2 closes those originals; the private copies stay open.
+        // A runtime loaded later starts from the redirected standard handles.
+        if File.open("NUL") == {
+            case .Ok(empty);
+                descriptor := worker_open_osfhandle(worker_private_handle(empty.handle), 0);
+                if descriptor >= 0 {
+                    _ = worker_crt_dup2(descriptor, 0);
+                    _ = worker_crt_close(descriptor);
+                }
+                // Kept open for the process: it is the standard input now.
+                _ = worker_SetStdHandle(WORKER_STD_INPUT, empty.handle);
+            case .Err;
+                rpc_report("could not open NUL for standard input");
+        }
+        _ = worker_crt_dup2(2, 1);
+        _ = worker_SetStdHandle(WORKER_STD_OUTPUT, errors);
+    } else #if OUT.os != .Wasm {
+        input := worker_private_descriptor(0);
+        output := worker_private_descriptor(1);
+        if input < 0 || output < 0 {
+            if input >= 0 _ = worker_close(input);
+            if output >= 0 _ = worker_close(output);
+            rpc_report("could not isolate standard input and output");
+            return stdio;
+        }
+        stdio.input = .{ .handle = cast(u64) input, .valid = true };
+        stdio.output = .{ .handle = cast(u64) output, .valid = true };
+        if File.open("/dev/null") == {
+            case .Ok(empty);
+                _ = worker_dup2(cast(s32) empty.handle, 0);
+                _ = empty.close();
+            case .Err;
+                rpc_report("could not open /dev/null for standard input");
+        }
+        _ = worker_dup2(2, 1);
+    }
+    return stdio;
+}
+
+/// Starts a detached thread with a `stack`-byte stack, falling back to the
+/// default stack if the large one is refused.
+#public worker_spawn :: (proc: Thread_Proc, data: *void, stack: usize) -> bool {
+    #if OUT.os == .Windows {
+        // Reserve the whole stack; pages are committed only as they are touched.
+        id: u32 = 0;
+        handle := worker_CreateThread(null, stack, proc, data, WORKER_STACK_SIZE_PARAM_IS_A_RESERVATION, &id);
+        if handle != 0 {
+            _ = worker_CloseHandle(handle);
+            return true;
+        }
+    } else #if OUT.os != .Wasm {
+        // pthread_attr_t is opaque; 128 aligned bytes hold it on every target.
+        attr_words: [16]u64;
+        attr := cast(*void) attr_words.data;
+        if worker_pthread_attr_init(attr) == 0 {
+            started := false;
+            if worker_pthread_attr_setstacksize(attr, stack) == 0 {
+                handle: ?*void = null;
+                if worker_pthread_create(&handle, ?attr, proc, data) == 0 {
+                    if #pattern ?native = handle _ = worker_pthread_detach(native);
+                    started = true;
+                }
+            }
+            _ = worker_pthread_attr_destroy(attr);
+            if started return true;
+        }
+    }
+    if Thread.spawn(proc, data) == {
+        case .Ok(thread); _ = thread.detach(); return true;
+        case .Err; return false;
+    }
+}
+
 worker_read_input :: (raw: *void) -> ?*void #c_call {
-    state := cast(*?Channel(Server_Event))raw;
+    state := cast(*Input_Worker)raw;
     defer delete(state);
-    #pattern ?events := state.* else { return null; };
-    input := File.stdin();
+    #pattern ?events := state.events else { return null; };
     while true {
         reset_temporary_storage();
-        frame := rpc_read_frame(&input);
+        frame := rpc_read_frame(&state.input);
         // send takes ownership on both success and a closed channel.
         if #pattern.Err = events.send(.input(frame)) break;
         if frame.status <= 0 break;
@@ -56,10 +228,11 @@ worker_check :: (raw: *void) -> ?*void #c_call {
     return null;
 }
 
-#public worker_start_input :: (events: *const Channel(Server_Event)) -> bool {
+#public worker_start_input :: (events: *const Channel(Server_Event), input: File) -> bool {
     #push_allocator(heap_allocator());
-    #pattern ?state := new(?Channel(Server_Event)) else { return false; };
-    state.* = ?events.clone();
+    #pattern ?state := new(Input_Worker) else { return false; };
+    state.events = ?events.clone();
+    state.input = input;
     if Thread.spawn(worker_read_input, cast(*void)state) == {
         case .Ok(thread); _ = thread.detach(); return true;
         case .Err; delete(state); return false;
@@ -73,8 +246,9 @@ worker_check :: (raw: *void) -> ?*void #c_call {
     #pattern ?worker := new(Compiler_Worker) else { return false; };
     worker.events = ?events.clone();
     worker.jobs = ?jobs.clone();
-    if Thread.spawn(worker_check, cast(*void)worker) == {
-        case .Ok(thread); _ = thread.detach(); return true;
-        case .Err; delete(worker); return false;
+    if !worker_spawn(worker_check, cast(*void)worker, WORKER_COMPILER_STACK) {
+        delete(worker);
+        return false;
     }
+    return true;
 }

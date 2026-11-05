@@ -183,7 +183,7 @@
 }
 
 /// Legend: namespace,type,function,variable,parameter,property,keyword,comment,
-/// str,number,operator,macro. Modifier bits: declaration=1, readonly=2.
+/// string,number,operator,macro. Modifier bits: declaration=1, readonly=2.
 #public write_semantic_tokens :: (
     out: *String_Builder, source: str, analysis: *const Language_Analysis,
 ) {

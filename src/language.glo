@@ -134,6 +134,8 @@
 #public language_identifier_valid :: (name: str) -> bool {
     if name.count == 0 || language_is_keyword(name) || !language_letter_at(name, 0, true)
         return false;
+    // These lex as identifiers, but the compiler reads them as a discard or a literal.
+    if name == "_" || name == "true" || name == "false" || name == "null" return false;
     at := language_next(name, 0);
     while at < name.count {
         if !language_letter_at(name, at, false) return false;
@@ -180,53 +182,115 @@
     }
 }
 
-#public language_lex :: (source: str, analysis: *Language_Analysis, depth: ssize = 0) {
-    scanned := glosso_tokens(source);
-    defer scanned.free();
-    if !scanned.success language_add_diagnostic(
-        analysis, 0, source.count, "Invalid token reported by libglosso.");
-    for token: scanned.tokens.view() {
-        kind: s32 = 6;
-        if token.kind == {
-            case "Whitespace", "ByteOrderMark", "Eof"; continue;
-            case "Ident"; kind = 1;
-            case "Int", "Float"; kind = 2;
-            case "Str", "CStr", "BStr", "MlStr"; kind = 3;
-            case "LineComment", "BlockComment"; kind = 4;
-            case "Directive"; kind = 7;
-            case "Invalid";
-                // The compiler preserves an unterminated token as an invalid
-                // tail. Keep its category so completion stays out of literals.
-                tail := source[token.start..token.end];
-                if tail.starts_with("/*") || tail.starts_with("//") kind = 4;
-                else if tail.starts_with("\"") || tail.starts_with("c\"") ||
-                        tail.starts_with("b\"") kind = 3;
-                else if tail.starts_with(".") && depth < 32 {
-                    // A trailing member dot is a lexical error to the compiler,
-                    // but an essential edit state for member completion.
-                    analysis.tokens.push(.{ .start = token.start, .end = token.start + 1, .kind = 6 });
-                    rest: Language_Analysis;
-                    language_lex(source[token.start + 1..token.end], &rest, depth + 1);
-                    for recovered: rest.tokens.view() {
-                        recovered.start += token.start + 1; recovered.end += token.start + 1;
-                        analysis.tokens.push(recovered);
-                    }
-                    destroy_language(&rest);
+/// The token at a lexical error. Kind 0 means the bytes are skipped without a token.
+// Compares only the prefix: `starts_with` searches the whole string, and the
+// remainder of a file can be long.
+#public language_text_at :: (source: str, at: ssize, text: str) -> bool {
+    return at + text.count <= source.count && source[at..at + text.count] == text;
+}
+
+#public language_invalid_token :: (source: str, start: ssize) -> Language_Token {
+    // Unterminated comments run to the end of the file, as in the compiler.
+    if language_text_at(source, start, "/*") || language_text_at(source, start, "//")
+        return .{ .start = start, .end = source.count, .kind = 4 };
+    quote: ssize = -1;
+    if language_text_at(source, start, "\"") quote = start;
+    else if language_text_at(source, start, "c\"") || language_text_at(source, start, "b\"")
+        quote = start + 1;
+    if quote >= 0 {
+        // Strings span lines. An unterminated one runs to the end of the file;
+        // one with a bad escape still ends at its closing quote.
+        at := quote + 1;
+        while at < source.count && source[at] != #char "\"" {
+            if source[at] == #char "\\" && at + 1 < source.count at += 2;
+            else at += 1;
+        }
+        end := source.count;
+        if at < source.count end = at + 1;
+        return .{ .start = start, .end = end, .kind = 3 };
+    }
+    if language_text_at(source, start, "#char") {
+        // A #char literal never spans lines.
+        at := start + 5;
+        while at < source.count && (source[at] == #char " " || source[at] == #char "\t") at += 1;
+        if at < source.count && source[at] == #char "\"" {
+            at += 1;
+            while at < source.count && source[at] != #char "\"" && source[at] != #char "\n" {
+                if source[at] == #char "\\" && at + 1 < source.count &&
+                   source[at + 1] != #char "\n" at += 2;
+                else at += 1;
+            }
+            if at < source.count && source[at] == #char "\"" at += 1;
+        }
+        return .{ .start = start, .end = at, .kind = 2 };
+    }
+    // A bare `#` stays a directive token so directive completion can replace it.
+    if language_text_at(source, start, "#") return .{ .start = start, .end = start + 1, .kind = 7 };
+    // A trailing member dot is a lexical error to the compiler, but an
+    // essential edit state for member completion.
+    if language_text_at(source, start, ".") return .{ .start = start, .end = start + 1, .kind = 6 };
+    byte := source[start];
+    if byte >= #char "0" && byte <= #char "9"
+        return .{ .start = start, .end = language_number_end(source, start), .kind = 2 };
+    if language_text_at(source, start, "'") {
+        // A malformed quoted operator name ends at a closing quote on its line.
+        at := start + 1;
+        while at < source.count && source[at] != #char "'" && source[at] != #char "\n" at += 1;
+        if at < source.count && source[at] == #char "'"
+            return .{ .start = start, .end = at + 1, .kind = 0 };
+    }
+    return .{ .start = start, .end = language_next(source, start), .kind = 0 };
+}
+
+#public language_lex :: (source: str, analysis: *Language_Analysis) {
+    // libglosso stops at the first lexical error and reports the rest of the
+    // source as one Invalid token. Recover that token and lex again after it,
+    // so a single mistake does not hide every later token.
+    offset: ssize = 0;
+    while true {
+        scanned := glosso_tokens(source[offset..source.count]);
+        resume: ssize = -1;
+        invalid := false;
+        for token: scanned.tokens.view() {
+            start := token.start + offset;
+            end := token.end + offset;
+            kind: s32 = 6;
+            if token.kind == {
+                case "Whitespace", "ByteOrderMark", "Eof"; continue;
+                case "Ident"; kind = 1;
+                case "Int", "Float"; kind = 2;
+                case "Str", "CStr", "BStr", "MlStr"; kind = 3;
+                case "LineComment", "BlockComment"; kind = 4;
+                case "Directive"; kind = 7;
+                case "Invalid";
+                    // Keep the category of an unterminated literal so completion
+                    // stays out of it.
+                    invalid = true;
+                    recovered := language_invalid_token(source, start);
+                    language_add_diagnostic(
+                        analysis, start, recovered.end, "Invalid token reported by libglosso.");
+                    if recovered.kind > 0 analysis.tokens.push(recovered);
+                    if recovered.end < source.count resume = recovered.end;
+                    break;
+                else;
+                    if language_is_keyword(source[start..end]) kind = 5;
+            }
+            // The IDE parser represents dot-prefixed aggregate punctuation as two
+            // tokens; both ranges still come from a single compiler token.
+            text := source[start..end];
+            if #partial text == {
+                case ".{", ".[", ".*", ".&";
+                    analysis.tokens.push(.{ .start = start, .end = start + 1, .kind = 6 });
+                    analysis.tokens.push(.{ .start = start + 1, .end = end, .kind = 6 });
                     continue;
-                } else continue;
-            else;
-                if language_is_keyword(source[token.start..token.end]) kind = 5;
+            }
+            analysis.tokens.push(.{ .start = start, .end = end, .kind = kind });
         }
-        // The IDE parser represents dot-prefixed aggregate punctuation as two
-        // tokens; both ranges still come from a single compiler token.
-        text := source[token.start..token.end];
-        if #partial text == {
-            case ".{", ".[", ".*", ".&";
-                analysis.tokens.push(.{ .start = token.start, .end = token.start + 1, .kind = 6 });
-                analysis.tokens.push(.{ .start = token.start + 1, .end = token.end, .kind = 6 });
-                continue;
-        }
-        analysis.tokens.push(.{ .start = token.start, .end = token.end, .kind = kind });
+        if !scanned.success && !invalid language_add_diagnostic(
+            analysis, offset, source.count, "Invalid token reported by libglosso.");
+        scanned.free();
+        if resume < 0 break;
+        offset = resume;
     }
 }
 
@@ -252,6 +316,7 @@
 
 #public language_match_delimiters :: (source: str, analysis: *Language_Analysis) {
     stack: [..]ssize;
+    defer stack.free();
     scope: ssize = -1;
     for i: 0..analysis.tokens.count {
         analysis.tokens[i].scope = scope;
@@ -278,6 +343,17 @@
             expected := "(";
             if text == "]" expected = "[";
             if text == "}" expected = "{";
+            // An opener left unclosed inside this pair, such as `foo(` before
+            // the `}` of a body, must not keep the pair from matching.
+            depth := stack.count - 1;
+            while depth >= 0 && language_token_text(source, analysis, stack[depth]) != expected
+                depth -= 1;
+            while depth >= 0 && stack.count - 1 > depth {
+                unclosed := array_pop_last(&stack);
+                token := analysis.tokens[unclosed];
+                if language_token_text(source, analysis, unclosed) == "{" scope = token.scope;
+                language_add_diagnostic(analysis, token.start, token.end, "Unclosed delimiter.");
+            }
             if stack.count > 0 &&
                language_token_text(source, analysis, stack[stack.count - 1]) == expected {
                 open := stack[stack.count - 1];

@@ -191,6 +191,23 @@
     return false;
 }
 
+// A delimiter that closes an enclosing construct. An unclosed list stops at
+// it instead of consuming it, so the enclosing block still ends there.
+#public syntax_closer :: (text: str) -> bool {
+    return text == ")" || text == "]" || text == "}" || text == ";";
+}
+
+// The compiler requires a member name, `{`, `[`, `(`, `*` or `&` directly after
+// `.`. Anything else is an incomplete member access, such as `p.` while typing.
+#public syntax_member_follows :: (parser: *const Syntax_Parser, dot: ssize) -> bool {
+    count := parser.file.language.tokens.count;
+    if dot < 0 || dot >= count || parser.at >= count return false;
+    if parser.file.language.tokens[parser.at].start != parser.file.language.tokens[dot].end
+        return false;
+    text := syntax_text(parser);
+    return text != ")" && text != "]" && text != "}" && text != ";" && text != ",";
+}
+
 #public syntax_type_expression :: (parser: *Syntax_Parser, minimum: ssize) -> ssize {
     previous := parser.type_context;
     parser.type_context = true;
@@ -234,6 +251,14 @@
     }
     generic := syntax_take(parser, "$");
     token := parser.at;
+    // Only an identifier can be bound; `$` may end an incomplete buffer.
+    identifier := token < parser.file.language.tokens.count &&
+        (parser.file.language.tokens[token].kind == 1 ||
+         syntax_text(parser, token).starts_with("`"));
+    if generic && !identifier {
+        syntax_error(parser, "Expected a parameter name after '$'.");
+        generic = false;
+    }
     receiver := token;
     if syntax_text(parser, receiver) == "*" {
         receiver = syntax_next(parser, receiver);
@@ -365,7 +390,10 @@
             }
         }
         syntax_child(parser, parent, argument);
-        if parser.at == before syntax_advance(parser);
+        if parser.at == before {
+            if syntax_closer(syntax_text(parser)) break;
+            syntax_advance(parser);
+        }
         if !syntax_take(parser, ",") && !syntax_take(parser, ",,") break;
     }
     syntax_expect(parser, close, "Expected a closing delimiter after arguments.");
@@ -425,7 +453,10 @@
                 if syntax_text(parser, syntax_next(parser, parser.at)) == ":"
                     _ := syntax_parameter(parser, node, false);
                 else syntax_child(parser, node, syntax_expression(parser, 0));
-                if parser.at == before syntax_advance(parser);
+                if parser.at == before {
+                    if syntax_closer(syntax_text(parser)) break;
+                    syntax_advance(parser);
+                }
                 if !syntax_take(parser, ",") break;
             }
             syntax_expect(parser, ")", "Expected ')' after expression or tuple.");
@@ -452,9 +483,12 @@
             syntax_finish(parser, node);
             return node;
         case ".";
+            dot := parser.at;
             node := syntax_node(parser, .Member);
             syntax_advance(parser);
-            if syntax_take(parser, "(") {
+            if !syntax_member_follows(parser, dot) {
+                // An incomplete `.` must not swallow the next token.
+            } else if syntax_take(parser, "(") {
                 parser.file.nodes[node].kind = .Aggregate;
                 syntax_arguments(parser, node, ")");
             } else if syntax_text(parser) == "{" || syntax_text(parser) == "[" {
@@ -512,6 +546,11 @@
     if kind == 7 && text != "#self" && text != "#Self_Type" {
         node := syntax_node(parser, .Unary);
         syntax_advance(parser);
+        // A bare `#` is a directive whose name is still being typed.
+        if text == "#" {
+            syntax_finish(parser, node);
+            return node;
+        }
         if text == "#library" || text == "#asm" || text == "#insert" {
             while syntax_take(parser, ",") {
                 syntax_advance(parser);
@@ -527,8 +566,13 @@
         } else if text == "#code" && syntax_text(parser) == "{" {
             syntax_store(parser, node, .Value, syntax_block(parser));
         } else if text == "#string" {
-            _ := syntax_take(parser, ",");
-            _ := syntax_take(parser, "oneline");
+            // The compiler accepts the `oneline` and `escape` modifiers in either order.
+            while syntax_text(parser) == "," {
+                modifier := syntax_text(parser, syntax_next(parser, parser.at));
+                if modifier != "oneline" && modifier != "escape" break;
+                syntax_advance(parser);
+                syntax_advance(parser);
+            }
             while parser.at < parser.file.language.tokens.count &&
                   parser.file.language.tokens[parser.at].kind == 3 {
                 syntax_child(parser, node, syntax_node(parser, .Literal));
@@ -600,7 +644,9 @@
             node := syntax_node(parser, .Member, token);
             parser.file.nodes[node].left = left;
             parser.file.nodes[node].start = parser.file.nodes[left].start;
-            if syntax_text(parser) == "{" || syntax_text(parser) == "[" {
+            if !syntax_member_follows(parser, token) {
+                // An incomplete `p.` must not swallow the next token.
+            } else if syntax_text(parser) == "{" || syntax_text(parser) == "[" {
                 parser.file.nodes[node].kind = .Aggregate;
                 close := "}";
                 if syntax_take(parser, "[") close = "]";
@@ -613,7 +659,7 @@
             } else {
                 syntax_store(parser, node, .Right, syntax_node(parser, .Identifier));
                 parser.file.nodes[node].token = parser.at;
-                if syntax_text(parser) != "" syntax_advance(parser);
+                syntax_advance(parser);
             }
             syntax_finish(parser, node);
             left = node;
@@ -952,46 +998,75 @@
     parser: *Syntax_Parser, pattern: ssize, subject: ssize,
     constructor: ssize = -1, argument: ssize = -1,
 ) {
-    if pattern < 0 return;
-    expression := parser.file.nodes[pattern];
-    if expression.kind == .Identifier {
-        if syntax_text(parser, expression.token) == "_" return;
-        node := syntax_node(parser, .Pattern_Capture, expression.token);
-        parser.file.nodes[node].left = subject;
-        parser.file.nodes[node].right = constructor;
-        parser.file.nodes[node].argument_index = argument;
-        symbol := syntax_bind(parser, node, expression.token, 13);
-        parser.file.symbols[symbol].value_node = node;
-        parser.file.symbols[symbol].detail = "Pattern capture";
-        parser.file.nodes[pattern].symbol = symbol;
-    } else if expression.kind == .Call {
-        child := expression.first_child;
-        index: ssize = 0;
-        while child >= 0 {
-            next := parser.file.nodes[child].next_sibling;
-            syntax_capture(parser, child, subject, expression.left, index);
-            child = next;
-            index += 1;
+    // Prefix and `@` chains can be arbitrarily long, so walk them in a loop
+    // instead of recursing along them.
+    current := pattern;
+    current_constructor := constructor;
+    current_argument := argument;
+    while current >= 0 {
+        expression := parser.file.nodes[current];
+        if expression.kind == .Unary {
+            text := syntax_text(parser, expression.token);
+            if text == "?" {
+                // `?p` matches a present option; `p` captures from its payload.
+                current_constructor = current;
+                current_argument = 0;
+            } else if text != "*" && text != "&" && text != "#pattern" return;
+            current = expression.left;
+            continue;
         }
-    } else if expression.kind == .Aggregate {
-        child := expression.first_child;
-        index: ssize = 0;
-        while child >= 0 {
-            field := parser.file.nodes[child];
-            if field.kind == .Field syntax_capture(parser, field.value_node, subject, child, index);
-            else syntax_capture(parser, child, subject, expression.left, index);
-            child = field.next_sibling;
-            index += 1;
+        if expression.kind == .Binary && syntax_text(parser, expression.token) == "@" {
+            // `a @ b @ c` nests to the left. Capture its operands from left to
+            // right; only the outermost right operand keeps the constructor.
+            operands: [..]ssize;
+            defer operands.free();
+            left := current;
+            while left >= 0 && parser.file.nodes[left].kind == .Binary &&
+                  syntax_text(parser, parser.file.nodes[left].token) == "@" {
+                operands.push(parser.file.nodes[left].right);
+                left = parser.file.nodes[left].left;
+            }
+            syntax_capture(parser, left, subject);
+            index := operands.count - 1;
+            while index > 0 {
+                syntax_capture(parser, operands[index], subject);
+                index -= 1;
+            }
+            syntax_capture(parser, operands[0], subject, current_constructor, current_argument);
+            return;
         }
-    } else if expression.kind == .Unary {
-        text := syntax_text(parser, expression.token);
-        if text == "*" || text == "&" || text == "#pattern"
-            syntax_capture(parser, expression.left, subject, constructor, argument);
-        // `?p` matches a present option; `p` captures from its payload.
-        else if text == "?" syntax_capture(parser, expression.left, subject, pattern, 0);
-    } else if expression.kind == .Binary && syntax_text(parser, expression.token) == "@" {
-        syntax_capture(parser, expression.left, subject);
-        syntax_capture(parser, expression.right, subject, constructor, argument);
+        if expression.kind == .Identifier {
+            if syntax_text(parser, expression.token) == "_" return;
+            node := syntax_node(parser, .Pattern_Capture, expression.token);
+            parser.file.nodes[node].left = subject;
+            parser.file.nodes[node].right = current_constructor;
+            parser.file.nodes[node].argument_index = current_argument;
+            symbol := syntax_bind(parser, node, expression.token, 13);
+            parser.file.symbols[symbol].value_node = node;
+            parser.file.symbols[symbol].detail = "Pattern capture";
+            parser.file.nodes[current].symbol = symbol;
+        } else if expression.kind == .Call {
+            child := expression.first_child;
+            index: ssize = 0;
+            while child >= 0 {
+                next := parser.file.nodes[child].next_sibling;
+                syntax_capture(parser, child, subject, expression.left, index);
+                child = next;
+                index += 1;
+            }
+        } else if expression.kind == .Aggregate {
+            child := expression.first_child;
+            index: ssize = 0;
+            while child >= 0 {
+                field := parser.file.nodes[child];
+                if field.kind == .Field
+                    syntax_capture(parser, field.value_node, subject, child, index);
+                else syntax_capture(parser, child, subject, expression.left, index);
+                child = field.next_sibling;
+                index += 1;
+            }
+        }
+        return;
     }
 }
 
@@ -1197,6 +1272,7 @@
 #public syntax_multi_declaration :: (parser: *Syntax_Parser) -> ssize {
     group := syntax_node(parser, .Statement);
     names: [..]ssize;
+    defer names.free();
     while syntax_text(parser) != "" {
         names.push(parser.at);
         syntax_advance(parser);

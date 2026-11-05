@@ -57,13 +57,19 @@
         out.write_string("null");
         return;
     }
+    syntax := &workspace.files[file].syntax;
+    token_index := analysis_token_at(workspace, file, offset);
+    // A cursor just after the name reads the facts of the name itself.
+    at := offset;
+    if token_index >= 0 && syntax.language.tokens[token_index].end == offset
+        at = syntax.language.tokens[token_index].start;
     symbol := workspace.files[id.file].syntax.symbols[id.symbol];
     signature: String_Builder;
     defer signature.free();
     if symbol.type_node < 0 && symbol.kind == 13 {
         signature.write_string(symbol.name);
         signature.write_string(": ");
-        fact := workspace_compiler_fact(workspace, file, offset, 2);
+        fact := workspace_compiler_fact(workspace, file, at, 2);
         if fact.type_name.count == 0
             fact = workspace_compiler_fact(workspace, id.file, symbol.selection_start, 1);
         if fact.type_name.count > 0 signature.write_string(fact.type_name);
@@ -78,8 +84,6 @@
         out.write_byte(#char "}");
     }
     out.write_string("],\"range\":");
-    syntax := &workspace.files[file].syntax;
-    token_index := language_token_at(&syntax.language, offset);
     if token_index >= 0 {
         token := syntax.language.tokens[token_index];
         write_range(out, workspace.files[file].source, token.start, token.end);
@@ -121,6 +125,157 @@
     out.write_byte(#char "]");
 }
 
+// Whether `token` follows `.`. Member accesses and `.name` labels resolve in
+// a type, not in the lexical scopes a rename can change.
+#public ide_member_token :: (workspace: *Workspace, file: ssize, token: ssize) -> bool {
+    language := &workspace.files[file].syntax.language;
+    previous := token - 1;
+    while previous >= 0 && language.tokens[previous].kind == 4 previous -= 1;
+    if previous < 0 return false;
+    span := language.tokens[previous];
+    return workspace.files[file].source.substring(span.start, span.end) == ".";
+}
+
+// A token that rename rewrites: bound to `id` and spelled as its name. Uses
+// of an alias stay bound to the alias, but never rewrite another spelling.
+#public ide_renamed_token :: (
+    workspace: *Workspace, file: ssize, token: ssize, id: Symbol_Id,
+) -> bool {
+    if !analysis_same_symbol(workspace.files[file].semantic.bindings[token], id) return false;
+    span := workspace.files[file].syntax.language.tokens[token];
+    return workspace.files[file].source.substring(span.start, span.end) ==
+        workspace.files[id.file].syntax.symbols[id.symbol].name;
+}
+
+// Rename does not edit the standard library: the standard modules that use a
+// declaration are not analysed. Only a workspace opened on the standard library
+// itself edits it; a root such as $HOME that contains the installation does not.
+#public ide_read_only_file :: (workspace: *Workspace, file: ssize) -> bool {
+    path := workspace.files[file].path;
+    if workspace.std_path.count == 0 || path.count == 0 ||
+       !path_lexically_contains(workspace.std_path, path) return false;
+    for root: workspace.roots.view() {
+        if path_lexically_contains(workspace.std_path, root) && path_lexically_contains(root, path)
+            return false;
+    }
+    return true;
+}
+
+// Why `id` cannot be renamed, or "" when it can. Generated files are cache
+// artifacts: their text comes from an `#insert` that rename does not change.
+#public ide_rename_rejection :: (workspace: *Workspace, id: Symbol_Id) -> str {
+    if !ide_valid_symbol(workspace, id) return "A valid declared name is required.";
+    if workspace.files[id.file].generated
+        return "Generated declarations must be renamed in their #insert source.";
+    if ide_read_only_file(workspace, id.file)
+        return "Standard library declarations cannot be renamed.";
+    for file: 0..workspace.files.count {
+        if !workspace.files[file].relevant continue;
+        for token: 0..workspace.files[file].semantic.bindings.count {
+            if !ide_renamed_token(workspace, file, token, id) continue;
+            if workspace.files[file].generated
+                return "Generated code from an #insert uses this name; rename it in the #insert source.";
+            if ide_read_only_file(workspace, file)
+                return "The standard library uses this name.";
+        }
+    }
+    return "";
+}
+
+// Whether `inner` is nested strictly inside `outer`.
+#public ide_scope_inside :: (syntax: *const Parsed_File, inner: ssize, outer: ssize) -> bool {
+    if inner < 0 || inner >= syntax.scopes.count return false;
+    current := syntax.scopes[inner].parent;
+    while current >= 0 && current < syntax.scopes.count {
+        if current == outer return true;
+        current = syntax.scopes[current].parent;
+    }
+    return false;
+}
+
+// Whether a bare `name` at `offset` already resolves: lexically, or to a
+// field opened by `using`.
+#public ide_name_visible :: (workspace: *Workspace, file: ssize, offset: ssize, name: str) -> bool {
+    syntax := &workspace.files[file].syntax;
+    scope := analysis_scope_at(syntax, offset);
+    if analysis_valid(workspace, analysis_lookup(workspace, file, scope, name, offset)) return true;
+    if syntax.usings.count == 0 return false;
+    owner: Type_Id = 0;
+    return analysis_valid(workspace, analysis_using_field(workspace, file, scope, name, offset, &owner));
+}
+
+// Whether `id` would be visible by its new name at `offset`, ignoring
+// declarations that share its current name. `uses` marks files referring to it.
+#public ide_rename_reaches :: (
+    workspace: *Workspace, file: ssize, scope: ssize, offset: ssize, id: Symbol_Id,
+    uses: []const bool,
+) -> bool {
+    renamed := workspace.files[id.file].syntax.symbols[id.symbol];
+    if renamed.kind == 8 {
+        // A field is a bare name only where a `using` opens its structure.
+        if workspace.files[file].syntax.usings.count == 0 return false;
+        owner: Type_Id = 0;
+        return analysis_same_symbol(id, analysis_using_field(workspace, file, scope,
+            renamed.name, offset, &owner));
+    }
+    if renamed.scope > 0 {
+        if id.file != file return false;
+        syntax := &workspace.files[file].syntax;
+        current := scope;
+        crossed := false;
+        while current >= 0 && current < syntax.scopes.count {
+            if current == renamed.scope {
+                if crossed && analysis_in_procedure(syntax, current) &&
+                   !analysis_outer_visible(renamed.kind) return false;
+                return renamed.kind != 13 || analysis_local_ready(syntax, id.symbol, offset);
+            }
+            if analysis_procedure_scope(syntax, current) crossed = true;
+            current = syntax.scopes[current].parent;
+        }
+        return false;
+    }
+    if id.file == file || uses[file] || analysis_same_unit(workspace, id.file, file) return true;
+    for edge: workspace.files[file].imports.view() {
+        if edge.target == id.file return true;
+    }
+    return false;
+}
+
+// Whether renaming `id` would make the bare use `token`, now bound to
+// `bound`, resolve to `id` instead.
+#public ide_rename_captures :: (
+    workspace: *Workspace, file: ssize, token: ssize, id: Symbol_Id, bound: Symbol_Id,
+    uses: []const bool,
+) -> bool {
+    if ide_member_token(workspace, file, token) return false;
+    syntax := &workspace.files[file].syntax;
+    span := syntax.language.tokens[token];
+    if analysis_valid(workspace, bound) && bound.file == file &&
+       syntax.symbols[bound.symbol].token == token return false;
+    scope := analysis_scope_at(syntax, span.start);
+    if !ide_rename_reaches(workspace, file, scope, span.start, id, uses) return false;
+    // A use the server cannot resolve would start naming the declaration.
+    if !analysis_valid(workspace, bound) return true;
+    renamed := workspace.files[id.file].syntax.symbols[id.symbol];
+    renamed_local := id.file == file && renamed.kind != 8 &&
+        analysis_local_scope(syntax, scope, renamed.scope);
+    existing := workspace.files[bound.file].syntax.symbols[bound.symbol];
+    if bound.file == file && existing.kind != 8 &&
+       analysis_local_scope(syntax, scope, existing.scope) {
+        // Locals win over fields and top-level names; an inner local over an outer one.
+        return renamed_local && !ide_scope_inside(syntax, existing.scope, renamed.scope);
+    }
+    if existing.kind == 8
+        return renamed.kind == 8 || analysis_precedes_using(workspace, file, scope, id);
+    if renamed_local return true;
+    if renamed.kind == 8 return !analysis_precedes_using(workspace, file, scope, bound);
+    // Declarations of this file come before imports; otherwise the name is ambiguous.
+    return true;
+}
+
+// Rename must keep every use resolving as before. Existing references must
+// not meet another `name`, and the renamed declaration must not capture an
+// existing use of `name`.
 #public ide_rename_conflicts :: (workspace: *Workspace, id: Symbol_Id, name: str) -> bool {
     if !ide_valid_symbol(workspace, id) return true;
     original := workspace.files[id.file].syntax.symbols[id.symbol];
@@ -128,17 +283,29 @@
     for other: workspace.files[id.file].syntax.symbols.view() {
         if other.name == name && other.scope == original.scope return true;
     }
+    uses: [..]bool;
+    defer uses.free();
+    for file: 0..workspace.files.count uses.push(false);
     for file: 0..workspace.files.count {
         if !workspace.files[file].relevant continue;
         for token: 0..workspace.files[file].semantic.bindings.count {
-            if !analysis_same_symbol(workspace.files[file].semantic.bindings[token], id) continue;
+            if !ide_renamed_token(workspace, file, token, id) continue;
+            uses[file] = true;
+            if ide_member_token(workspace, file, token) continue;
             offset := workspace.files[file].syntax.language.tokens[token].start;
-            visible := analysis_visible_symbols(workspace, file, offset);
-            for candidate: visible.view() {
-                if analysis_same_symbol(candidate, id) continue;
-                if workspace.files[candidate.file].syntax.symbols[candidate.symbol].name == name
-                    return true;
-            }
+            if ide_name_visible(workspace, file, offset, name) return true;
+        }
+    }
+    for file: 0..workspace.files.count {
+        if !workspace.files[file].relevant continue;
+        language := &workspace.files[file].syntax.language;
+        for token: 0..workspace.files[file].semantic.bindings.count {
+            span := language.tokens[token];
+            if span.kind != 1 || span.end - span.start != name.count ||
+               workspace.files[file].source.substring(span.start, span.end) != name continue;
+            bound := workspace.files[file].semantic.bindings[token];
+            if analysis_same_symbol(bound, id) continue;
+            if ide_rename_captures(workspace, file, token, id, bound, uses.view()) return true;
         }
     }
     return false;
@@ -153,10 +320,11 @@
     out.write_string("{\"changes\":{");
     documents: ssize = 0;
     for file: 0..workspace.files.count {
-        if !workspace.files[file].relevant continue;
+        if !workspace.files[file].relevant || workspace.files[file].generated ||
+           ide_read_only_file(workspace, file) continue;
         count: ssize = 0;
         for token: 0..workspace.files[file].semantic.bindings.count {
-            if !analysis_same_symbol(workspace.files[file].semantic.bindings[token], id) continue;
+            if !ide_renamed_token(workspace, file, token, id) continue;
             if count == 0 {
                 if documents > 0 out.write_byte(#char ",");
                 documents += 1;
@@ -176,6 +344,84 @@
     out.write_string("}}");
 }
 
+// The declaration a symbol nests under in an outline: its nearest owner
+// whose range contains it, or -1 at the top level. Owners precede the
+// symbols they own, so the chain ends.
+#public ide_outline_parent :: (syntax: *const Parsed_File, symbol: ssize) -> ssize {
+    declaration := syntax.symbols[symbol];
+    parent := declaration.parent_symbol;
+    while parent >= 0 && parent < symbol {
+        owner := syntax.symbols[parent];
+        if owner.name != "_" && owner.start <= declaration.start && declaration.end <= owner.end
+            return parent;
+        parent = owner.parent_symbol;
+    }
+    return -1;
+}
+
+ide_write_outline_symbol :: (
+    out: *String_Builder, workspace: *Workspace, file: ssize, symbol: ssize,
+    children: []const ssize, siblings: []const ssize,
+) {
+    declaration := workspace.files[file].syntax.symbols[symbol];
+    source := workspace.files[file].source;
+    out.write_string("{\"name\":");
+    write_json_string(out, declaration.name);
+    out.write_string(",\"kind\":");
+    write_json_integer(out, cast(ssize)declaration.kind);
+    out.write_string(",\"detail\":");
+    write_json_string(out, declaration.detail);
+    out.write_string(",\"range\":");
+    write_range(out, source, declaration.start, declaration.end);
+    out.write_string(",\"selectionRange\":");
+    write_range(out, source, declaration.selection_start, declaration.selection_end);
+    child := children[symbol];
+    if child >= 0 {
+        out.write_string(",\"children\":[");
+        while child >= 0 {
+            if child != children[symbol] out.write_byte(#char ",");
+            ide_write_outline_symbol(out, workspace, file, child, children, siblings);
+            child = siblings[child];
+        }
+        out.write_byte(#char "]");
+    }
+    out.write_byte(#char "}");
+}
+
+// Hierarchical document symbols: parameters, locals and nested declarations
+// are children of the declaration around them.
+#public ide_write_outline :: (
+    out: *String_Builder, workspace: *Workspace, file: ssize, count: *ssize,
+) {
+    syntax := &workspace.files[file].syntax;
+    children: [..]ssize;
+    defer children.free();
+    siblings: [..]ssize;
+    defer siblings.free();
+    parents: [..]ssize;
+    defer parents.free();
+    for i: 0..syntax.symbols.count {
+        children.push(-1);
+        siblings.push(-1);
+        parents.push(ide_outline_parent(syntax, i));
+    }
+    // Prepend in reverse so that children stay in source order.
+    i := syntax.symbols.count;
+    while i > 0 {
+        i -= 1;
+        parent := parents[i];
+        if syntax.symbols[i].name == "_" || parent < 0 continue;
+        siblings[i] = children[parent];
+        children[parent] = i;
+    }
+    for symbol: 0..syntax.symbols.count {
+        if syntax.symbols[symbol].name == "_" || parents[symbol] >= 0 continue;
+        if count.* > 0 out.write_byte(#char ",");
+        count.* += 1;
+        ide_write_outline_symbol(out, workspace, file, symbol, children.view(), siblings.view());
+    }
+}
+
 #public ide_write_symbols :: (
     out: *String_Builder,
     workspace: *Workspace,
@@ -183,11 +429,16 @@
     query: str,
     hierarchical: bool,
     count: *ssize,
+    limit: ssize = -1,
 ) {
+    if hierarchical && query.count == 0 {
+        ide_write_outline(out, workspace, file, count);
+        return;
+    }
     for symbol: workspace.files[file].syntax.symbols.view() {
         if symbol.name == "_" continue;
         if query.count > 0 && !symbol.name.contains(query) continue;
-        if count.* >= 500 return;
+        if limit >= 0 && count.* >= limit return;
         if count.* > 0 out.write_byte(#char ",");
         count.* += 1;
         out.write_string("{\"name\":");
@@ -302,16 +553,20 @@
             if after != offset continue;
         }
         if offset < start || offset > end continue;
+        // `#export "Module"` names a module like `#import`; only `#load` takes a file.
         paths := workspace_complete_import(workspace, file, source[start..offset],
-            dependency.load || dependency.exported);
-        defer { for path: paths.paths.view() path.free(); }
+            dependency.load);
+        defer {
+            for path: paths.paths.view() path.free();
+            paths.paths.free();
+        }
         if paths.incomplete out.write_string("{\"isIncomplete\":true,\"items\":[");
         else out.write_string("{\"isIncomplete\":false,\"items\":[");
         count: ssize = 0;
         for path: paths.paths.view() {
             kind: ssize = 9;
             detail := "Glosso module";
-            if dependency.load || dependency.exported || workspace_source_import(source[start..offset]) {
+            if dependency.load || workspace_source_import(source[start..offset]) {
                 kind = 17;
                 detail = "Glosso source file";
             }
@@ -341,6 +596,13 @@
         return true;
     }
     return false;
+}
+
+// Whether `source[at]` is a member-access dot rather than part of `..`,
+// `..=` or `...`.
+#public ide_member_dot :: (source: str, at: ssize) -> bool {
+    if at < 0 || at >= source.count || source[at] != #char "." return false;
+    return at == 0 || source[at - 1] != #char ".";
 }
 
 #public ide_write_completion :: (
@@ -394,7 +656,7 @@
     prefix := source[start..offset];
     dot := start - 1;
     while dot >= 0 && (source[dot] == #char " " || source[dot] == #char "\t") dot -= 1;
-    member := dot >= 0 && source[dot] == #char ".";
+    member := ide_member_dot(source, dot);
     candidates: [..]Symbol_Id;
     defer candidates.free();
     if member _ := candidates.replace(analysis_members_at(workspace, file, offset));
@@ -609,6 +871,40 @@
     for 0..depth out.write_byte(#char "}");
 }
 
+// The `(` that opens a call's arguments, or -1.
+#public ide_call_open :: (syntax: *const Parsed_File, call: ssize) -> ssize {
+    callee := syntax.nodes[call].left;
+    if callee < 0 return -1;
+    end := syntax.nodes[callee].end;
+    token := language_token_at(&syntax.language, end);
+    if token < 0 {
+        token = 0;
+        while token < syntax.language.tokens.count && syntax.language.tokens[token].start < end
+            token += 1;
+    }
+    if token >= syntax.language.tokens.count return -1;
+    span := syntax.language.tokens[token];
+    if syntax.source.substring(span.start, span.end) != "(" return -1;
+    return token;
+}
+
+// Whether `offset` is between a call's parentheses. An unclosed call extends
+// over the whitespace after it, such as at the end of the file while typing.
+#public ide_inside_arguments :: (
+    syntax: *const Parsed_File, source: str, call: ssize, offset: ssize,
+) -> bool {
+    open := ide_call_open(syntax, call);
+    if open < 0 return false;
+    opening := syntax.language.tokens[open];
+    if offset < opening.end return false;
+    if opening.matching > open return offset <= syntax.language.tokens[opening.matching].start;
+    end := syntax.nodes[call].end;
+    while end < offset && end < source.count && (source[end] == #char " " ||
+          source[end] == #char "\t" || source[end] == #char "\n" || source[end] == #char "\r")
+        end += 1;
+    return offset <= end;
+}
+
 #public ide_write_signature_help :: (
     out: *String_Builder,
     workspace: *Workspace,
@@ -616,10 +912,12 @@
     offset: ssize,
 ) {
     syntax := &workspace.files[file].syntax;
+    source := workspace.files[file].source;
     call: ssize = -1;
     for i: 0..syntax.nodes.count {
         node := syntax.nodes[i];
-        if node.kind != .Call || node.start > offset || node.end < offset continue;
+        if node.kind != .Call || node.left < 0 || node.start > offset continue;
+        if !ide_inside_arguments(syntax, source, i, offset) continue;
         if call < 0 || node.start >= syntax.nodes[call].start call = i;
     }
     if call < 0 {
@@ -627,10 +925,6 @@
         return;
     }
     callee := syntax.nodes[call].left;
-    if callee < 0 {
-        out.write_string("null");
-        return;
-    }
     at := syntax.nodes[callee].end - 1;
     id := analysis_symbol_at(workspace, file, at);
     if !ide_valid_symbol(workspace, id) {
@@ -646,13 +940,7 @@
     procedure := symbol.value_node;
     if procedure < 0 || declaration.nodes[procedure].kind != .Procedure procedure = symbol.node;
     active: ssize = 0;
-    token := language_token_at(&syntax.language, syntax.nodes[callee].end);
-    if token < 0 {
-        token = 0;
-        while token < syntax.language.tokens.count && syntax.language.tokens[token].start <
-            syntax.nodes[callee].end token += 1;
-    }
-    if token < syntax.language.tokens.count token += 1;
+    token := ide_call_open(syntax, call) + 1;
     while token < syntax.language.tokens.count && syntax.language.tokens[token].start < offset {
         item := syntax.language.tokens[token];
         text := workspace.files[file].source[item.start..item.end];
@@ -718,6 +1006,44 @@
     return previous[right.count];
 }
 
+// Whether a document lives only in the editor. An `untitled:` buffer has an
+// overlay path in the temporary directory, which no import may name.
+#public ide_path_less :: (workspace: *Workspace, file: ssize) -> bool {
+    return !workspace.files[file].uri.starts_with("file:");
+}
+
+// How `file` imports `target`: by module name for the standard library and
+// import paths, otherwise by a path relative to `file`.
+#public ide_import_name :: (workspace: *Workspace, file: ssize, target: ssize) -> ?str {
+    if ide_path_less(workspace, target) return null;
+    path := workspace.files[target].path;
+    for i: 0..1 + workspace.import_paths.count {
+        root := workspace_module_root(workspace, i);
+        if root.count == 0 || !path_lexically_contains(root, path) continue;
+        // Only a module's entry file is importable by name; files it loads are not.
+        if path_lexically_relative(path, root) == {
+            case .Err; return null;
+            case .Ok(relative);
+                defer relative.free();
+                name: str = relative;
+                if name.ends_with("/module.glo") name = name.substring(0, name.count - 11);
+                else if name.ends_with(".glo") name = name.substring(0, name.count - 4);
+                else return null;
+                found, conflict := workspace_find_module(workspace, name);
+                defer found.free();
+                if conflict || found != path return null;
+                return ?name.clone();
+        }
+    }
+    // A relative import from an untitled buffer would resolve in the temporary directory.
+    if ide_path_less(workspace, file) return null;
+    base := path_dirname(workspace.files[file].path);
+    if path_lexically_relative(path, base) == {
+        case .Ok(relative); return ?relative;
+        case .Err; return null;
+    }
+}
+
 #public ide_write_code_actions :: (
     out: *String_Builder,
     workspace: *Workspace,
@@ -739,7 +1065,7 @@
         misspelled := source[span.start..span.end];
         visible: [..]Symbol_Id;
         defer visible.free();
-        if span.start > 0 && source[span.start - 1] == #char "."
+        if ide_member_dot(source, span.start - 1)
             _ := visible.replace(analysis_members_at(workspace, file, span.start));
         else _ := visible.replace(analysis_visible_symbols(workspace, file, span.start));
         for candidate: visible.view() {
@@ -764,34 +1090,35 @@
         }
         for target: 0..workspace.files.count {
             if target == file || !workspace.files[target].relevant continue;
+            // A generated file is a cache artifact: import the file whose #insert made it.
+            owner := target;
+            if workspace.files[target].generated owner = workspace.files[target].generated_origin;
+            if owner < 0 || owner == file || workspace.files[owner].generated continue;
             imported := false;
             for edge: workspace.files[file].imports.view() {
-                if edge.target == target imported = true;
+                if edge.target == owner imported = true;
             }
             if imported continue;
             for symbol: workspace.files[target].syntax.symbols.view() {
                 if symbol.scope != 0 || !symbol.is_public || symbol.name != misspelled continue;
-                base := path_dirname(workspace.files[file].path);
-                if path_lexically_relative(workspace.files[target].path, base) == {
-                    case .Err;
-                    case .Ok(path);
-                        defer path.free();
-                        insertion: String_Builder;
-                        defer insertion.free();
-                        insertion.write_string("#import ");
-                        write_json_string(&insertion, path);
-                        insertion.write_string(";\n");
-                        if count > 0 out.write_byte(#char ",");
-                        count += 1;
-                        out.write_string("{\"kind\":\"quickfix\",\"title\":");
-                        write_json_string(out, tprint("Import '{}' from '{}'", misspelled, path));
-                        out.write_string(",\"edit\":{\"changes\":{");
-                        write_json_string(out, workspace.files[file].uri);
-                        out.write_string(":[{\"range\":");
-                        write_range(out, source, 0, 0);
-                        out.write_string(",\"newText\":");
-                        write_json_string(out, insertion.to_string());
-                        out.write_string("}]}}}");
+                if #pattern ?path = ide_import_name(workspace, file, owner) {
+                    defer path.free();
+                    insertion: String_Builder;
+                    defer insertion.free();
+                    insertion.write_string("#import ");
+                    write_json_string(&insertion, path);
+                    insertion.write_string(";\n");
+                    if count > 0 out.write_byte(#char ",");
+                    count += 1;
+                    out.write_string("{\"kind\":\"quickfix\",\"title\":");
+                    write_json_string(out, tprint("Import '{}' from '{}'", misspelled, path));
+                    out.write_string(",\"edit\":{\"changes\":{");
+                    write_json_string(out, workspace.files[file].uri);
+                    out.write_string(":[{\"range\":");
+                    write_range(out, source, 0, 0);
+                    out.write_string(",\"newText\":");
+                    write_json_string(out, insertion.to_string());
+                    out.write_string("}]}}}");
                 }
             }
         }

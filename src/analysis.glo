@@ -147,12 +147,15 @@
     if procedure <= 0 return .{};
     owner := workspace.types[procedure].symbol;
     if !analysis_valid(workspace, owner) return .{};
-    scope := workspace.files[owner.file].syntax.symbols[owner.symbol].body_scope;
+    syntax := &workspace.files[owner.file].syntax;
+    symbols := &workspace.files[owner.file].semantic.index;
+    scope := syntax.symbols[owner.symbol].body_scope;
     at: ssize = 0;
-    for i: 0..workspace.files[owner.file].syntax.symbols.count {
-        parameter := workspace.files[owner.file].syntax.symbols[i];
+    for position: 0..symbol_index_count(symbols, syntax, scope) {
+        i := symbol_index_at(symbols, syntax, scope, position);
+        parameter := syntax.symbols[i];
         if parameter.scope != scope || parameter.node < 0 ||
-           workspace.files[owner.file].syntax.nodes[parameter.node].kind != .Parameter continue;
+           syntax.nodes[parameter.node].kind != .Parameter continue;
         if at == index return .{ .file = owner.file, .symbol = i };
         at += 1;
     }
@@ -281,9 +284,10 @@
             if !seen pending.push(generated);
         }
         syntax := &workspace.files[current].syntax;
-        for i: 0..syntax.symbols.count {
-            symbol := syntax.symbols[i];
-            if symbol.name != name continue;
+        symbols := &workspace.files[current].semantic.index;
+        i := symbol_index_named(symbols, syntax, name, -1);
+        while i >= 0 {
+            defer i = symbol_index_named(symbols, syntax, name, i);
             owner := analysis_export_owner(syntax, i);
             if owner < 0 continue;
             if analysis_inherent_node(workspace, current, i) >= 0 continue;
@@ -306,33 +310,106 @@
     return .{};
 }
 
+// Whether `scope` is inside a procedure body or parameter list.
+#public analysis_in_procedure :: (syntax: *const Parsed_File, scope: ssize) -> bool {
+    current := scope;
+    while current >= 0 && current < syntax.scopes.count {
+        if analysis_procedure_scope(syntax, current) return true;
+        current = syntax.scopes[current].parent;
+    }
+    return false;
+}
+
+// A local procedure or lambda is not a closure. It sees the procedures and
+// types declared in the blocks around it, but not the enclosing procedure's
+// variables, parameters or value constants.
+#public analysis_outer_visible :: (kind: s32) -> bool {
+    return kind == 12 || kind == 6 || kind == 23 || kind == 10 || kind == 11;
+}
+
+// Whether a local declared in a block is visible at `offset`. It is visible
+// after its initializer, so `x := x.count` reads an outer `x`.
+#public analysis_local_ready :: (syntax: *const Parsed_File, symbol: ssize, offset: ssize) -> bool {
+    declaration := syntax.symbols[symbol];
+    if offset == declaration.selection_start return true;
+    if declaration.selection_start > offset return false;
+    value := declaration.value_node;
+    if value >= 0 && value < syntax.nodes.count && syntax.nodes[value].end > declaration.selection_start &&
+       offset < syntax.nodes[value].end return false;
+    return true;
+}
+
+// The innermost scope whose range contains `offset`.
+#public analysis_scope_at :: (syntax: *const Parsed_File, offset: ssize) -> ssize {
+    scope: ssize = 0;
+    for i: 0..syntax.scopes.count {
+        candidate := syntax.scopes[i];
+        if offset >= candidate.start && offset <= candidate.end scope = i;
+    }
+    return scope;
+}
+
+// The first operation named `name` of a typeclass declared in `scope`, or -1.
+// Typeclass operations share their owner's enclosing namespace.
+#public analysis_typeclass_operation :: (
+    syntax: *const Parsed_File, symbols: *const Symbol_Index, scope: ssize, name: str,
+) -> ssize {
+    if !symbol_index_ready(symbols, syntax) {
+        for i: 0..syntax.symbols.count {
+            if syntax.symbols[i].name != name continue;
+            owner := analysis_typeclass_owner(syntax, i);
+            if owner >= 0 && syntax.symbols[owner].scope == scope return i;
+        }
+        return -1;
+    }
+    found: ssize = -1;
+    for owner: symbols.typeclasses.view() {
+        if syntax.symbols[owner].scope != scope || syntax.symbols[owner].body_scope < 0 continue;
+        i := symbol_index_scoped(symbols, syntax, syntax.symbols[owner].body_scope, name, -1);
+        while i >= 0 {
+            if analysis_typeclass_owner(syntax, i) == owner {
+                if found < 0 || i < found found = i;
+                break;
+            }
+            i = symbol_index_scoped(symbols, syntax, syntax.symbols[owner].body_scope, name, i);
+        }
+    }
+    return found;
+}
+
 #public analysis_lookup :: (
     workspace: *const Workspace, file: ssize, scope: ssize, name: str, offset: ssize,
 ) -> Symbol_Id {
     if name == "_" return .{};
     syntax := &workspace.files[file].syntax;
+    symbols := &workspace.files[file].semantic.index;
     current := scope;
+    crossed := false;
     while current >= 0 && current < syntax.scopes.count {
+        // A scope inside a procedure is reached only from within it, so any
+        // inherent block around its declarations also contains `offset`.
+        local := analysis_in_procedure(syntax, current);
+        hidden := crossed && local;
         best: ssize = -1;
-        for i: 0..syntax.symbols.count {
+        i := symbol_index_scoped(symbols, syntax, current, name, -1);
+        while i >= 0 {
+            defer i = symbol_index_scoped(symbols, syntax, current, name, i);
             symbol := syntax.symbols[i];
-            if symbol.scope != current || symbol.name != name continue;
-            inherent := analysis_inherent_node(workspace, file, i);
+            if hidden && !analysis_outer_visible(symbol.kind) continue;
+            inherent: ssize = -1;
+            if !local inherent = analysis_inherent_node(workspace, file, i);
             if inherent >= 0 {
                 owner := syntax.nodes[inherent];
                 if offset < owner.start || offset > owner.end continue;
             }
-            if symbol.kind == 13 && current > 0 && symbol.selection_start > offset continue;
+            if symbol.kind == 13 && current > 0 && !analysis_local_ready(syntax, i, offset) continue;
             if offset < symbol.visible_from && offset != symbol.selection_start continue;
             if best < 0 || symbol.selection_start > syntax.symbols[best].selection_start best = i;
         }
         if best >= 0 return .{ .file = file, .symbol = best };
-        for i: 0..syntax.symbols.count {
-            if syntax.symbols[i].name != name continue;
-            owner := analysis_typeclass_owner(syntax, i);
-            if owner >= 0 && syntax.symbols[owner].scope == current
-                return .{ .file = file, .symbol = i };
-        }
+        operation := analysis_typeclass_operation(syntax, symbols, current, name);
+        if operation >= 0 return .{ .file = file, .symbol = operation };
+        if analysis_procedure_scope(syntax, current) crossed = true;
         current = syntax.scopes[current].parent;
     }
     for binding: workspace.files[file].compiler_bindings.view() {
@@ -452,9 +529,22 @@
 #public analysis_inherent_node :: (
     workspace: *const Workspace, file: ssize, symbol: ssize,
 ) -> ssize {
-    declaration := workspace.files[file].syntax.symbols[symbol];
-    for i: 0..workspace.files[file].syntax.nodes.count {
-        node := workspace.files[file].syntax.nodes[i];
+    syntax := &workspace.files[file].syntax;
+    declaration := syntax.symbols[symbol];
+    // Outside procedures, a declaration's ancestors include any inherent block
+    // around it. Following them avoids scanning every node per symbol.
+    if !analysis_in_procedure(syntax, declaration.scope) {
+        node := declaration.node;
+        steps: ssize = 0;
+        while node >= 0 && node < syntax.nodes.count && steps < syntax.nodes.count {
+            if syntax.nodes[node].kind == .Inherent return node;
+            node = syntax.nodes[node].parent;
+            steps += 1;
+        }
+        return -1;
+    }
+    for i: 0..syntax.nodes.count {
+        node := syntax.nodes[i];
         if node.kind == .Inherent && declaration.start >= node.start && declaration.end <= node.end
             return i;
     }
@@ -475,8 +565,10 @@
 ) -> Type_Id {
     current := scope;
     syntax := &workspace.files[file].syntax;
+    symbols := &workspace.files[file].semantic.index;
     while current >= 0 && current < syntax.scopes.count {
-        for owner: 0..syntax.symbols.count {
+        for position: 0..symbol_index_count(symbols, syntax, current, true) {
+            owner := symbol_index_at(symbols, syntax, current, position, true);
             symbol := syntax.symbols[owner];
             if symbol.body_scope != current continue;
             if symbol.kind == 23 || symbol.kind == 10 || symbol.kind == 11
@@ -572,6 +664,18 @@
     return workspace.types.count - 1;
 }
 
+// The first token that starts at or after `offset`.
+#public analysis_first_token :: (language: *const Language_Analysis, offset: ssize) -> ssize {
+    low: ssize = 0;
+    high := language.tokens.count;
+    while low < high {
+        middle := low + (high - low) / 2;
+        if language.tokens[middle].start < offset low = middle + 1;
+        else high = middle;
+    }
+    return low;
+}
+
 #public analysis_parameter_names :: (
     workspace: *const Workspace, owner: Symbol_Id,
 ) -> [..]str {
@@ -587,16 +691,38 @@
         head_start = head.start;
         head_end = head.end;
     }
-    for i: 0..syntax.language.tokens.count - 1 {
-        token := syntax.language.tokens[i];
-        if (token.start < declaration.start || token.end > declaration.end) &&
-           (token.start < head_start || token.end > head_end) continue;
-        if syntax.source.substring(token.start, token.end) != "$" continue;
-        next := syntax.language.tokens[i + 1];
-        name := syntax.source.substring(next.start, next.end);
-        exists := false;
-        for existing: names.view() if existing == name exists = true;
-        if !exists names.push(name);
+    // Visit only the tokens of the declaration and of the inherent head, in
+    // source order: the names pair with type arguments by position.
+    first_start := declaration.start;
+    first_end := declaration.end;
+    second_start := head_start;
+    second_end := head_end;
+    if head_start >= 0 && head_start < declaration.start {
+        first_start = head_start;
+        first_end = head_end;
+        second_start = declaration.start;
+        second_end = declaration.end;
+    }
+    for range: 0..2 {
+        start := first_start;
+        end := first_end;
+        if range == 1 {
+            if second_start < 0 break;
+            start = second_start;
+            end = second_end;
+        }
+        i := analysis_first_token(&syntax.language, start);
+        while i < syntax.language.tokens.count - 1 && syntax.language.tokens[i].end <= end {
+            defer i += 1;
+            token := syntax.language.tokens[i];
+            if range == 1 && token.start >= first_start && token.end <= first_end continue;
+            if syntax.source.substring(token.start, token.end) != "$" continue;
+            next := syntax.language.tokens[i + 1];
+            name := syntax.source.substring(next.start, next.end);
+            exists := false;
+            for existing: names.view() if existing == name exists = true;
+            if !exists names.push(name);
+        }
     }
     return names;
 }
@@ -666,10 +792,12 @@
         return analysis_exported(workspace, value.symbol.file, name, true, 0);
     if !analysis_valid(workspace, value.symbol) return .{};
     syntax := &workspace.files[value.symbol.file].syntax;
+    symbols := &workspace.files[value.symbol.file].semantic.index;
     owner := syntax.symbols[value.symbol.symbol];
-    for i: 0..syntax.symbols.count {
+    i := symbol_index_named(symbols, syntax, name, -1);
+    while i >= 0 {
+        defer i = symbol_index_named(symbols, syntax, name, i);
         member := syntax.symbols[i];
-        if member.name != name continue;
         if member.parent_symbol != value.symbol.symbol && member.scope != owner.body_scope continue;
         if value.symbol.file != from_file && (!member.is_public ||
             (member.is_unit && !analysis_same_unit(workspace, value.symbol.file, from_file)))
@@ -923,10 +1051,13 @@
     declaration := workspace.files[original.file].syntax.symbols[original.symbol];
     best := initial;
     best_score: ssize = -100000;
-    for i: 0..workspace.files[original.file].syntax.symbols.count {
+    syntax := &workspace.files[original.file].syntax;
+    symbols := &workspace.files[original.file].semantic.index;
+    i := symbol_index_scoped(symbols, syntax, declaration.scope, declaration.name, -1);
+    while i >= 0 {
+        defer i = symbol_index_scoped(symbols, syntax, declaration.scope, declaration.name, i);
         candidate := workspace.files[original.file].syntax.symbols[i];
-        if candidate.kind != 12 || candidate.scope != declaration.scope ||
-           candidate.name != declaration.name continue;
+        if candidate.kind != 12 continue;
         id: Symbol_Id = .{ .file = original.file, .symbol = i };
         type_id := analysis_type(workspace, id);
         if type_id <= 0 continue;
@@ -969,7 +1100,11 @@
         if score > best_score { best_score = score; best = type_id; }
     }
     selected := workspace.types[best].symbol;
-    analysis_bind(workspace, file, call.left, selected);
+    // Calling through an alias selects the target's overload, but the callee
+    // token still names the alias.
+    if analysis_valid(workspace, selected) && analysis_text(workspace, file, call.left) ==
+       workspace.files[selected.file].syntax.symbols[selected.symbol].name
+        analysis_bind(workspace, file, call.left, selected);
     workspace.files[file].semantic.node_types[call.left] = best;
     return best;
 }
@@ -990,6 +1125,46 @@
     return false;
 }
 
+// Typing recurses once per nesting level, and the main thread's stack must
+// survive any valid program. Long left-nested chains are typed bottom-up;
+// other deep nesting is left unknown past this budget.
+ANALYSIS_DEPTH_LIMIT :: 192;
+ANALYSIS_SPINE_LIMIT :: 32;
+#thread_local analysis_depth: ssize;
+
+// Nodes typed through their left operand: `a + b`, `a.b`, `f(x)` and `a[i]`.
+#public analysis_left_spine :: (kind: Syntax_Kind) -> bool {
+    return kind == .Binary || kind == .Member || kind == .Call || kind == .Index;
+}
+
+// Type the untyped part of a long left spine, deepest operand first, so
+// each step finds its left operand cached.
+analysis_type_spine :: (workspace: *Workspace, file: ssize, node: ssize) {
+    syntax := &workspace.files[file].syntax;
+    length: ssize = 0;
+    current := syntax.nodes[node].left;
+    while current >= 0 && length <= ANALYSIS_SPINE_LIMIT &&
+          workspace.files[file].semantic.node_types[current] == -1 &&
+          analysis_left_spine(syntax.nodes[current].kind) {
+        length += 1;
+        current = syntax.nodes[current].left;
+    }
+    if length <= ANALYSIS_SPINE_LIMIT return;
+    spine: [..]ssize;
+    defer spine.free();
+    current = syntax.nodes[node].left;
+    while current >= 0 && workspace.files[file].semantic.node_types[current] == -1 &&
+          analysis_left_spine(syntax.nodes[current].kind) {
+        spine.push(current);
+        current = syntax.nodes[current].left;
+    }
+    index := spine.count;
+    while index > 0 {
+        index -= 1;
+        _ := analysis_expression_type(workspace, file, spine[index]);
+    }
+}
+
 #public analysis_expression_type :: (
     workspace: *Workspace, file: ssize, node: ssize,
 ) -> Type_Id {
@@ -998,6 +1173,12 @@
     cached := workspace.files[file].semantic.node_types[node];
     if cached >= 0 return cached;
     if cached == -2 return 0;
+    // Uncached, so a shallower walk can still type this node.
+    if analysis_depth >= ANALYSIS_DEPTH_LIMIT return 0;
+    analysis_depth += 1;
+    defer analysis_depth -= 1;
+    if analysis_left_spine(workspace.files[file].syntax.nodes[node].kind)
+        analysis_type_spine(workspace, file, node);
     workspace.files[file].semantic.node_types[node] = -2;
     expression := workspace.files[file].syntax.nodes[node];
     result: Type_Id = 0;
@@ -1168,9 +1349,12 @@
             result = analysis_expression_type(workspace, file, child);
             if expression.kind == .Return {
                 scope := expression.scope;
+                syntax := &workspace.files[file].syntax;
+                symbols := &workspace.files[file].semantic.index;
                 while scope >= 0 {
                     found := false;
-                    for i: 0..workspace.files[file].syntax.symbols.count {
+                    for position: 0..symbol_index_count(symbols, syntax, scope, true) {
+                        i := symbol_index_at(symbols, syntax, scope, position, true);
                         owner := workspace.files[file].syntax.symbols[i];
                         if owner.kind != 12 || owner.body_scope != scope continue;
                         procedure := analysis_type(workspace, .{ .file = file, .symbol = i });
@@ -1258,7 +1442,10 @@
             workspace.types.push(value);
             result = workspace.types.count - 1;
             workspace.files[id.file].semantic.symbol_types[id.symbol] = result;
-            for index: 0..workspace.files[id.file].syntax.symbols.count {
+            syntax := &workspace.files[id.file].syntax;
+            symbols := &workspace.files[id.file].semantic.index;
+            for position: 0..symbol_index_count(symbols, syntax, declaration.body_scope) {
+                index := symbol_index_at(symbols, syntax, declaration.body_scope, position);
                 parameter := workspace.files[id.file].syntax.symbols[index];
                 if parameter.scope != declaration.body_scope || parameter.node < 0 continue;
                 if workspace.files[id.file].syntax.nodes[parameter.node].kind != .Parameter
@@ -1306,10 +1493,7 @@
 }
 
 #public analysis_clear_file :: (semantics: *File_Semantics) {
-    semantics.bindings.free();
-    semantics.symbol_types.free();
-    semantics.node_types.free();
-    semantics.diagnostics.free();
+    file_semantics_free(semantics);
 }
 
 #public analysis_initialize_file :: (workspace: *Workspace, file: ssize) {
@@ -1326,6 +1510,7 @@
         token := syntax.symbols[i].token;
         if token >= 0 semantics.bindings[token] = .{ .file = file, .symbol = i };
     }
+    symbol_index_build(&semantics.index, syntax);
 }
 
 #public analysis_numeric :: (name: str) -> bool {
@@ -1425,13 +1610,15 @@
 #public analysis_diagnostics :: (workspace: *Workspace, file: ssize) {
     syntax := &workspace.files[file].syntax;
     if !workspace.files[file].open return;
+    symbols := &workspace.files[file].semantic.index;
     for i: 0..syntax.symbols.count {
         declaration := syntax.symbols[i];
         if declaration.name == "_" || declaration.kind == 12 || declaration.kind == 6 continue;
-        for j: 0..i {
+        j := symbol_index_scoped(symbols, syntax, declaration.scope, declaration.name, -1);
+        while j >= 0 && j < i {
+            defer j = symbol_index_scoped(symbols, syntax, declaration.scope, declaration.name, j);
             other := syntax.symbols[j];
-            if other.scope == declaration.scope && other.name == declaration.name &&
-               other.kind != 12 && other.kind != 6 {
+            if other.kind != 12 && other.kind != 6 {
                 workspace.files[file].semantic.diagnostics.push(.{
                     .start = declaration.selection_start, .end = declaration.selection_end,
                     .message = "Duplicate declaration in the same scope.",
@@ -1605,7 +1792,12 @@ analysis_prepare :: (workspace: *Workspace) {
         token := language_token_at(&workspace.files[file].syntax.language, fact.start);
         if token >= 0 && token < workspace.files[file].semantic.bindings.count {
             workspace.files[file].compiler_facts[i].declaration = workspace.files[file].semantic.bindings[token];
-            workspace.files[file].semantic.bindings[token] = fact.definition;
+            // The compiler resolves `alias(1)` to the alias's target. The token
+            // still names the alias, so references and rename keep that binding.
+            span := workspace.files[file].syntax.language.tokens[token];
+            definition := workspace.files[fact.definition.file].syntax.symbols[fact.definition.symbol];
+            if workspace.files[file].source.substring(span.start, span.end) == definition.name
+                workspace.files[file].semantic.bindings[token] = fact.definition;
         }
     }
     workspace.files[file].semantic.revision = workspace.generation;
@@ -1619,12 +1811,28 @@ analysis_prepare :: (workspace: *Workspace) {
     }
 }
 
+// The token a navigation request names: the one at `offset`, or else the
+// bound token ending there, as with a cursor just after a name.
+#public analysis_token_at :: (workspace: *Workspace, file: ssize, offset: ssize) -> ssize {
+    analyze_document(workspace, file);
+    if file < 0 || file >= workspace.files.count return -1;
+    language := &workspace.files[file].syntax.language;
+    bindings := workspace.files[file].semantic.bindings.view();
+    token := language_token_at(language, offset);
+    if token >= 0 && token < bindings.count && bindings[token].symbol >= 0 return token;
+    if offset > 0 {
+        previous := language_token_at(language, offset - 1);
+        if previous >= 0 && previous != token && previous < bindings.count &&
+           language.tokens[previous].end == offset && bindings[previous].symbol >= 0
+            return previous;
+    }
+    return token;
+}
+
 #public analysis_symbol_at :: (
     workspace: *Workspace, file: ssize, offset: ssize,
 ) -> Symbol_Id {
-    analyze_document(workspace, file);
-    if file < 0 || file >= workspace.files.count return .{};
-    token := language_token_at(&workspace.files[file].syntax.language, offset);
+    token := analysis_token_at(workspace, file, offset);
     if token < 0 || token >= workspace.files[file].semantic.bindings.count return .{};
     return workspace.files[file].semantic.bindings[token];
 }
@@ -1682,23 +1890,26 @@ analysis_prepare :: (workspace: *Workspace) {
     result: [..]Symbol_Id;
     if file < 0 || file >= workspace.files.count return result;
     syntax := &workspace.files[file].syntax;
-    scope: ssize = 0;
-    for i: 0..syntax.scopes.count {
-        candidate := syntax.scopes[i];
-        if offset >= candidate.start && offset <= candidate.end scope = i;
-    }
+    scope := analysis_scope_at(syntax, offset);
     current := scope;
+    crossed := false;
+    symbols := &workspace.files[file].semantic.index;
     while current >= 0 {
-        for i: 0..syntax.symbols.count {
+        local := analysis_in_procedure(syntax, current);
+        hidden := crossed && local;
+        for position: 0..symbol_index_count(symbols, syntax, current) {
+            i := symbol_index_at(symbols, syntax, current, position);
+            if syntax.symbols[i].scope != current continue;
             declaration := syntax.symbols[i];
             if declaration.name == "_" continue;
-            if declaration.scope != current continue;
-            inherent := analysis_inherent_node(workspace, file, i);
+            if hidden && !analysis_outer_visible(declaration.kind) continue;
+            inherent: ssize = -1;
+            if !local inherent = analysis_inherent_node(workspace, file, i);
             if inherent >= 0 {
                 owner := syntax.nodes[inherent];
                 if offset < owner.start || offset > owner.end continue;
             }
-            if declaration.kind == 13 && current > 0 && declaration.selection_start > offset
+            if declaration.kind == 13 && current > 0 && !analysis_local_ready(syntax, i, offset)
                 continue;
             if offset < declaration.visible_from && offset != declaration.selection_start continue;
             shadowed := false;
@@ -1719,8 +1930,10 @@ analysis_prepare :: (workspace: *Workspace) {
             if !shadowed analysis_push_unique(&result, .{ .file = file, .symbol = i });
         }
         // Locals shadow the fields `using` brings in; those shadow the rest.
-        if analysis_procedure_scope(syntax, current)
-            analysis_push_using_fields(workspace, file, scope, offset, &result);
+        if analysis_procedure_scope(syntax, current) {
+            if !crossed analysis_push_using_fields(workspace, file, scope, offset, &result);
+            crossed = true;
+        }
         current = syntax.scopes[current].parent;
     }
     for binding: workspace.files[file].compiler_bindings.view() {

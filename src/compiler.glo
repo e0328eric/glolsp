@@ -3,8 +3,12 @@
 #import "workspace.glo";
 #import "model.glo";
 #import "protocol.glo";
+#import "positions.glo";
 #import "String_Builder";
 #import "Serialization/Core";
+#import "Container/Hash";
+#import "Container/HashSet";
+#import "Container/HashMap";
 #import "Strings/Utf8";
 #import "Memory/Ownership";
 #import "Typeclass";
@@ -51,28 +55,53 @@ Compiler_Result ::: instance Freeable {
     }
 }
 
-compiler_position :: (out: *String_Builder, position: ?*Json) {
+// libglosso breaks lines only at LF. LSP also breaks them at a lone CR, so
+// such sources are positioned from the byte offset instead.
+compiler_position :: (out: *String_Builder, position: ?*Json, source: str, lone_cr: bool) {
+    byte := json_integer(json_field(position, "byte"), -1);
+    if lone_cr && byte >= 0 && byte <= source.count {
+        write_position(out, position_at(source, byte));
+        return;
+    }
     out.write_string("{\"line\":");
     write_json_integer(out, json_integer(json_field(position, "line"), 0));
     out.write_string(",\"character\":");
     write_json_integer(out, json_integer(json_field(position, "character"), 0));
     out.write_byte(125);
 }
-compiler_range :: (out: *String_Builder, range: ?*Json) {
-    out.write_string("{\"start\":"); compiler_position(out, json_field(range, "start"));
-    out.write_string(",\"end\":"); compiler_position(out, json_field(range, "end"));
+compiler_range :: (out: *String_Builder, range: ?*Json, source: str = "", lone_cr: bool = false) {
+    out.write_string("{\"start\":");
+    compiler_position(out, json_field(range, "start"), source, lone_cr);
+    out.write_string(",\"end\":");
+    compiler_position(out, json_field(range, "end"), source, lone_cr);
     out.write_byte(125);
+}
+compiler_lone_cr :: (source: str) -> bool {
+    for at: 0..source.count {
+        if source[at] == #char "\r" && (at + 1 >= source.count || source[at + 1] != #char "\n")
+            return true;
+    }
+    return false;
 }
 compiler_failure :: (out: *String_Builder, message: str) {
     out.write_string("[{\"range\":"); compiler_range(out, null);
     out.write_string(",\"severity\":1,\"source\":\"libglosso\",\"message\":");
     write_json_string(out, message); out.write_string("}]");
 }
-compiler_related :: (out: *String_Builder, location: ?*Json, message: str) {
+compiler_related :: (out: *String_Builder, workspace: *const Workspace, location: ?*Json, message: str) {
     out.write_string("{\"location\":{\"uri\":");
-    uri := workspace_path_to_uri(json_text(json_field(location, "file")));
+    // Known files keep the editor's URI, including untitled buffers.
+    path := json_text(json_field(location, "file"));
+    file := workspace_find_path(workspace, path);
+    source: str;
+    uri: str;
+    if file >= 0 {
+        source = workspace.files[file].source;
+        uri = workspace.files[file].uri.clone();
+    } else uri = workspace_file_uri(workspace, path);
     defer uri.free(); write_json_string(out, uri);
-    out.write_string(",\"range\":"); compiler_range(out, json_field(location, "range"));
+    out.write_string(",\"range\":");
+    compiler_range(out, json_field(location, "range"), source, compiler_lone_cr(source));
     out.write_string("},\"message\":"); write_json_string(out, message); out.write_byte(125);
 }
 
@@ -98,20 +127,52 @@ compiler_symbol :: (workspace: *Workspace, location: ?*Json) -> Symbol_Id {
     }
     return .{};
 }
+// Each distinct generated text has its own cache file. Reuse an entry that no
+// result of the current epoch emits, so editing an #insert does not grow the
+// workspace. Its old facts and edges were cleared when the epoch changed.
+compiler_generated_slot :: (workspace: *Workspace, path: str, apply: ssize) -> ssize {
+    uri := workspace_file_uri(workspace, path);
+    defer uri.free();
+    for i: 0..workspace.files.count {
+        file := &workspace.files[i];
+        if !file.generated || file.open || file.generated_apply == apply ||
+           file.generated_epoch == workspace.compiler_epoch continue;
+        workspace_clear_compiler_facts(file);
+        workspace_clear_syntax(file);
+        empty: str;
+        file.source.free(); file.source = empty;
+        file.path.free(); file.path = path.clone();
+        file.uri.free(); file.uri = uri.clone();
+        file.active = false;
+        file.relevant = false;
+        file.generated_origin = -1;
+        file.generated_start = 0;
+        file.generated_end = 0;
+        file.generated_epoch = -1;
+        for j: 0..workspace.files.count
+            if workspace.files[j].generated_origin == i workspace.files[j].generated_origin = -1;
+        return i;
+    }
+    return workspace_allocate(workspace, uri, path, false);
+}
 compiler_apply :: (workspace: *Workspace, root: ?*Json) {
     semantics := json_field(root, "semantics");
+    workspace.compiler_applies += 1;
+    apply := workspace.compiler_applies;
     if #pattern ?sources = json_array(json_field(semantics, "generated_sources")) {
+        // Claim this result's existing entries before any stale one is reused.
+        for i: 0..sources.*.count {
+            file := workspace_find_path(workspace, json_text(json_field(?&sources.*[i], "file")));
+            if file >= 0 workspace.files[file].generated_apply = apply;
+        }
         for i: 0..sources.*.count {
             item: ?*Json = ?&sources.*[i];
             path := json_text(json_field(item, "file"));
             file := workspace_find_path(workspace, path);
-            if file < 0 {
-                uri := workspace_path_to_uri(path);
-                defer uri.free();
-                file = workspace_allocate(workspace, uri, path);
-            }
+            if file < 0 file = compiler_generated_slot(workspace, path, apply);
             if file < 0 continue;
             workspace.files[file].generated = true;
+            workspace.files[file].generated_apply = apply;
             _ = workspace_replace_source(workspace, file, json_text(json_field(item, "text")));
         }
     }
@@ -129,6 +190,8 @@ compiler_apply :: (workspace: *Workspace, root: ?*Json) {
             item: ?*Json = ?&sources.*[i];
             file := workspace_find_path(workspace, json_text(json_field(item, "file")));
             if file < 0 continue;
+            // Loading has finished, so this is the epoch the facts belong to.
+            workspace.files[file].generated_epoch = workspace.compiler_epoch;
             if #pattern ?insertions = json_array(json_field(item, "insertions")) {
                 if insertions.*.count == 0 continue;
                 owner := compiler_location_file(workspace, ?&insertions.*[insertions.*.count - 1]);
@@ -168,12 +231,10 @@ compiler_apply :: (workspace: *Workspace, root: ?*Json) {
                     target := compiler_symbol(workspace, json_field(binding, "definition"));
                     if target.symbol < 0 continue;
                     name := json_text(json_field(binding, "name"));
-                    seen := false;
-                    for other: workspace.files[file].compiler_bindings.view() {
-                        if other.name == name && other.target.file == target.file &&
-                           other.target.symbol == target.symbol seen = true;
-                    }
-                    if !seen workspace.files[file].compiler_bindings.push(.{ .name = name.clone(), .target = target });
+                    if compiler_binding_known(&workspace.files[file], name, target) continue;
+                    workspace.files[file].compiler_bindings.push(.{ .name = name.clone(), .target = target });
+                    _ := workspace.files[file].compiler_binding_keys.insert(
+                        compiler_binding_key(name, target), workspace.files[file].compiler_bindings.count - 1);
                 }
             }
         }
@@ -194,11 +255,10 @@ compiler_apply :: (workspace: *Workspace, root: ?*Json) {
                 else; continue;
             }
             if start < 0 || end <= start || end > workspace.files[file].source.count continue;
-            seen := false;
-            for other: workspace.files[file].compiler_facts.view() {
-                if other.kind == kind && other.start == start && other.end == end seen = true;
-            }
-            if !seen workspace.files[file].compiler_facts.push(.{
+            // Offsets are below `source_limit`, so the packed key is exact.
+            key := (cast(u64)start << 32) | (cast(u64)end << 2) | cast(u64)kind;
+            #pattern.Ok(added) := workspace.files[file].compiler_fact_keys.insert(key) else { continue; };
+            if added workspace.files[file].compiler_facts.push(.{
                 .start = start, .end = end, .kind = kind,
                 .type_name = json_text(json_field(item, "type")).clone(),
                 .type_definition = compiler_symbol(workspace, json_field(item, "type_definition")),
@@ -206,8 +266,29 @@ compiler_apply :: (workspace: *Workspace, root: ?*Json) {
             });
         }
     }
+    for i: 0..workspace.files.count {
+        if workspace.files[i].compiler_fact_order.count != workspace.files[i].compiler_facts.count
+            workspace_index_compiler_facts(&workspace.files[i]);
+    }
     workspace.analyzed_generation = -1;
     workspace_refresh_relevance(workspace);
+}
+compiler_binding_key :: (name: str, target: Symbol_Id) -> u64 {
+    return name.hash() ^ (cast(u64)target.file << 32) ^ cast(u64)target.symbol;
+}
+// Several results bind the same generated names; find duplicates by hash.
+compiler_binding_known :: (file: *Source_File, name: str, target: Symbol_Id) -> bool {
+    if #pattern ?existing = file.compiler_binding_keys.get_ref(compiler_binding_key(name, target)) {
+        other := file.compiler_bindings[existing.*];
+        if other.name == name && other.target.file == target.file &&
+           other.target.symbol == target.symbol return true;
+        // A hash collision: fall back to comparing every binding.
+        for binding: file.compiler_bindings.view() {
+            if binding.name == name && binding.target.file == target.file &&
+               binding.target.symbol == target.symbol return true;
+        }
+    }
+    return false;
 }
 compiler_error :: (workspace: *Workspace, file: ssize, message: str) {
     workspace.files[file].compiler_error = message.clone();
@@ -241,7 +322,8 @@ compiler_capture_output :: (out: *String_Builder, result: Glosso_Handle, stream:
         .step_limit = workspace.compiler_step_limit,
     };
     for path: workspace.import_paths.view() input.module_paths.push(path.clone());
-    for path: workspace.roots.view() input.module_paths.push(path.clone());
+    if workspace.roots_as_module_paths
+        for path: workspace.roots.view() input.module_paths.push(path.clone());
     for file: workspace.files.view() {
         if file.open && !file.generated && file.path.count > 0
             input.sources.push(.{ .path = file.path.clone(), .source = file.source.clone() });
@@ -253,6 +335,11 @@ compiler_capture_output :: (out: *String_Builder, result: Glosso_Handle, stream:
     completed: Compiler_Result = .{
         .file = input.file, .epoch = input.epoch, .version = input.version,
     };
+    // Buffers without a file path, such as `git:` views, are not checked.
+    if input.path.count == 0 {
+        completed.json = "{}".clone();
+        return completed;
+    }
     handle: Glosso_Handle;
     if glosso_context_create(glosso_view(input.std_path), &handle) != 0 {
         completed.error = glosso_text(glosso_last_error()).clone(); return completed;
@@ -327,6 +414,7 @@ compiler_capture_output :: (out: *String_Builder, result: Glosso_Handle, stream:
     if file.compiler_error.count > 0 { compiler_failure(out, file.compiler_error); return; }
     if !file.compiler_ready { out.write_string("[]"); return; }
     document := &file.compiler_document;
+    lone_cr := compiler_lone_cr(file.source);
     out.write_byte(91);
     if #pattern ?diagnostics = json_array(json_field(?&document.root, "diagnostics")) {
         for i: 0..diagnostics.*.count {
@@ -337,7 +425,8 @@ compiler_capture_output :: (out: *String_Builder, result: Glosso_Handle, stream:
             foreign_file := origin.count > 0 && origin != json_text(json_field(?&document.root, "file"));
             if i > 0 out.write_byte(44);
             out.write_string("{\"range\":");
-            if foreign_file compiler_range(out, null); else compiler_range(out, range);
+            if foreign_file compiler_range(out, null);
+            else compiler_range(out, range, file.source, lone_cr);
             out.write_string(",\"source\":\"libglosso\",\"severity\":");
             severity: ssize = 1;
             if #partial json_text(json_field(item, "severity")) == { case "warning"; severity = 2; }
@@ -351,7 +440,7 @@ compiler_capture_output :: (out: *String_Builder, result: Glosso_Handle, stream:
             out.write_string(",\"relatedInformation\":[");
             related: ssize = 0;
             if foreign_file {
-                compiler_related(out, location, "Error in imported source"); related += 1;
+                compiler_related(out, workspace, location, "Error in imported source"); related += 1;
             }
             if #pattern ?notes = json_array(json_field(item, "notes")) {
                 for j: 0..notes.*.count {
@@ -359,7 +448,7 @@ compiler_capture_output :: (out: *String_Builder, result: Glosso_Handle, stream:
                     at := json_field(note, "location");
                     if json_text(json_field(at, "file")).count == 0 continue;
                     if related > 0 out.write_byte(44);
-                    compiler_related(out, at, json_text(json_field(note, "message"))); related += 1;
+                    compiler_related(out, workspace, at, json_text(json_field(note, "message"))); related += 1;
                 }
             }
             out.write_string("]}");

@@ -62,18 +62,35 @@ user configuration alone.
 Configure your editor with the absolute executable path, the `glosso` language
 identifier, and `*.glo` files. Launch the executable directly: the build script
 prints build progress, whereas the server reserves stdout for LSP frames.
-The executable accepts `--stdio`, `--version`, and `--help`.
+The executable accepts `--stdio`, `--version`, and `--help`. Other `--` flags,
+such as `--clientProcessId=N`, are ignored with a warning on stderr.
+Keep `bin/glolsp` beside `share/`: the library is found relative to the real
+executable, so put a symbolic link (not a copy) on `PATH`, for example
+`ln -s ~/.local/glolsp/bin/glolsp ~/.local/bin/glolsp`. A copy fails with
+`could not load dynamic library '$ORIGIN/../share/libglosso.so'`.
 Restart the editor's LSP client after installing an update, especially if an
 earlier process exited with a dynamic-library loading error.
 
 ## Editor features
 
-- Full/incremental text synchronization with UTF-16 and CRLF positions.
+- Full/incremental text synchronization with UTF-16 and CRLF positions. A
+  position past the end of a line means the end of that line, and a line past
+  the last one means the end of the document.
 - Push/pull compiler diagnostics, in-memory import overlays, and related locations.
 - Completion, hover, definition, type definition, references, highlights, and rename.
 - Document/workspace symbols, folding, semantic highlighting, and signature help.
 - Inlay hints, selection ranges, import links, spelling/import quick fixes.
-- Compiler-token-preserving document formatting.
+- Hierarchical document symbols nest parameters, locals, fields and nested
+  declarations under the declaration that contains them; clients without
+  hierarchy support receive a flat list. `workspace/symbol` returns at most 500
+  matches.
+- Import quick fixes name standard-library and import-path modules by module
+  name, suggest the file whose `#insert` generates a declaration, and offer only
+  module-name imports in untitled buffers.
+- Compiler-token-preserving document formatting that keeps the file's line
+  endings and byte order mark, single blank lines, trailing comments, constructs
+  written on one line, and the spacing that `?` and user-defined operators
+  depend on.
 
 Import completion lists standard modules after `#import ` and inside quoted
 paths, including incomplete strings. Before the opening quote, accepting a
@@ -89,9 +106,12 @@ completion and type definition. Partial compiler facts remain usable when anothe
 function has an error.
 
 Definitions open the generated source when the compiler can materialize it;
-otherwise they point to the original `#insert`. Generated declarations cannot be
-renamed through LSP: change the generating source instead of modifying a cache
-artifact. Ordinary source rename retains lexical shadowing and workspace edits.
+otherwise they point to the original `#insert`. Rename is rejected when the
+declaration or any reference lies in a generated file or in the installed
+standard library: change the generating source instead of modifying a cache
+artifact. Ordinary source rename retains lexical shadowing and workspace edits,
+and refuses a new name that would capture or shadow existing uses.
+Navigation also accepts a cursor placed just after an identifier.
 
 Bare field names opened by `using` parameters (including `using #self`,
 `using *#self` and either `using`/`noalias` order) and block-scoped `using`
@@ -99,6 +119,9 @@ statements on a struct or struct pointer resolve to the struct's fields for
 completion, hover, definition, references and rename. As in the compiler, the
 procedure's locals and top-level values take precedence, the latest `using`
 wins, and nested procedures do not inherit their parent's `using`s.
+Local procedures and lambdas see the procedures and types of enclosing blocks,
+but not the enclosing procedure's variables, parameters or value constants.
+A local is not visible in its own initializer.
 
 The snapshot is not a complete compiler semantic graph. Generated symbols can be unavailable when lexing/parsing fails before checking.
 Statement-local generated bindings, audience-restricted exports, and some generic/typeclass projections
@@ -107,11 +130,19 @@ still rely on the fallback index. Ambiguous compiler facts are omitted.
 Open buffers override disk, including dependencies and files that have not been
 saved. Changing or closing a buffer refreshes dependent diagnostics. Watched
 files and workspace-folder changes update the index. Relative `#import` paths,
-module directories, and additional import search roots are supported. The server
+module directories, and additional import search roots are supported. Like
+`glosso compile`, module names such as `#import "Foo"` are searched only in the
+standard library and `importPaths`, not in workspace folders; set
+`rootsAsModulePaths` to `true` to also search the workspace folders. The server
 does not run a workspace's `first.glo` to discover configuration.
 By default it indexes opened files and their dependencies. Set `scanWorkspace`
 to `true` to include unopened, unrelated files in workspace symbols and references;
-this synchronous scan can delay requests in large repositories.
+this synchronous scan can delay requests in large repositories. `maxFiles`
+limits only files discovered by scanning and dependency loading; opened buffers,
+the prelude and generated sources are always admitted. Untitled buffers are
+checked through a temporary overlay path, where relative imports do not resolve;
+documents whose URI has no file path are not checked. Files below a workspace
+folder opened through a symbolic link keep the editor's spelling of their path.
 
 ## Configuration
 
@@ -141,6 +172,7 @@ Use these `initializationOptions`:
     "importPaths": ["/absolute/path/to/project/modules"],
     "scanWorkspace": false,
     "maxFiles": 4096,
+    "rootsAsModulePaths": false,
     "comptimeStepLimit": 16777216
 }
 ```
@@ -151,7 +183,14 @@ library's home-directory query supplies the platform equivalent on Windows).
 Import completion and compiler diagnostics use this same directory.
 The instruction limit applies per compile-time interpreter invocation; zero
 means unlimited. Normal compiler I/O is captured inside libglosso so a Glosso
-`print` at compile time cannot break JSON-RPC framing. Failed analysis includes
+`print` at compile time cannot break JSON-RPC framing. At startup the server
+also moves its LSP streams to private handles, so compile-time code and
+subprocesses read an empty standard input (`/dev/null` or `NUL`) and their
+standard output goes to stderr; on Windows this also covers the C runtime's
+descriptors 0 and 1. Messages up to 64 MiB are accepted; larger ones,
+or ones with a non-UTF-8 `charset`, are skipped with a note on stderr and a
+`null`-id error, and a malformed header stops the server with the reason on
+stderr. Failed analysis includes
 captured stdout and stderr in its first diagnostic, limited to 16 KiB per stream.
 Native C builds and Bindgen use the SDK beside the selected standard library.
 Compilation has the same host I/O/FFI semantics as the compiler; it is not a
@@ -161,7 +200,8 @@ and report diagnostics.
 
 Analysis uses the compiler's program roots: project functions are checked even
 when unused, and imported standard-library bodies are checked on demand.
-Compiler analysis runs on a background worker. Completion, navigation and other
+Compiler analysis runs on a background worker with a 256 MiB stack, like the
+compiler's own frontend thread. Completion, navigation and other
 read-only features use the current document index while checking is in progress;
 completion reports `isIncomplete` until checked facts arrive. Diagnostics and
 rename wait for the current compiler snapshot without blocking other requests.
@@ -180,6 +220,7 @@ compiler context; there is no cancellation of an in-progress native call yet.
 ```sh
 ~/.local/glosso/bin/glosso compile first.glo --cache-dir=build/cache -- test
 python3 tests/compiler_lsp.py --server build/glolsp
+python3 tests/regress_server.py --server build/glolsp
 ```
 
 Measure open, edit, and completion latency against a real project with:
@@ -205,7 +246,9 @@ repeated compile-time I/O. The integration suite checks diagnostics and standard
 module completion with default editor initialization in the actual checkout.
 `config_lsp.py` checks TOML configuration, XDG paths, compiler symlinks, relative
 paths, installation layouts, native SDK lookup, override precedence, and invalid
-configuration.
+configuration. The `regress_*.py` suites (server, workspace, analysis, syntax)
+pin fixed bugs: framing and position edge cases, file identity and limits,
+rename and scoping rules, and lexer/parser recovery and formatting.
 
 `src/worker.glo` owns the input and compiler workers; the main event loop alone
 updates the workspace. `src/compiler.glo` owns the libglosso snapshots and applies

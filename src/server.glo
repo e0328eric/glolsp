@@ -2,6 +2,7 @@
 #import "worker.glo";
 //! Stdio transport, editor overlays, and requests against a semantic workspace.
 #import "Io";
+#import "Format";
 #import "File_System/File";
 #import "File_System/Types";
 #import "Serialization/Json";
@@ -39,7 +40,7 @@
     \\    "semanticTokensProvider":{
     \\        "legend":{
     \\            "tokenTypes":["namespace","type","function","variable","parameter",
-    \\                "property","keyword","comment","str","number","operator","macro"],
+    \\                "property","keyword","comment","string","number","operator","macro"],
     \\            "tokenModifiers":["declaration","readonly"]
     \\        },"full":true
     \\    }
@@ -90,12 +91,23 @@
     compiler_write_diagnostics(out, workspace, index);
 }
 
-#public server_publish :: (server: *Server, output: *File, index: ssize, clear: bool = false) {
+/// Publishes to `uri` when given; otherwise to every editor URI that has the
+/// file open, so each alias of a symlinked file shows its diagnostics.
+#public server_publish :: (
+    server: *Server, output: *File, index: ssize, clear: bool = false, uri: str = "",
+) {
+    file := &server.workspace.files[index];
+    if uri.count > 0 server_publish_uri(server, output, index, uri, clear);
+    else if file.aliases.count == 0 server_publish_uri(server, output, index, file.uri, clear);
+    else for alias: file.aliases.view() server_publish_uri(server, output, index, alias, clear);
+}
+
+server_publish_uri :: (server: *Server, output: *File, index: ssize, uri: str, clear: bool) {
     out: String_Builder;
     defer out.free();
     out.write_string("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",");
     out.write_string("\"params\":{\"uri\":");
-    write_json_string(&out, server.workspace.files[index].uri);
+    write_json_string(&out, uri);
     out.write_string(",\"version\":");
     write_json_integer(&out, server.workspace.files[index].version);
     out.write_string(",\"diagnostics\":");
@@ -215,7 +227,7 @@ server_start_analysis :: (server: *Server, output: *File) {
                 end = json_offset(staged, json_field(range, "end"));
                 if start < 0 || end < start return;
             }
-            if staged.count - (end - start) + text.count > MAX_MESSAGE_BYTES return;
+            if staged.count - (end - start) + text.count > server.workspace.source_limit return;
             next: String_Builder;
             next.write_string(staged[..start]);
             next.write_string(text);
@@ -246,6 +258,10 @@ server_start_analysis :: (server: *Server, output: *File) {
     server.scan_roots = json_boolean(json_field(options, "scanWorkspace"), false);
     limit := json_integer(json_field(options, "maxFiles"));
     if limit > 0 server.workspace.file_limit = limit;
+    // `glosso compile` searches only the standard library and module paths
+    // for module names. Projects relying on their roots can opt in.
+    workspace_set_roots_as_module_paths(&server.workspace,
+        json_boolean(json_field(options, "rootsAsModulePaths"), false));
     if #pattern ?paths = json_array(json_field(options, "importPaths")) {
         for i: 0..paths.*.count {
             path: ?*Json = ?&paths.*[i];
@@ -290,12 +306,17 @@ server_start_analysis :: (server: *Server, output: *File) {
         server_did_change(server, output, params);
         case "textDocument/didClose";
         item := json_field(params, "textDocument");
-        index := workspace_find(&server.workspace, json_text(json_field(item, "uri")));
+        uri := json_text(json_field(item, "uri"));
+        index := workspace_find(&server.workspace, uri);
         if index >= 0 {
-            server_publish(server, output, index, true);
-            server.workspace.files[index].diagnostics_pending = false;
-            server.workspace.files[index].compiler_requested = false;
-            workspace_close(&server.workspace, index);
+            // Another URI for the same file, such as a path through a
+            // symbolic link, keeps it open; clear only the closed one.
+            server_publish(server, output, index, true, uri);
+            workspace_close(&server.workspace, index, uri);
+            if !server.workspace.files[index].open {
+                server.workspace.files[index].diagnostics_pending = false;
+                server.workspace.files[index].compiler_requested = false;
+            }
             server_publish_open(server, output);
         }
         case "textDocument/didSave";
@@ -310,10 +331,14 @@ server_start_analysis :: (server: *Server, output: *File) {
         }
         case "workspace/didChangeWatchedFiles";
         if #pattern ?changes = json_array(json_field(params, "changes")) {
+            // Watch notifications may also name data read by compile-time code.
+            // Invalidate and resolve imports once for the whole batch.
+            if changes.*.count > 0 workspace_invalidate_compiler(&server.workspace);
             for i: 0..changes.*.count {
                 item: ?*Json = ?&changes.*[i];
-                workspace_watch(&server.workspace, json_text(json_field(item, "uri")));
+                workspace_watch_file(&server.workspace, json_text(json_field(item, "uri")));
             }
+            if changes.*.count > 0 workspace_refresh_imports(&server.workspace);
             server_publish_open(server, output);
         }
         case "workspace/didChangeWorkspaceFolders";
@@ -368,6 +393,19 @@ server_start_analysis :: (server: *Server, output: *File) {
     out.write_byte(#char "]");
 }
 
+/// Requests answered from the parse tree, tokens and import edges alone.
+/// Analysis of a large document can take longer than these requests.
+#public server_method_syntactic :: (method: str) -> bool {
+    if method == {
+        case "textDocument/foldingRange", "textDocument/formatting",
+             "textDocument/documentLink", "textDocument/selectionRange",
+             "textDocument/diagnostic";
+        return true;
+        else;
+        return false;
+    }
+}
+
 #public server_method_known :: (method: str) -> bool {
     if method == {
         case "workspace/symbol", "textDocument/documentSymbol", "textDocument/completion",
@@ -415,7 +453,7 @@ server_start_analysis :: (server: *Server, output: *File) {
     }
     if method == "textDocument/references" || method == "textDocument/rename"
         analyze_workspace(workspace);
-    else if method != "textDocument/diagnostic" analyze_document(workspace, file);
+    else if !server_method_syntactic(method) analyze_document(workspace, file);
     out: String_Builder;
     defer out.free();
     source := workspace.files[file].source;
@@ -530,8 +568,11 @@ server_start_analysis :: (server: *Server, output: *File) {
             case "textDocument/signatureHelp";
             ide_write_signature_help(&out, workspace, file, offset);
             case "textDocument/prepareRename";
-            token := language_token_at(&workspace.files[file].syntax.language, offset);
-            if symbol.symbol < 0 || token < 0 || workspace.files[symbol.file].generated
+            // Rejection depends on references in every analysed file.
+            analyze_workspace(workspace);
+            token := analysis_token_at(workspace, file, offset);
+            if symbol.symbol < 0 || token < 0 || !ide_renamed_token(workspace, file, token, symbol) ||
+               ide_rename_rejection(workspace, symbol).count > 0
                 out.write_string("null");
             else {
                 span := workspace.files[file].syntax.language.tokens[token];
@@ -551,8 +592,9 @@ server_start_analysis :: (server: *Server, output: *File) {
                     _ := rpc_error(output, id, -32602, "A valid declared name is required.");
                     return;
                 }
-                if workspace.files[symbol.file].generated {
-                    _ = rpc_error(output, id, -32602, "Generated declarations must be renamed in their #insert source.");
+                rejection := ide_rename_rejection(workspace, symbol);
+                if rejection.count > 0 {
+                    _ = rpc_error(output, id, -32602, rejection);
                     return;
                 }
                 if ide_rename_conflicts(workspace, symbol, name) {
@@ -577,6 +619,9 @@ server_flush_pending :: (server: *Server, output: *File) {
         obsolete := request.epoch != server.workspace.compiler_epoch;
         ready := server.workspace.files[request.file].compiler_epoch == server.workspace.compiler_epoch;
         if !obsolete && !ready && !request.cancelled && !server.shutdown {
+            // Keep the file scheduled: closing it clears its request flag
+            // without changing the epoch when the buffer matches disk.
+            server.workspace.files[request.file].compiler_requested = true;
             server.pending_requests.push(request);
             continue;
         }
@@ -589,12 +634,13 @@ server_flush_pending :: (server: *Server, output: *File) {
                 _ = rpc_error(output, id, -32800, "Request cancelled.");
             else if obsolete
                 _ = rpc_error(output, id, -32801, "Document changed during analysis.");
-            else _ = server_process(server, output, &document.root);
+            else _ = server_process(server, output, &document.root, request.body);
         }
     }
 }
 
-#public server_process :: (server: *Server, output: *File, message: *Json) -> s32 {
+// `body` is the message's text; a request that waits for a snapshot keeps it.
+#public server_process :: (server: *Server, output: *File, message: *Json, body: str = "") -> s32 {
     root: ?*Json = ?message;
     id := json_field(root, "id");
     method_value := json_field(root, "method");
@@ -707,7 +753,8 @@ server_flush_pending :: (server: *Server, output: *File) {
                 file,
                 json_text(json_field(params, "query")),
                 false,
-                &count
+                &count,
+                500
             );
         }
         out.write_byte(#char "]");
@@ -727,12 +774,19 @@ server_flush_pending :: (server: *Server, output: *File) {
         method == "textDocument/prepareRename") &&
        !server.workspace.files[file].generated &&
        server.workspace.files[file].compiler_epoch != server.workspace.compiler_epoch {
-        body: String_Builder;
-        write_json_value(&body, root);
+        // Re-encoding can fail, for example on a non-finite number, and
+        // would lose the id. Keep the original text when there is one.
+        text: str;
+        if body.count > 0 text = body.clone();
+        else {
+            encoded: String_Builder;
+            write_json_value(&encoded, root);
+            text = encoded.into_string();
+        }
         encoded_id: String_Builder;
         write_json_value(&encoded_id, id);
         server.pending_requests.push(.{
-            .body = body.into_string(), .id = encoded_id.into_string(),
+            .body = text, .id = encoded_id.into_string(),
             .file = file, .epoch = server.workspace.compiler_epoch,
         });
         server.workspace.files[file].compiler_requested = true;
@@ -756,12 +810,17 @@ server_flush_pending :: (server: *Server, output: *File) {
             case "--stdio";
             continue;
             else;
-            error_output := File.stderr();
-            _ := error_output.write("glolsp: unsupported argument (use --help)\n");
+            // Clients may add their own flags, such as --clientProcessId=N.
+            if arguments[i].starts_with("--") {
+                rpc_report(tprint("ignoring unsupported argument {} (use --help)", arguments[i]));
+                continue;
+            }
+            rpc_report("unsupported argument (use --help)");
             return 1;
         }
     }
-    output := File.stdout();
+    stdio := worker_private_stdio();
+    output := stdio.output;
     server: Server;
     #pattern.Ok(events) := Channel(Server_Event).new() else { return 1; };
     #pattern.Ok(jobs) := Channel(Compiler_Input).new() else { events.free(); return 1; };
@@ -782,36 +841,54 @@ server_flush_pending :: (server: *Server, output: *File) {
     workspace_init(&server.workspace);
     defer workspace_destroy(&server.workspace);
     if !worker_start_compiler(&events, &jobs) return 1;
-    if !worker_start_input(&events) return 1;
+    if !worker_start_input(&events, stdio.input) return 1;
     while true {
         // Request-local path conversion and formatting use temporary storage.
         // Persistent workspace data owns heap buffers or views of owned source.
         reset_temporary_storage();
+        // Each event may replace source buffers; see position_cache_reset.
+        position_cache_reset();
         #pattern.Ok(received) := events.recv() else { return 1; };
         #pattern ?event := received else { return 1; };
         defer event.free();
         if event == {
             case .input(frame);
+                if frame.status == 2 {
+                    // The stream is still aligned; the id is unknown.
+                    rpc_report(tprint("skipped a {}-byte message: {}", frame.length, frame.reason));
+                    if !rpc_error(&output, null, -32600, tprint("Message skipped: {}.", frame.reason))
+                        return 1;
+                    continue;
+                }
                 if frame.status <= 0 {
                     if frame.status == 0 && server.shutdown return 0;
+                    if frame.status == 0 rpc_report("input ended before shutdown and exit");
+                    else rpc_report(tprint("invalid LSP frame: {}; exiting", frame.reason));
                     return 1;
                 }
                 if !frame.body.bytes().utf8_is_valid() {
                     _ := rpc_error(&output, null, -32700, "Message is not valid UTF-8.");
                     continue;
                 }
-                if json_parse_document(frame.body) == {
+                repaired := rpc_repair_surrogates(frame.body);
+                defer repaired.free();
+                body := frame.body;
+                if repaired.count > 0 body = repaired;
+                if json_parse_document(body) == {
                     case .Err;
                         if !rpc_error(&output, null, -32700, "Invalid JSON.") return 1;
                     case .Ok(message);
                         defer message.destroy();
-                        status := server_process(&server, &output, &message.root);
+                        status := server_process(&server, &output, &message.root, body);
                         if status == 1 return 0;
                         if status == 2 return 1;
                 }
             case .checked(completed);
                 server.compiler_busy = false;
-                if !server.shutdown && compiler_accept(&server.workspace, &completed) {
+                accepted := !server.shutdown && compiler_accept(&server.workspace, &completed);
+                // Generated sources may have been replaced.
+                position_cache_reset();
+                if accepted {
                     server.workspace.files[completed.file].compiler_requested = false;
                     // Applying facts can discover source files. That updates the
                     // index revision, but does not change any editor input.

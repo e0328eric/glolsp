@@ -176,7 +176,177 @@ check_matrix_types :: () {
     #assert workspace.files[file].semantic.diagnostics.count == 5;
 }
 
+// Long left-nested chains once overflowed the main thread's stack.
+check_deep_chains :: () {
+    generated: String_Builder;
+    generated.write_string("Node :: struct { next: *Node; }\nmain :: () {\n    a := 1; node: Node;\n    sum := a");
+    for 0..6000 generated.write_string(" + a");
+    generated.write_string(";\n    last := node");
+    for 0..6000 generated.write_string(".next");
+    generated.write_string(";\n    nested := (((((((((((((((((((((((((((((((a)))))))))))))))))))))))))))))));\n}\n");
+    source := generated.into_string();
+    defer source.free();
+    workspace: Workspace;
+    defer workspace_destroy(&workspace);
+    file := workspace_open(&workspace, "file:///tmp/glolsp-analysis/deep.glo", source, 1);
+    analyze_workspace(&workspace);
+    for name: .["sum", "last", "nested"] {
+        inferred := type_text(&workspace, symbol_named(&workspace, file, name));
+        defer inferred.free();
+        expected := "ssize";
+        if name == "last" expected = "*Node";
+        if inferred != expected print("{}: expected {}, got {}\n", name, expected, inferred);
+        #assert inferred == expected;
+    }
+    a := symbol_named(&workspace, file, "a");
+    #assert analysis_same_symbol(analysis_symbol_at(&workspace, file,
+        find_text(source, "sum := a") + 7), a);
+}
+
+// Local procedures are not closures, initializers read the outer binding,
+// and uses of an alias stay bound to the alias.
+check_scoping :: () {
+    source := #string
+        \\a :: "global";
+        \\f :: (pp: s32) -> s32 {
+        \\    a: s32 = 1;
+        \\    K :: 3;
+        \\    Local :: struct { field: s32; }
+        \\    helper :: () -> s32 { return 4; }
+        \\    inner :: () -> str { b := pp; c := K; d := helper(); e: Local; return a; }
+        \\    x: str = "abc";
+        \\    {
+        \\        x := x.count;
+        \\        y := x;
+        \\    }
+        \\    return a;
+        \\}
+        \\foo :: (v: s32) -> s32 { return v; }
+        \\alias :: foo;
+        \\main :: () -> s32 { return alias(1) + foo(2); }
+    ;
+    workspace: Workspace;
+    defer workspace_destroy(&workspace);
+    file := workspace_open(&workspace, "file:///tmp/glolsp-analysis/scoping.glo", source, 1);
+    analyze_workspace(&workspace);
+    #assert workspace.files[file].syntax.language.diagnostics.count == 0;
+    at :: (workspace: *Workspace, file: ssize, source: str, needle: str, delta: ssize = 0) -> Symbol_Id {
+        return analysis_symbol_at(workspace, file, find_text(source, needle) + delta);
+    }
+    global := at(&workspace, file, source, "a ::");
+    local := at(&workspace, file, source, "a: s32");
+    #assert !analysis_same_symbol(global, local);
+    #assert analysis_same_symbol(at(&workspace, file, source, "a; }", 0), global);
+    #assert analysis_same_symbol(at(&workspace, file, source, "a;\n}"), local);
+    #assert at(&workspace, file, source, "pp; c").symbol < 0;
+    #assert at(&workspace, file, source, "K; d").symbol < 0;
+    #assert analysis_same_symbol(at(&workspace, file, source, "helper(); e"),
+        at(&workspace, file, source, "helper ::"));
+    #assert analysis_same_symbol(at(&workspace, file, source, "Local; return"),
+        at(&workspace, file, source, "Local ::"));
+    outer := at(&workspace, file, source, "x: str");
+    inner := at(&workspace, file, source, "x := x");
+    #assert !analysis_same_symbol(outer, inner);
+    #assert analysis_same_symbol(at(&workspace, file, source, "x.count"), outer);
+    #assert analysis_same_symbol(at(&workspace, file, source, "x;\n    }"), inner);
+    #assert analysis_same_symbol(at(&workspace, file, source, "alias(1)"),
+        at(&workspace, file, source, "alias ::"));
+    #assert analysis_same_symbol(at(&workspace, file, source, "foo(2)"),
+        at(&workspace, file, source, "foo ::"));
+    // A cursor just after a name still names it.
+    #assert analysis_same_symbol(at(&workspace, file, source, "(1) +"), at(&workspace, file, source, "alias ::"));
+    visible := analysis_visible_symbols(&workspace, file, find_text(source, "pp; c"));
+    defer visible.free();
+    for id: visible.view() {
+        name := workspace.files[id.file].syntax.symbols[id.symbol].name;
+        #assert name != "pp" && name != "K";
+    }
+}
+
+// The symbol index must list exactly what a scan of every symbol finds, and a
+// stale index must fall back to that scan.
+check_symbol_index :: () {
+    source := #string
+        \\Show :: typeclass (T: type) { show :: (value: T) -> str; }
+        \\Point :: struct { x: s32; y: s32; }
+        \\x :: 1;
+        \\f :: (x: s32, y: s32) -> s32 {
+        \\    total := x + y;
+        \\    { x := total; y := x; total := y; }
+        \\    inner :: (x: s32) -> s32 { return x; }
+        \\    return total + inner(x);
+        \\}
+        \\main :: () -> s32 { point: Point; return f(point.x, point.y) + x; }
+    ;
+    workspace: Workspace;
+    defer workspace_destroy(&workspace);
+    file := workspace_open(&workspace, "file:///tmp/glolsp-analysis/index.glo", source, 1);
+    analyze_workspace(&workspace);
+    syntax := &workspace.files[file].syntax;
+    index := &workspace.files[file].semantic.index;
+    #assert symbol_index_ready(index, syntax);
+    #assert index.typeclasses.count == 1;
+    for i: 0..syntax.symbols.count {
+        symbol := syntax.symbols[i];
+        scoped: [..]ssize;
+        defer scoped.free();
+        named: [..]ssize;
+        defer named.free();
+        in_scope: [..]ssize;
+        defer in_scope.free();
+        for j: 0..syntax.symbols.count {
+            other := syntax.symbols[j];
+            if other.name == symbol.name {
+                named.push(j);
+                if other.scope == symbol.scope scoped.push(j);
+            }
+            if other.scope == symbol.scope in_scope.push(j);
+        }
+        at := 0;
+        k := symbol_index_scoped(index, syntax, symbol.scope, symbol.name, -1);
+        while k >= 0 {
+            #assert at < scoped.count && scoped[at] == k;
+            at += 1;
+            k = symbol_index_scoped(index, syntax, symbol.scope, symbol.name, k);
+        }
+        #assert at == scoped.count;
+        at = 0;
+        k = symbol_index_named(index, syntax, symbol.name, -1);
+        while k >= 0 {
+            #assert at < named.count && named[at] == k;
+            at += 1;
+            k = symbol_index_named(index, syntax, symbol.name, k);
+        }
+        #assert at == named.count;
+        #assert symbol_index_count(index, syntax, symbol.scope) == in_scope.count;
+        for position: 0..in_scope.count
+            #assert symbol_index_at(index, syntax, symbol.scope, position) == in_scope[position];
+    }
+    resolved: [..]Symbol_Id;
+    defer resolved.free();
+    for node: syntax.nodes.view() {
+        if node.kind != .Identifier continue;
+        name := source.substring(syntax.language.tokens[node.token].start,
+            syntax.language.tokens[node.token].end);
+        resolved.push(analysis_lookup(&workspace, file, node.scope, name, node.start));
+    }
+    symbol_index_free(index);
+    #assert !symbol_index_ready(index, syntax);
+    at := 0;
+    for node: syntax.nodes.view() {
+        if node.kind != .Identifier continue;
+        name := source.substring(syntax.language.tokens[node.token].start,
+            syntax.language.tokens[node.token].end);
+        found := analysis_lookup(&workspace, file, node.scope, name, node.start);
+        #assert found.file == resolved[at].file && found.symbol == resolved[at].symbol;
+        at += 1;
+    }
+}
+
 main :: () {
+    check_symbol_index();
+    check_deep_chains();
+    check_scoping();
     check_matrix_types();
     check_slice_types();
     check_variadic_types();

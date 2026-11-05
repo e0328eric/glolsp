@@ -9,6 +9,7 @@ import argparse
 import json
 import os
 import queue
+import statistics
 import subprocess
 import threading
 import time
@@ -308,15 +309,19 @@ class IntegrationTests(unittest.TestCase):
                 "start": {"line": 0, "character": 5},
                 "end": {"line": 0, "character": 2},
             }}),
-            ("textDocument/codeAction", {"textDocument": {"uri": uri}, "range": {
-                "start": {"line": 0, "character": 0},
-                "end": {"line": 999, "character": 0},
-            }}),
             ("textDocument/selectionRange", {"textDocument": {"uri": uri}}),
         ):
             with self.subTest(method=method, params=params):
                 reply = self.client.request_message(method, params)
                 self.assertEqual(reply["error"]["code"], -32602)
+        # A line past the last one is the end of the document, not an error.
+        for method in ("textDocument/codeAction", "textDocument/inlayHint"):
+            reply = self.client.request_message(method, {
+                "textDocument": {"uri": uri}, "context": {"diagnostics": []}, "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 999, "character": 0},
+                }})
+            self.assertIn("result", reply)
         reply = self.client.request_message("initialize", {"capabilities": {}})
         self.assertEqual(reply["error"]["code"], -32600)
 
@@ -590,14 +595,25 @@ class IntegrationTests(unittest.TestCase):
             self.client.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
             self.assertEqual(self.client.diagnostics(uri), [])
 
+        # Resident memory is a noisy proxy for live memory. glibc keeps freed
+        # pages of its per-thread arenas resident, so one analysis that touches
+        # more of an arena raises RSS by up to about 16 MiB, once, at any cycle;
+        # later trims can lower it again. A leak raises every round instead, so
+        # bound the median growth of five rounds. Leaking these 128 KiB
+        # documents or their copies grows each round by tens of MiB.
         for index in range(8):
             cycle(index)
-        before = rss_kib()
-        for index in range(8, 104):
-            cycle(index)
+        growth = []
+        previous = rss_kib()
+        for round_index in range(5):
+            for index in range(8 + 20 * round_index, 28 + 20 * round_index):
+                cycle(index)
+            current = rss_kib()
+            growth.append(current - previous)
+            previous = current
         self.assertEqual(self.client.request("workspace/symbol", {"query": ""}), [])
-        growth = rss_kib() - before
-        self.assertLess(growth, 8 * 1024, f"RSS grew by {growth} KiB after closing 96 documents")
+        self.assertLess(statistics.median(growth), 2 * 1024,
+                        f"RSS grew by {growth} KiB in rounds of 20 closed documents")
 
     def test_rename_respects_local_shadowing_and_noncode_text(self):
         uri = "file:///integration/shadowing.glo"
@@ -689,15 +705,24 @@ class IntegrationTests(unittest.TestCase):
         # A request is a processing barrier for preceding notifications.
         symbols = self.client.request("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
         self.assertEqual(names(symbols), {"retained"})
+        # One invalid change rejects the whole notification.
         self.client.change(uri, [
             {"text": "partial :: () {}\n"},
-            {"range": {"start": {"line": 99, "character": 0},
-                       "end": {"line": 99, "character": 1}}, "text": "invalid"},
+            {"range": {"start": {"line": 0, "character": 5},
+                       "end": {"line": 0, "character": 2}}, "text": "invalid"},
         ], version=4)
         symbols = self.client.request("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
         self.assertEqual(names(symbols), {"retained"})
-        self.client.change(uri, [{"text": "final :: () {}\n"}], version=4)
-        self.assertEqual(self.client.diagnostics(uri, 4), [])
+        # A range on a line past the last one applies at the end of the document.
+        self.client.change(uri, [
+            {"text": "partial :: () {}\n"},
+            {"range": {"start": {"line": 99, "character": 0},
+                       "end": {"line": 99, "character": 1}}, "text": "clamped :: () {}\n"},
+        ], version=4)
+        symbols = self.client.request("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
+        self.assertEqual(names(symbols), {"partial", "clamped"})
+        self.client.change(uri, [{"text": "final :: () {}\n"}], version=5)
+        self.assertEqual(self.client.diagnostics(uri, 5), [])
         symbols = self.client.request("textDocument/documentSymbol", {"textDocument": {"uri": uri}})
         self.assertEqual(names(symbols), {"final"})
 

@@ -1,8 +1,16 @@
 //! Filesystem and overlay regression tests; this suite never executes source files.
 #import "../src/workspace.glo";
+#import "../src/compiler.glo";
+#import "../src/protocol.glo";
 #import "Io";
 #import "File_System/File";
 #import "File_System/Directory";
+#import "File_System/Path";
+#import "File_System/Metadata";
+#import "File_System/Types";
+#import "String_Builder";
+#import "Strings/Utf8";
+#import "Format";
 #import "Os";
 
 workspace_test_write :: (path: str, source: str) {
@@ -39,7 +47,329 @@ workspace_test_uri :: () {
     }
 }
 
+workspace_test_open_descriptors :: () -> ssize {
+    count: ssize = 0;
+    if Directory.open_directory("/proc/self/fd") == {
+        case .Ok(directory);
+            while true {
+                #pattern.Ok(next) := directory.next() else { break; };
+                if #pattern null = next break;
+                count += 1;
+            }
+            _ := directory.close();
+        case .Err; return -1;
+    }
+    return count;
+}
+
+// Import completion closes every directory it lists.
+workspace_test_completion_descriptors :: () {
+    workspace: Workspace;
+    defer workspace_destroy(&workspace);
+    workspace_init(&workspace);
+    before := workspace_test_open_descriptors();
+    if before < 0 return;
+    for 0..50 {
+        completions := workspace_complete_import(&workspace, -1, "", false);
+        for path: completions.paths.view() path.free();
+        completions.paths.free();
+    }
+    #assert workspace_test_open_descriptors() == before;
+}
+
+workspace_test_file_uri :: (path: str) -> str {
+    normalized := workspace_normalize_path(path);
+    defer normalized.free();
+    return workspace_path_to_uri(normalized);
+}
+
+// `file_limit` bounds discovered files only: the prelude and editor buffers
+// are always admitted.
+workspace_test_file_limit :: (root: str) {
+    workspace_test_write(tprint("{}/limit_a.glo", root), "#public limit_a :: 1;");
+    workspace_test_write(tprint("{}/limit_b.glo", root), "#public limit_b :: 2;");
+    workspace: Workspace;
+    defer workspace_destroy(&workspace);
+    workspace_init(&workspace);
+    #assert workspace.prelude >= 0 && workspace.counted_files == 0;
+    workspace.file_limit = 1;
+    first_uri := workspace_test_file_uri(tprint("{}/limit_first.glo", root));
+    defer first_uri.free();
+    first := workspace_open(&workspace, first_uri,
+        "#import \"./limit_a.glo\";\n#import \"./limit_b.glo\";\n", 1);
+    #assert first >= 0;
+    #assert workspace.counted_files == 1 && workspace.truncated;
+    #assert workspace.files[first].imports[0].target >= 0;
+    #assert workspace.files[first].imports[1].target == -1;
+    second_uri := workspace_test_file_uri(tprint("{}/limit_second.glo", root));
+    defer second_uri.free();
+    #assert workspace_open(&workspace, second_uri, "second :: 2;", 1) >= 0;
+    #assert workspace_open(&workspace, "untitled:limit", "third :: 3;", 1) >= 0;
+}
+
+// `#export "Module"` names a module, as `#import` does.
+workspace_test_export_module :: (modules: str) {
+    workspace: Workspace;
+    defer workspace_destroy(&workspace);
+    workspace_add_import_path(&workspace, modules);
+    file := workspace_open(&workspace, "untitled:export.glo",
+        "#export \"Shapes\";\n#export \"./Shapes\";\n", 1);
+    shapes := workspace.files[file].imports[0].target;
+    #assert shapes >= 0;
+    #assert workspace_suffix(workspace.files[shapes].path, "Shapes/module.glo");
+    #assert workspace.files[file].imports[1].target == -1;
+}
+
+// Several editor URIs can name one file; it closes with the last of them.
+workspace_test_aliases :: (root: str) {
+    path := tprint("{}/alias.glo", root);
+    workspace_test_write(path, "alias_value :: 1;");
+    normalized := workspace_normalize_path(path);
+    defer normalized.free();
+    first := workspace_path_to_uri(normalized);
+    defer first.free();
+    second := tprint("file://localhost{}", normalized);
+    workspace: Workspace;
+    defer workspace_destroy(&workspace);
+    index := workspace_open(&workspace, first, "alias_value :: 2;", 1);
+    #assert index >= 0;
+    #assert workspace_open(&workspace, second, "alias_value :: 2;", 1) == index;
+    #assert workspace.files[index].aliases.count == 2 && workspace.files[index].uri == second;
+    workspace_close(&workspace, index, second);
+    #assert workspace.files[index].open && workspace.files[index].uri == first;
+    #assert workspace_change(&workspace, index, "alias_value :: 3;", 2);
+    #assert workspace_find(&workspace, first) == index;
+    workspace_close(&workspace, index, first);
+    #assert !workspace.files[index].open && workspace.files[index].aliases.count == 0;
+    #assert workspace.files[index].source == "alias_value :: 1;";
+    // Without a URI every alias closes, as before.
+    #assert workspace_open(&workspace, first, "alias_value :: 4;", 3) == index;
+    #assert workspace_open(&workspace, second, "alias_value :: 4;", 3) == index;
+    workspace_close(&workspace, index);
+    #assert !workspace.files[index].open && workspace.files[index].aliases.count == 0;
+}
+
+// `file:/path` has no authority. Untitled buffers get a private overlay path.
+workspace_test_uri_forms :: () {
+    short := workspace_uri_to_path("file:/tmp/a%20b.glo");
+    defer short.free();
+    expected := workspace_normalize_path("/tmp/a b.glo");
+    defer expected.free();
+    #assert short == expected;
+    workspace: Workspace;
+    defer workspace_destroy(&workspace);
+    first := workspace_open(&workspace, "untitled:Untitled-1", "first :: 1;", 1);
+    second := workspace_open(&workspace, "untitled:Untitled-2", "second :: 2;", 1);
+    #assert first >= 0 && second >= 0 && first != second;
+    #assert workspace_suffix(workspace.files[first].path, ".glo");
+    #assert workspace.files[first].path != workspace.files[second].path;
+    #assert workspace_find(&workspace, "untitled:Untitled-1") == first;
+    #assert workspace_find(&workspace, "untitled:Untitled-2") == second;
+    other := workspace_open(&workspace, "git:/repo/x.glo?ref", "third :: 3;", 1);
+    #assert other >= 0 && workspace.files[other].path.count == 0;
+}
+
+// One unreadable directory must not stop the rest of the scan.
+workspace_test_unreadable_scan :: (root: str) {
+    scan := tprint("{}/scan", root);
+    for name: .["a", "b", "c", "locked"] {
+        created := create_directory(tprint("{}/{}", scan, name), .make_parent = true);
+        #assert created.is_ok();
+        workspace_test_write(tprint("{}/{}/scanned_{}.glo", scan, name, name), "#public x :: 1;");
+    }
+    locked := tprint("{}/locked", scan);
+    _ := change_mode(locked, File_Permissions.None);
+    defer { _ := change_mode(locked, File_Permissions.Default_Directory); }
+    workspace: Workspace;
+    defer workspace_destroy(&workspace);
+    uri := workspace_test_file_uri(scan);
+    defer uri.free();
+    workspace_scan_root(&workspace, uri);
+    for name: .["a", "b", "c"] {
+        path := workspace_normalize_path(tprint("{}/{}/scanned_{}.glo", scan, name, name));
+        defer path.free();
+        #assert workspace_find_path(&workspace, path) >= 0;
+    }
+}
+
+workspace_test_location :: (out: *String_Builder, path: str, start: ssize, end: ssize) {
+    out.write_string("{\"file\":");
+    write_json_string(out, path);
+    out.writef("{},\"range\":{{\"start\":{{\"byte\":{},\"line\":0,\"character\":{}}},", "", start, start);
+    out.writef("\"end\":{{\"byte\":{},\"line\":0,\"character\":{}}}}}}}", end, end);
+}
+
+workspace_test_accept :: (workspace: *Workspace, index: ssize, json: str) -> bool {
+    completed: Compiler_Result = .{
+        .file = index, .epoch = workspace.compiler_epoch,
+        .version = workspace.files[index].version, .json = json.clone(),
+    };
+    defer completed.free();
+    return compiler_accept(workspace, &completed);
+}
+
+workspace_test_generated :: (workspace: *Workspace, index: ssize, names: []const str) -> bool {
+    json: String_Builder;
+    defer json.free();
+    json.write_string("{\"semantics\":{\"generated_sources\":[");
+    for name, at: names {
+        if at > 0 json.write_byte(#char ",");
+        json.write_string("{\"file\":");
+        write_json_string(&json, tprint("/tmp/glolsp-workspace-generated/{}.glo", name));
+        json.write_string(",\"text\":");
+        write_json_string(&json, tprint("#public {} :: 1;", name));
+        json.write_string(",\"insertions\":[");
+        workspace_test_location(&json, workspace.files[index].path, 0, 1);
+        json.write_string("]}");
+    }
+    json.write_string("]}}");
+    return workspace_test_accept(workspace, index, json.to_string());
+}
+
+workspace_test_generated_path :: (workspace: *Workspace, name: str) -> ssize {
+    return workspace_find_path(workspace, tprint("/tmp/glolsp-workspace-generated/{}.glo", name));
+}
+
+// Indexed offset lookup returns the same fact as a scan in report order:
+// the earliest-reported fact of the kind whose range holds the offset.
+workspace_test_fact_lookup :: (workspace: *Workspace, index: ssize) {
+    file := &workspace.files[index];
+    #assert file.compiler_fact_order.count == file.compiler_facts.count;
+    saved := file.compiler_facts.take();
+    defer {
+        for fact: workspace.files[index].compiler_facts.view() fact.type_name.free();
+        workspace.files[index].compiler_facts.free();
+        workspace.files[index].compiler_facts = saved;
+        workspace_index_compiler_facts(&workspace.files[index]);
+    }
+    // Reported out of order, overlapping, nested and touching.
+    spans :: .[.[10, 14, 2], .[0, 4, 2], .[2, 12, 3], .[4, 6, 2], .[12, 13, 1], .[2, 3, 2], .[30, 31, 2]];
+    for span: spans {
+        file.compiler_facts.push(.{
+            .start = span[0], .end = span[1], .kind = cast(s32)span[2],
+            .type_name = tprint("{}-{}", span[0], span[1]).clone(),
+        });
+    }
+    workspace_index_compiler_facts(file);
+    #assert file.compiler_fact_span == 10;
+    for at: -1..33 {
+        for wanted: 0..4 {
+            kind := cast(s32)wanted;
+            expected: Compiler_Fact;
+            for fact: file.compiler_facts.view() {
+                if (kind == 0 || kind == fact.kind) && at >= fact.start && at < fact.end {
+                    expected = fact;
+                    break;
+                }
+            }
+            found := workspace_compiler_fact(workspace, index, at, kind);
+            #assert found.start == expected.start && found.end == expected.end &&
+                found.kind == expected.kind && found.type_name == expected.type_name;
+        }
+    }
+}
+
+// Snapshots: lone-CR positions, duplicate facts and bindings, and reuse of
+// generated entries that no current result emits.
+workspace_test_compiler_results :: (root: str) {
+    workspace: Workspace;
+    defer workspace_destroy(&workspace);
+    main_uri := workspace_test_file_uri(tprint("{}/snapshot.glo", root));
+    defer main_uri.free();
+    source :: "a::1;\rb::missing;\r";
+    index := workspace_open(&workspace, main_uri, source, 1);
+    path := workspace.files[index].path;
+    json: String_Builder;
+    defer json.free();
+    json.write_string("{\"file\":");
+    write_json_string(&json, path);
+    json.write_string(",\"diagnostics\":[{\"severity\":\"error\",\"message\":\"unbound\",\"location\":");
+    workspace_test_location(&json, path, 9, 16);
+    json.write_string(",\"notes\":[]}],\"semantics\":{\"facts\":[");
+    for kind, at: .["expression", "expression", "binding", "expression"] {
+        if at > 0 json.write_byte(#char ",");
+        json.write_string("{\"kind\":");
+        write_json_string(&json, kind);
+        json.write_string(",\"type\":\"s32\",\"location\":");
+        workspace_test_location(&json, path, 0, 1);
+        json.write_string(",\"definition\":");
+        workspace_test_location(&json, path, 0, 1);
+        json.write_byte(#char "}");
+    }
+    json.write_string("],\"scopes\":[{\"file\":");
+    write_json_string(&json, path);
+    json.write_string(",\"bindings\":[");
+    for name, at: .["a", "a", "alias", "a"] {
+        if at > 0 json.write_byte(#char ",");
+        json.write_string("{\"name\":");
+        write_json_string(&json, name);
+        json.write_string(",\"definition\":");
+        workspace_test_location(&json, path, 0, 1);
+        json.write_byte(#char "}");
+    }
+    json.write_string("]}]}}");
+    #assert workspace_test_accept(&workspace, index, json.to_string());
+    #assert workspace.files[index].compiler_facts.count == 2;
+    #assert workspace.files[index].compiler_bindings.count == 2;
+    // Another root's result in the same epoch repeats the same facts.
+    #assert workspace_test_accept(&workspace, index, json.to_string());
+    #assert workspace.files[index].compiler_facts.count == 2;
+    #assert workspace.files[index].compiler_bindings.count == 2;
+    workspace_test_fact_lookup(&workspace, index);
+    diagnostics: String_Builder;
+    defer diagnostics.free();
+    compiler_write_diagnostics(&diagnostics, &workspace, index);
+    #assert diagnostics.to_string().contains("\"start\":{\"line\":1,\"character\":3}");
+    #assert diagnostics.to_string().contains("\"end\":{\"line\":1,\"character\":10}");
+
+    other_uri := workspace_test_file_uri(tprint("{}/snapshot_other.glo", root));
+    defer other_uri.free();
+    other := workspace_open(&workspace, other_uri, "c::1;", 1);
+    #assert workspace_test_generated(&workspace, index, .["g1"]);
+    base := workspace.files.count;
+    // Entries emitted in the current epoch belong to live results.
+    #assert workspace_test_generated(&workspace, other, .["g2"]);
+    #assert workspace.files.count == base + 1;
+    #assert workspace_test_generated_path(&workspace, "g1") >= 0;
+    #assert workspace_change(&workspace, index, "a::2;", 2);
+    #assert workspace_test_generated(&workspace, index, .["g3"]);
+    #assert workspace.files.count == base + 1;
+    g3 := workspace_test_generated_path(&workspace, "g3");
+    #assert g3 >= 0 && workspace.files[g3].generated && workspace.files[g3].source == "#public g3 :: 1;";
+    #assert workspace.files[g3].generated_origin == index;
+    #assert workspace_change(&workspace, index, "a::3;", 3);
+    // A result's own existing entries are never reused for its other sources.
+    #assert workspace_test_generated(&workspace, index, .["g3", "g4"]);
+    #assert workspace.files.count == base + 1;
+    #assert workspace_test_generated_path(&workspace, "g3") == g3;
+    #assert workspace_test_generated_path(&workspace, "g4") >= 0;
+    #assert workspace_test_generated_path(&workspace, "g1") < 0;
+    #assert workspace_test_generated_path(&workspace, "g2") < 0;
+}
+
+// A closed document that leaves the workspace keeps no compiler snapshot.
+workspace_test_unload_releases_compiler_snapshot :: () {
+    workspace: Workspace;
+    workspace_init(&workspace);
+    defer workspace_destroy(&workspace);
+    index := workspace_open(&workspace, "file:///glolsp-unsaved/closed.glo", "value :: 1;\n", 1);
+    #assert index >= 0;
+    completed: Compiler_Result = .{
+        .file = index, .epoch = workspace.compiler_epoch, .version = 1,
+        .json = "{\"diagnostics\":[]}".clone(), .output = "captured".clone(),
+    };
+    defer completed.free();
+    #assert compiler_accept(&workspace, &completed);
+    #assert workspace.files[index].compiler_ready;
+    // Nothing on disk backs the path, so closing unloads the file.
+    workspace_close(&workspace, index);
+    #assert !workspace.files[index].active;
+    #assert !workspace.files[index].compiler_ready;
+    #assert workspace.files[index].compiler_output.count == 0;
+}
+
 main :: () {
+    workspace_test_unload_releases_compiler_snapshot();
     workspace_test_uri();
     root :: "build/workspace-fixtures";
     _ := remove_all(root);
@@ -59,6 +389,21 @@ main :: () {
     prelude_files := workspace.files.count;
     #assert workspace.prelude >= 0;
     workspace_add_import_path(&workspace, "build/workspace-fixtures/modules");
+    {
+        // Regression fixtures stay out of the scanned fixture root.
+        regressions :: "build/workspace-regressions";
+        _ := remove_all(regressions);
+        made := create_directory(regressions, .make_parent = true);
+        #assert made.is_ok();
+        defer { _ := remove_all(regressions); }
+        workspace_test_completion_descriptors();
+        workspace_test_file_limit(regressions);
+        workspace_test_export_module("build/workspace-fixtures/modules");
+        workspace_test_aliases(regressions);
+        workspace_test_uri_forms();
+        workspace_test_unreadable_scan(regressions);
+        workspace_test_compiler_results(regressions);
+    }
     completion_parses := workspace.parse_count;
     completions := workspace_complete_import(&workspace, -1, "Sha", false);
     defer { for path: completions.paths.view() path.free(); }
@@ -96,7 +441,7 @@ main :: () {
     workspace_test_write(part_path, "#public value :: 5;");
     workspace_watch(&workspace, part_uri);
     #assert workspace.files[part].source == "#public value :: 5;";
-    removed := os_fs_remove_path(part_path);
+    removed := remove(part_path).is_ok();
     #assert removed;
     workspace_watch(&workspace, part_uri);
     #assert !workspace.files[part].active;
@@ -129,19 +474,42 @@ main :: () {
     #assert ambiguous.files[ambiguous_file].imports[0].ambiguous;
     workspace_test_write("build/workspace-fixtures/modules/Root_Module.glo",
         "#public Root_Value :: 1;");
-    dynamic: Workspace;
-    defer workspace_destroy(&dynamic);
-    caller := workspace_open(&dynamic, "untitled:roots.glo", "#import \"Root_Module\";", 1);
-    #assert dynamic.files[caller].imports[0].target == -1;
     module_root := workspace_path_to_uri("build/workspace-fixtures/modules");
     defer module_root.free();
+    // Like `glosso compile`, module names are not searched in workspace roots.
+    plain: Workspace;
+    defer workspace_destroy(&plain);
+    plain_caller := workspace_open(&plain, "untitled:plain.glo", "#import \"Root_Module\";", 1);
+    workspace_add_root(&plain, module_root);
+    #assert plain.files[plain_caller].imports[0].target == -1;
+    plain_modules := workspace_complete_import(&plain, plain_caller, "Root", false);
+    #assert plain_modules.paths.count == 0;
+    plain_modules.paths.free();
+    plain_input := compiler_input(&plain, plain_caller);
+    #assert plain_input.module_paths.count == 0;
+    plain_input.free();
+    // `rootsAsModulePaths` restores the search, including after root changes.
+    dynamic: Workspace;
+    defer workspace_destroy(&dynamic);
+    workspace_set_roots_as_module_paths(&dynamic, true);
+    caller := workspace_open(&dynamic, "untitled:roots.glo", "#import \"Root_Module\";", 1);
+    #assert dynamic.files[caller].imports[0].target == -1;
     workspace_add_root(&dynamic, module_root);
     #assert dynamic.files[caller].imports[0].target >= 0;
+    dynamic_input := compiler_input(&dynamic, caller);
+    #assert dynamic_input.module_paths.count == 1;
+    dynamic_input.free();
+    root_modules := workspace_complete_import(&dynamic, caller, "Root", false);
+    #assert root_modules.paths.count == 1 && root_modules.paths[0] == "Root_Module";
+    for path: root_modules.paths.view() path.free();
+    root_modules.paths.free();
     workspace_remove_root(&dynamic, module_root);
     #assert dynamic.files[caller].imports[0].target == -1;
     removed_generation := dynamic.generation;
     workspace_add_root(&dynamic, module_root);
     #assert dynamic.files[caller].imports[0].target >= 0;
     #assert dynamic.generation > removed_generation;
+    workspace_set_roots_as_module_paths(&dynamic, false);
+    #assert dynamic.files[caller].imports[0].target == -1;
     print("workspace tests passed\n");
 }
