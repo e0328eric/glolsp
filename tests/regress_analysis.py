@@ -302,6 +302,36 @@ class AnalysisRegressions(unittest.TestCase):
         self.assertIn("count", self.labels(uri, "count {", 0, 3))
         self.assertIn("count", self.labels(uri, "count]", 0, 3))
 
+    def test_trigger_character_without_word_lists_nothing(self):
+        # The space trigger fired on auto-indentation after Enter and listed
+        # every name in scope, so a second Enter inserted the first one.
+        source = ('Point :: struct { x: s32; }\n'
+                  'main :: () {\n'
+                  '    i := 1; point: Point;\n'
+                  '    while i < 3 {\n'
+                  '        \n'
+                  '        i = i / 2;\n'
+                  '        _ := point.x;\n'
+                  '    }\n'
+                  '}\n')
+        uri = self.open("trigger.glo", source)
+
+        def labels(needle, offset, kind, character=None):
+            context = {"triggerKind": kind}
+            if character is not None:
+                context["triggerCharacter"] = character
+            result = self.at("completion", uri, needle, 0, offset, context=context)
+            return {item["label"] for item in result["items"]}
+
+        indent = "        \n"
+        self.assertEqual(labels(indent, 8, 2, " "), set())
+        self.assertEqual(labels("/ 2", 1, 2, "/"), set())
+        self.assertEqual(labels("/ 2", 2, 2, " "), set())
+        # An explicit request, or a word or member dot before the cursor, still completes.
+        self.assertIn("i", labels(indent, 8, 1))
+        self.assertIn("i", self.labels(uri, indent, 0, 8))
+        self.assertEqual(labels(".x", 1, 2, "."), {"x"})
+
     def quick_fix_titles(self, uri):
         source = self.sources[uri]
         actions = self.client.request("textDocument/codeAction", {

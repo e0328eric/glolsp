@@ -610,6 +610,7 @@ ide_write_outline_symbol :: (
     workspace: *Workspace,
     file: ssize,
     offset: ssize,
+    triggered: bool = false,
 ) {
     if ide_write_import_completion(out, workspace, file, offset) return;
     syntax := &workspace.files[file].syntax;
@@ -639,13 +640,12 @@ ide_write_outline_symbol :: (
             }
         }
     }
-    if workspace.files[file].compiler_epoch != workspace.compiler_epoch
-        out.write_string("{\"isIncomplete\":true,\"items\":[");
-    else out.write_string("{\"isIncomplete\":false,\"items\":[");
+    incomplete := workspace.files[file].compiler_epoch != workspace.compiler_epoch;
     if index >= 0 {
         token := syntax.language.tokens[index];
         if token.kind == 3 || token.kind == 4 {
-            out.write_string("]}");
+            if incomplete out.write_string("{\"isIncomplete\":true,\"items\":[]}");
+            else out.write_string("{\"isIncomplete\":false,\"items\":[]}");
             return;
         }
         if token.kind == 1 || token.kind == 5 || token.kind == 7 {
@@ -657,6 +657,17 @@ ide_write_outline_symbol :: (
     dot := start - 1;
     while dot >= 0 && (source[dot] == #char " " || source[dot] == #char "\t") dot -= 1;
     member := ide_member_dot(source, dot);
+    // The space trigger exists for `#import |`. Elsewhere a trigger character
+    // with no word before it, such as indentation after Enter, a `/` operator
+    // or the second `.` of `..`, must not list every name in scope: the list
+    // would accept its first item on the next Enter. Only an explicit request
+    // completes from nothing.
+    if triggered && prefix.count == 0 && !member {
+        out.write_string("{\"isIncomplete\":false,\"items\":[]}");
+        return;
+    }
+    if incomplete out.write_string("{\"isIncomplete\":true,\"items\":[");
+    else out.write_string("{\"isIncomplete\":false,\"items\":[");
     candidates: [..]Symbol_Id;
     defer candidates.free();
     if member _ := candidates.replace(analysis_members_at(workspace, file, offset));

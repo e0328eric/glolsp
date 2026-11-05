@@ -526,7 +526,10 @@ server_start_analysis :: (server: *Server, output: *File) {
         symbol := analysis_symbol_at(workspace, file, offset);
         if method == {
             case "textDocument/completion";
-            ide_write_completion(&out, workspace, file, offset);
+            // triggerKind 2: typing a trigger character, not an explicit request.
+            request := json_field(params, "context");
+            triggered := json_integer(json_field(request, "triggerKind"), 1) == 2;
+            ide_write_completion(&out, workspace, file, offset, triggered);
             case "textDocument/hover";
             ide_write_hover(&out, workspace, file, offset);
             case "textDocument/definition", "textDocument/declaration";
