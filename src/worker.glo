@@ -15,8 +15,10 @@
 Server_Event ::: instance Freeable {
     free :: (event: *#Self_Type) {
         if event.* == {
-            case .input(frame); frame.body.free();
-            case .checked(completed); completed.free();
+        case .input(frame);
+            frame.body.free();
+        case .checked(completed);
+            completed.free();
         }
     }
 }
@@ -50,12 +52,21 @@ Compiler_Worker :: struct {
     worker_SetStdHandle :: (which: u32, handle: u64) -> s32 #foreign worker_kernel32 "SetStdHandle";
     worker_GetCurrentProcess :: () -> u64 #foreign worker_kernel32 "GetCurrentProcess";
     worker_DuplicateHandle :: (
-        source_process: u64, source: u64, target_process: u64, target: *u64,
-        access: u32, inherit: s32, options: u32,
+        source_process: u64,
+        source: u64,
+        target_process: u64,
+        target: *u64,
+        access: u32,
+        inherit: s32,
+        options: u32,
     ) -> s32 #foreign worker_kernel32 "DuplicateHandle";
     worker_CreateThread :: (
-        security: ?*void, stack_size: usize, proc: Thread_Proc, data: *void,
-        flags: u32, thread_id: *u32,
+        security: ?*void,
+        stack_size: usize,
+        proc: Thread_Proc,
+        data: *void,
+        flags: u32,
+        thread_id: *u32,
     ) -> u64 #foreign worker_kernel32 "CreateThread";
     worker_CloseHandle :: (handle: u64) -> s32 #foreign worker_kernel32 "CloseHandle";
     worker_open_osfhandle :: (handle: u64, flags: s32) -> s32 #foreign worker_msvcrt "_open_osfhandle";
@@ -75,7 +86,15 @@ Compiler_Worker :: struct {
         if handle == 0 || handle == WORKER_INVALID_HANDLE return 0;
         process := worker_GetCurrentProcess();
         copy: u64 = 0;
-        if worker_DuplicateHandle(process, handle, process, &copy, 0, 0, WORKER_DUPLICATE_SAME_ACCESS) == 0
+        if worker_DuplicateHandle(
+            process,
+            handle,
+            process,
+            &copy,
+            0,
+            0,
+            WORKER_DUPLICATE_SAME_ACCESS
+        ) == 0
             return 0;
         return copy;
     }
@@ -89,9 +108,9 @@ Compiler_Worker :: struct {
     worker_pthread_attr_init :: (attr: *void) -> s32 #foreign worker_pthread "pthread_attr_init";
     worker_pthread_attr_destroy :: (attr: *void) -> s32 #foreign worker_pthread "pthread_attr_destroy";
     worker_pthread_attr_setstacksize :: (attr: *void, size: usize) -> s32
-        #foreign worker_pthread "pthread_attr_setstacksize";
+    #foreign worker_pthread "pthread_attr_setstacksize";
     worker_pthread_create :: (thread: *?*void, attr: ?*void, proc: Thread_Proc, data: *void) -> s32
-        #foreign worker_pthread "pthread_create";
+    #foreign worker_pthread "pthread_create";
     worker_pthread_detach :: (thread: *void) -> s32 #foreign worker_pthread "pthread_detach";
 
     // F_DUPFD, F_SETFD and FD_CLOEXEC share these values on Linux, macOS and BSD.
@@ -128,16 +147,16 @@ Compiler_Worker :: struct {
         // startup. _dup2 closes those originals; the private copies stay open.
         // A runtime loaded later starts from the redirected standard handles.
         if File.open("NUL") == {
-            case .Ok(empty);
-                descriptor := worker_open_osfhandle(worker_private_handle(empty.handle), 0);
-                if descriptor >= 0 {
-                    _ = worker_crt_dup2(descriptor, 0);
-                    _ = worker_crt_close(descriptor);
-                }
-                // Kept open for the process: it is the standard input now.
-                _ = worker_SetStdHandle(WORKER_STD_INPUT, empty.handle);
-            case .Err;
-                rpc_report("could not open NUL for standard input");
+        case .Ok(empty);
+            descriptor := worker_open_osfhandle(worker_private_handle(empty.handle), 0);
+            if descriptor >= 0 {
+                _ = worker_crt_dup2(descriptor, 0);
+                _ = worker_crt_close(descriptor);
+            }
+            // Kept open for the process: it is the standard input now.
+            _ = worker_SetStdHandle(WORKER_STD_INPUT, empty.handle);
+        case .Err;
+            rpc_report("could not open NUL for standard input");
         }
         _ = worker_crt_dup2(2, 1);
         _ = worker_SetStdHandle(WORKER_STD_OUTPUT, errors);
@@ -153,11 +172,11 @@ Compiler_Worker :: struct {
         stdio.input = .{ .handle = cast(u64) input, .valid = true };
         stdio.output = .{ .handle = cast(u64) output, .valid = true };
         if File.open("/dev/null") == {
-            case .Ok(empty);
-                _ = worker_dup2(cast(s32) empty.handle, 0);
-                _ = empty.close();
-            case .Err;
-                rpc_report("could not open /dev/null for standard input");
+        case .Ok(empty);
+            _ = worker_dup2(cast(s32) empty.handle, 0);
+            _ = empty.close();
+        case .Err;
+            rpc_report("could not open /dev/null for standard input");
         }
         _ = worker_dup2(2, 1);
     }
@@ -170,7 +189,14 @@ Compiler_Worker :: struct {
     #if OUT.os == .Windows {
         // Reserve the whole stack; pages are committed only as they are touched.
         id: u32 = 0;
-        handle := worker_CreateThread(null, stack, proc, data, WORKER_STACK_SIZE_PARAM_IS_A_RESERVATION, &id);
+        handle := worker_CreateThread(
+            null,
+            stack,
+            proc,
+            data,
+            WORKER_STACK_SIZE_PARAM_IS_A_RESERVATION,
+            &id
+        );
         if handle != 0 {
             _ = worker_CloseHandle(handle);
             return true;
@@ -193,60 +219,82 @@ Compiler_Worker :: struct {
         }
     }
     if Thread.spawn(proc, data) == {
-        case .Ok(thread); _ = thread.detach(); return true;
-        case .Err; return false;
+    case .Ok(thread);
+        _ = thread.detach();
+        return true;
+    case .Err;
+        return false;
     }
 }
 
 worker_read_input :: (raw: *void) -> ?*void #c_call {
-    state := cast(*Input_Worker)raw;
+    state := cast(*Input_Worker) raw;
     defer delete(state);
-    #pattern ?events := state.events else { return null; };
+    #pattern ?events := state.events else {
+        return null;
+    };
     while true {
         reset_temporary_storage();
         frame := rpc_read_frame(&state.input);
         // send takes ownership on both success and a closed channel.
-        if #pattern.Err = events.send(.input(frame)) break;
+        if #pattern .Err = events.send(.input(frame)) break;
         if frame.status <= 0 break;
     }
     return null;
 }
 
 worker_check :: (raw: *void) -> ?*void #c_call {
-    worker := cast(*Compiler_Worker)raw;
+    worker := cast(*Compiler_Worker) raw;
     defer delete(worker);
-    #pattern ?jobs := worker.jobs else { return null; };
-    #pattern ?events := worker.events else { return null; };
+    #pattern ?jobs := worker.jobs else {
+        return null;
+    };
+    #pattern ?events := worker.events else {
+        return null;
+    };
     while true {
         reset_temporary_storage();
-        #pattern.Ok(received) := jobs.recv() else { break; };
-        #pattern ?input := received else { break; };
+        #pattern .Ok(received) := jobs.recv() else {
+            break;
+        };
+        #pattern ?input := received else {
+            break;
+        };
         defer input.free();
         completed := compiler_run(&input);
-        if #pattern.Err = events.send(.checked(completed)) break;
+        if #pattern .Err = events.send(.checked(completed)) break;
     }
     return null;
 }
 
 #public worker_start_input :: (events: *const Channel(Server_Event), input: File) -> bool {
     #push_allocator(heap_allocator());
-    #pattern ?state := new(Input_Worker) else { return false; };
+    #pattern ?state := new(Input_Worker) else {
+        return false;
+    };
     state.events = ?events.clone();
     state.input = input;
-    if Thread.spawn(worker_read_input, cast(*void)state) == {
-        case .Ok(thread); _ = thread.detach(); return true;
-        case .Err; delete(state); return false;
+    if Thread.spawn(worker_read_input, cast(*void) state) == {
+    case .Ok(thread);
+        _ = thread.detach();
+        return true;
+    case .Err;
+        delete(state);
+        return false;
     }
 }
 
 #public worker_start_compiler :: (
-    events: *const Channel(Server_Event), jobs: *const Channel(Compiler_Input),
+    events: *const Channel(Server_Event),
+    jobs: *const Channel(Compiler_Input),
 ) -> bool {
     #push_allocator(heap_allocator());
-    #pattern ?worker := new(Compiler_Worker) else { return false; };
+    #pattern ?worker := new(Compiler_Worker) else {
+        return false;
+    };
     worker.events = ?events.clone();
     worker.jobs = ?jobs.clone();
-    if !worker_spawn(worker_check, cast(*void)worker, WORKER_COMPILER_STACK) {
+    if !worker_spawn(worker_check, cast(*void) worker, WORKER_COMPILER_STACK) {
         delete(worker);
         return false;
     }

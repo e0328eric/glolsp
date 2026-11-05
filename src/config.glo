@@ -51,8 +51,9 @@ config_resolve_compiler :: (value: str, file: str) -> str {
     }
     // In particular, ~/.local/bin/glosso may link to another installation.
     if canonical(path) == {
-        case .Ok(resolved); return resolved;
-        case .Err;
+    case .Ok(resolved);
+        return resolved;
+    case .Err;
     }
     return path_clean(path);
 }
@@ -77,10 +78,11 @@ config_compiler_std_path :: (compiler: str) -> str {
     if file.count == 0 return "".clone();
     source: str;
     if read_file_up_to(file, 1024 * 1024 + 1) == {
-        case .Err(failure);
-            if failure.kind != .Not_Found config_report(file, "could not read configuration");
-            return "".clone();
-        case .Ok(contents); source = contents;
+    case .Err(failure);
+        if failure.kind != .Not_Found config_report(file, "could not read configuration");
+        return "".clone();
+    case .Ok(contents);
+        source = contents;
     }
     defer source.free();
     if source.count > 1024 * 1024 {
@@ -88,23 +90,26 @@ config_compiler_std_path :: (compiler: str) -> str {
         return "".clone();
     }
     if Serialization_Document.toml_document_from_string(source) == {
-        case .Err(failure);
-            config_report(file, tprint("invalid TOML at byte {}: {}", failure.offset, failure.message));
-        case .Ok(document);
-            defer document.destroy();
-            if #pattern ?field = document.root.field_value("compiler_path") {
-                if #partial field.* == {
-                    case .text(value);
-                        if value.count > 0 && !path_has_nul(value) {
-                            compiler := config_resolve_compiler(value, file);
-                            defer compiler.free();
-                            if !is_regular_file(compiler).unwrap_or(false)
-                                config_report(file, tprint("compiler_path does not name a file: {}", compiler));
-                            return config_compiler_std_path(compiler);
-                        }
+    case .Err(failure);
+        config_report(file, tprint("invalid TOML at byte {}: {}", failure.offset, failure.message));
+    case .Ok(document);
+        defer document.destroy();
+        if #pattern ?field = document.root.field_value("compiler_path") {
+            if #partial field.* == {
+            case .text(value);
+                if value.count > 0 && !path_has_nul(value) {
+                    compiler := config_resolve_compiler(value, file);
+                    defer compiler.free();
+                    if !is_regular_file(compiler).unwrap_or(false)
+                        config_report(
+                            file,
+                            tprint("compiler_path does not name a file: {}", compiler)
+                        );
+                    return config_compiler_std_path(compiler);
                 }
-                config_report(file, "compiler_path must be a nonempty path string without NUL bytes");
             }
+            config_report(file, "compiler_path must be a nonempty path string without NUL bytes");
+        }
     }
     return "".clone();
 }

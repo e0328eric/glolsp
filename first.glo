@@ -35,22 +35,28 @@ glolsp_copy_tree :: (source: str, destination: str) -> bool {
         print("could not copy {} to {}\n", source, destination);
         return false;
     }
-    if !is_directory(destination).unwrap_or(false) && create_directory(destination, File_Permissions.Default_Directory, true).is_err() {
+    if !is_directory(destination).unwrap_or(false) && create_directory(
+        destination,
+        File_Permissions.Default_Directory,
+        true
+    ).is_err() {
         print("could not create {}\n", destination);
         return false;
     }
     listed := read_directory(source);
     if listed == {
-        case .Err(failure); report_error(failure); return false;
-        case .Ok(entries);
-            defer entries.free();
-            for entry: entries.entries.view() {
-                from := path_join(source, entry.name);
-                defer from.free();
-                to := path_join(destination, entry.name);
-                defer to.free();
-                if !glolsp_copy_tree(from, to) return false;
-            }
+    case .Err(failure);
+        report_error(failure);
+        return false;
+    case .Ok(entries);
+        defer entries.free();
+        for entry: entries.entries.view() {
+            from := path_join(source, entry.name);
+            defer from.free();
+            to := path_join(destination, entry.name);
+            defer to.free();
+            if !glolsp_copy_tree(from, to) return false;
+        }
     }
     return true;
 }
@@ -71,8 +77,20 @@ glolsp_remove_bundled_std :: (resources: str) -> bool {
 // Bundle the matching frontend and Bindgen headers. Standard modules are
 // resolved at runtime from GLOSSO_STD or the user's Glosso installation.
 glolsp_bundle :: () -> bool {
-    if (!is_directory("share").unwrap_or(false) && create_directory("share", File_Permissions.Default_Directory, true).is_err()) ||
-       (!is_directory("build").unwrap_or(false) && create_directory("build", File_Permissions.Default_Directory, true).is_err()) {
+    if (
+        !is_directory("share").unwrap_or(false) && create_directory(
+            "share",
+            File_Permissions.Default_Directory,
+            true
+        ).is_err()
+    ) ||
+        (
+            !is_directory("build").unwrap_or(false) && create_directory(
+                "build",
+                File_Permissions.Default_Directory,
+                true
+            ).is_err()
+        ) {
         print("could not create bundle directories\n");
         return false;
     }
@@ -92,7 +110,11 @@ glolsp_bundle :: () -> bool {
         print("Clang resource headers are missing: {}\n", resources);
         return false;
     }
-    if !is_directory("share/lib").unwrap_or(false) && create_directory("share/lib", File_Permissions.Default_Directory, true).is_err() return false;
+    if !is_directory("share/lib").unwrap_or(false) && create_directory(
+        "share/lib",
+        File_Permissions.Default_Directory,
+        true
+    ).is_err() return false;
     resource_destination := "share/lib/clang";
     #if OUT.os == .Windows resource_destination = "build/lib/clang";
     if !glolsp_copy_tree(resources, resource_destination) return false;
@@ -108,10 +130,12 @@ glolsp_default_install_prefix :: () -> str {
     variable := "HOME";
     #if HOST.os == .Windows variable = "USERPROFILE";
     if environment_get_or(variable, "") == {
-        case .Err(failure); report_error(failure); return "";
-        case .Ok(directory);
-            defer directory.free();
-            if directory.count > 0 return path_join(directory, ".local/glolsp");
+    case .Err(failure);
+        report_error(failure);
+        return "";
+    case .Ok(directory);
+        defer directory.free();
+        if directory.count > 0 return path_join(directory, ".local/glolsp");
     }
     print("{} is not set; use install --prefix DIR\n", variable);
     return "";
@@ -129,8 +153,14 @@ glolsp_install_config :: () -> bool {
         file := path_join(folder, "config.toml");
         defer file.free();
         if exists(file).unwrap_or(false) || is_symlink(file).unwrap_or(false) return true;
-        if (!is_directory(folder).unwrap_or(false) && create_directory(folder, File_Permissions.Default_Directory, true).is_err()) ||
-           copy_file("config.example.toml", file, Copy_Policy.Fail_If_Exists).is_err() {
+        if (
+            !is_directory(folder).unwrap_or(false) && create_directory(
+                folder,
+                File_Permissions.Default_Directory,
+                true
+            ).is_err()
+        ) ||
+            copy_file("config.example.toml", file, Copy_Policy.Fail_If_Exists).is_err() {
             print("could not create {}\n", file);
             return false;
         }
@@ -147,15 +177,21 @@ glolsp_install :: (prefix: str) -> bool {
     defer resources.free();
     // Reject copying the bundle into itself, including through symlinks.
     if relative(resources, "share") == {
-        case .Err(failure); report_error(failure); return false;
-        case .Ok(path);
-            defer path.free();
-            if path_lexically_contains(".", path) {
-                print("installation share directory must be outside the build's share directory\n");
-                return false;
-            }
+    case .Err(failure);
+        report_error(failure);
+        return false;
+    case .Ok(path);
+        defer path.free();
+        if path_lexically_contains(".", path) {
+            print("installation share directory must be outside the build's share directory\n");
+            return false;
+        }
     }
-    if !is_directory(binaries).unwrap_or(false) && create_directory(binaries, File_Permissions.Default_Directory, true).is_err() {
+    if !is_directory(binaries).unwrap_or(false) && create_directory(
+        binaries,
+        File_Permissions.Default_Directory,
+        true
+    ).is_err() {
         print("could not create {}\n", binaries);
         return false;
     }
@@ -183,7 +219,11 @@ glolsp_build :: (
     source: str = "main.glo",
     name: str = "glolsp",
 ) -> bool {
-    if !is_directory("build").unwrap_or(false) && create_directory("build", File_Permissions.Default_Directory, true).is_err() {
+    if !is_directory("build").unwrap_or(false) && create_directory(
+        "build",
+        File_Permissions.Default_Directory,
+        true
+    ).is_err() {
         print("could not create build/\n");
         return false;
     }
@@ -191,10 +231,11 @@ glolsp_build :: (
     cache_result := absolute("build/cache");
     cache_path: str;
     if cache_result == {
-        case .Ok(path); cache_path = path;
-        case .Err(failure);
-            report_error(failure);
-            return false;
+    case .Ok(path);
+        cache_path = path;
+    case .Err(failure);
+        report_error(failure);
+        return false;
     }
     defer cache_path.free();
     options := profile.options();
@@ -209,11 +250,11 @@ glolsp_build :: (
     profile.set_options(options);
     built := compile_file(source, profile);
     if built == {
-        case .Ok;
-        case .Err(failure);
-            print("Glosso build failed for {}:\n", source);
-            report_error(failure);
-            return false;
+    case .Ok;
+    case .Err(failure);
+        print("Glosso build failed for {}:\n", source);
+        report_error(failure);
+        return false;
     }
     return true;
 }
@@ -222,10 +263,10 @@ glolsp_build :: (
 glolsp_run_command :: (command: *Command) -> ssize {
     outcome := command.*.run();
     if outcome == {
-        case .Ok(finished);
-        if finished.status.exited return cast(ssize)finished.status.code;
+    case .Ok(finished);
+        if finished.status.exited return cast(ssize) finished.status.code;
         return 1;
-        case .Err(failure);
+    case .Err(failure);
         if failure.child.valid _ := failure.child.close();
         report_error(failure);
         return 1;
@@ -251,7 +292,7 @@ glolsp_task :: () {
     task := "build";
     if args.count > 0 task = args[0];
     if #partial task == {
-        case "help", "--help", "-h";
+    case "help", "--help", "-h";
         glolsp_task_usage();
         return;
     }
@@ -279,21 +320,21 @@ glolsp_task :: () {
     if !glolsp_bundle() exit(1);
     if !glolsp_build() exit(1);
     if task == {
-        case "build";
+    case "build";
         print("built {}\n", glolsp_executable());
         return;
-        case "install";
+    case "install";
         if !glolsp_install(install_prefix) exit(1);
         if args.count == 1 && !glolsp_install_config() exit(1);
         return;
-        case "run";
+    case "run";
         command := Command.command_make(glolsp_executable());
         for index: 1..args.count command.add_argument(args[index]);
         status := glolsp_run_command(&command);
         command.destroy();
         if status != 0 exit(status);
         return;
-        else;
+    else;
         glolsp_test();
     }
 }

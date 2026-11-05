@@ -7,8 +7,7 @@
 #import "File_System/Path";
 #import "Memory/Ownership";
 
-
-#public Analysis_Type_View :: struct  {
+#public Analysis_Type_View :: struct {
     kind: Type_Kind;
     name: str;
     symbol: Symbol_Id;
@@ -23,10 +22,15 @@
 #public analysis_type_view :: (workspace: *const Workspace, id: Type_Id) -> Analysis_Type_View {
     value := &workspace.types[id];
     return .{
-        .kind = value.kind, .name = value.name, .symbol = value.symbol,
-        .element = value.element, .return_type = value.return_type,
-        .matrix_rows = value.matrix_rows, .matrix_columns = value.matrix_columns,
-        .parameters = value.parameters.view(), .arguments = value.arguments.view(),
+        .kind = value.kind,
+        .name = value.name,
+        .symbol = value.symbol,
+        .element = value.element,
+        .return_type = value.return_type,
+        .matrix_rows = value.matrix_rows,
+        .matrix_columns = value.matrix_columns,
+        .parameters = value.parameters.view(),
+        .arguments = value.arguments.view(),
     };
 }
 
@@ -50,9 +54,13 @@
 }
 
 #public analysis_new_type :: (
-    workspace: *Workspace, kind: Type_Kind, name: str = "", symbol: Symbol_Id = .{},
+    workspace: *Workspace,
+    kind: Type_Kind,
+    name: str = "",
+    symbol: Symbol_Id = .{},
     element: Type_Id = -1,
-    matrix_rows: ssize = -1, matrix_columns: ssize = -1,
+    matrix_rows: ssize = -1,
+    matrix_columns: ssize = -1,
 ) -> Type_Id {
     for i: 0..workspace.types.count {
         existing := analysis_type_view(workspace, i);
@@ -62,10 +70,16 @@
         if existing.symbol.file != symbol.file || existing.symbol.symbol != symbol.symbol continue;
         if existing.arguments.count == 0 && existing.parameters.count == 0 return i;
     }
-    workspace.types.push(.{
-        .kind = kind, .name = name, .symbol = symbol, .element = element,
-        .matrix_rows = matrix_rows, .matrix_columns = matrix_columns,
-    });
+    workspace.types.push(
+        .{
+            .kind = kind,
+            .name = name,
+            .symbol = symbol,
+            .element = element,
+            .matrix_rows = matrix_rows,
+            .matrix_columns = matrix_columns,
+        }
+    );
     return workspace.types.count - 1;
 }
 
@@ -82,7 +96,9 @@
 }
 
 #public analysis_same_unit :: (
-    workspace: *const Workspace, file: ssize, target: ssize,
+    workspace: *const Workspace,
+    file: ssize,
+    target: ssize,
 ) -> bool {
     return file >= 0 && target >= 0 && file < workspace.unit_owners.count &&
         target < workspace.unit_owners.count &&
@@ -96,7 +112,7 @@
     for file: 0..workspace.files.count {
         path := workspace.files[file].path;
         if workspace.std_path.count == 0 || path.count == 0 ||
-           !path_lexically_contains(workspace.std_path, path) continue;
+            !path_lexically_contains(workspace.std_path, path) continue;
         if standard < 0 standard = file;
         workspace.unit_owners[file] = standard;
     }
@@ -115,14 +131,16 @@
     }
 }
 
-#public Analysis_Call_Argument :: struct  {
+#public Analysis_Call_Argument :: struct {
     value: ssize = -1;
     label: ssize = -1;
     name: str;
 }
 
 #public analysis_call_argument :: (
-    workspace: *const Workspace, file: ssize, node: ssize,
+    workspace: *const Workspace,
+    file: ssize,
+    node: ssize,
 ) -> Analysis_Call_Argument {
     result: Analysis_Call_Argument = .{ .value = node };
     expression := workspace.files[file].syntax.nodes[node];
@@ -130,7 +148,7 @@
         result.value = expression.value_node;
         result.label = node;
     } else if expression.kind == .Binary && analysis_text(workspace, file, node) == "=" &&
-              expression.left >= 0 {
+        expression.left >= 0 {
         label := workspace.files[file].syntax.nodes[expression.left];
         if label.kind == .Member && label.left < 0 {
             result.value = expression.right;
@@ -142,7 +160,9 @@
 }
 
 #public analysis_parameter_symbol :: (
-    workspace: *const Workspace, procedure: Type_Id, index: ssize,
+    workspace: *const Workspace,
+    procedure: Type_Id,
+    index: ssize,
 ) -> Symbol_Id {
     if procedure <= 0 return .{};
     owner := workspace.types[procedure].symbol;
@@ -155,7 +175,7 @@
         i := symbol_index_at(symbols, syntax, scope, position);
         parameter := syntax.symbols[i];
         if parameter.scope != scope || parameter.node < 0 ||
-           syntax.nodes[parameter.node].kind != .Parameter continue;
+            syntax.nodes[parameter.node].kind != .Parameter continue;
         if at == index return .{ .file = owner.file, .symbol = i };
         at += 1;
     }
@@ -173,7 +193,10 @@
 }
 
 #public analysis_call_parameter :: (
-    workspace: *const Workspace, procedure: Type_Id, name: str, position: ssize,
+    workspace: *const Workspace,
+    procedure: Type_Id,
+    name: str,
+    position: ssize,
 ) -> ssize {
     if name.count > 0 {
         for i: 0..workspace.types[procedure].parameters.count {
@@ -189,11 +212,15 @@
 }
 
 #public analysis_call_expected_type :: (
-    workspace: *const Workspace, file: ssize, procedure: Type_Id, index: ssize, argument: ssize,
+    workspace: *const Workspace,
+    file: ssize,
+    procedure: Type_Id,
+    index: ssize,
+    argument: ssize,
 ) -> Type_Id {
     expected := workspace.types[procedure].parameters[index];
     if expected <= 0 || workspace.types[expected].kind != .Array_Type ||
-       analysis_variadic_parameter(workspace, procedure) != index return expected;
+        analysis_variadic_parameter(workspace, procedure) != index return expected;
     // A spread supplies the whole pack; each ordinary argument supplies one element.
     if argument >= 0 {
         expression := workspace.files[file].syntax.nodes[argument];
@@ -206,14 +233,17 @@
 }
 
 #public analysis_call_receiver_offset :: (
-    workspace: *Workspace, file: ssize, callee: ssize, procedure: Type_Id,
+    workspace: *Workspace,
+    file: ssize,
+    callee: ssize,
+    procedure: Type_Id,
 ) -> ssize {
     if callee < 0 || procedure <= 0 return 0;
     expression := workspace.files[file].syntax.nodes[callee];
     if expression.kind != .Member || expression.left < 0 return 0;
     parameter := analysis_parameter_symbol(workspace, procedure, 0);
     if parameter.symbol < 0 ||
-       workspace.files[parameter.file].syntax.symbols[parameter.symbol].name != "#self" return 0;
+        workspace.files[parameter.file].syntax.symbols[parameter.symbol].name != "#self" return 0;
     base := workspace.files[file].syntax.nodes[expression.left];
     if analysis_text(workspace, file, expression.left) == "#Self_Type" return 0;
     if base.token >= 0 {
@@ -221,13 +251,13 @@
         if analysis_valid(workspace, id) {
             declaration := workspace.files[id.file].syntax.symbols[id.symbol];
             if declaration.kind == 2 || declaration.kind == 23 || declaration.kind == 10 ||
-               declaration.kind == 11 return 0;
+                declaration.kind == 11 return 0;
             if declaration.kind == 14 && declaration.value_node >= 0 {
                 value := workspace.files[id.file].syntax.nodes[declaration.value_node];
                 if value.token >= 0 {
                     target := workspace.files[id.file].semantic.bindings[value.token];
                     if analysis_valid(workspace, target) &&
-                       workspace.files[target.file].syntax.symbols[target.symbol].kind == 23
+                        workspace.files[target.file].syntax.symbols[target.symbol].kind == 23
                         return 0;
                 }
             }
@@ -235,8 +265,9 @@
     }
     if base.kind == .Call && base.left >= 0 {
         type_id := analysis_expression_type(workspace, file, base.left);
-        if type_id > 0 && (workspace.types[type_id].kind == .Struct_Type ||
-            workspace.types[type_id].kind == .Union_Type) return 0;
+        if type_id > 0 && (
+            workspace.types[type_id].kind == .Struct_Type || workspace.types[type_id].kind == .Union_Type
+        ) return 0;
     }
     return 1;
 }
@@ -247,11 +278,11 @@
     declaration := syntax.symbols[symbol];
     owner := declaration.parent_symbol;
     if declaration.name == "_" || owner < 0 || declaration.node < 0 ||
-       syntax.nodes[declaration.node].kind != .Declaration return -1;
+        syntax.nodes[declaration.node].kind != .Declaration return -1;
     parent := syntax.symbols[owner];
     if parent.kind != 11 || parent.value_node < 0 ||
-       syntax.nodes[parent.value_node].kind != .Typeclass ||
-       declaration.scope != parent.body_scope return -1;
+        syntax.nodes[parent.value_node].kind != .Typeclass ||
+        declaration.scope != parent.body_scope return -1;
     return owner;
 }
 
@@ -261,14 +292,18 @@
     if declaration.scope == 0 && declaration.parent_symbol < 0 return symbol;
     owner := analysis_typeclass_owner(syntax, symbol);
     if owner >= 0 && syntax.symbols[owner].scope == 0 &&
-       syntax.symbols[owner].parent_symbol < 0 return owner;
+        syntax.symbols[owner].parent_symbol < 0 return owner;
     return -1;
 }
 
 // Module boundaries expose public declarations and their typeclass operations;
 // only explicit exports are transitive.
 #public analysis_exported :: (
-    workspace: *const Workspace, file: ssize, name: str, public_only: bool, depth: ssize,
+    workspace: *const Workspace,
+    file: ssize,
+    name: str,
+    public_only: bool,
+    depth: ssize,
 ) -> Symbol_Id {
     if file < 0 return .{};
     pending: [..]ssize;
@@ -293,13 +328,13 @@
             if analysis_inherent_node(workspace, current, i) >= 0 continue;
             visibility := syntax.symbols[owner];
             if visibility.is_public &&
-               (!visibility.is_unit || (!public_only && current == file))
+                (!visibility.is_unit || (!public_only && current == file))
                 return .{ .file = current, .symbol = i };
         }
         for i: 0..syntax.imports.count {
             dependency := syntax.imports[i];
             if dependency.symbol >= 0 ||
-               (!dependency.exported && !(dependency.load && dependency.embedded)) continue;
+                (!dependency.exported && !(dependency.load && dependency.embedded)) continue;
             target := analysis_import_target(workspace, current, i);
             if target < 0 continue;
             seen := false;
@@ -335,7 +370,7 @@
     if declaration.selection_start > offset return false;
     value := declaration.value_node;
     if value >= 0 && value < syntax.nodes.count && syntax.nodes[value].end > declaration.selection_start &&
-       offset < syntax.nodes[value].end return false;
+        offset < syntax.nodes[value].end return false;
     return true;
 }
 
@@ -352,7 +387,10 @@
 // The first operation named `name` of a typeclass declared in `scope`, or -1.
 // Typeclass operations share their owner's enclosing namespace.
 #public analysis_typeclass_operation :: (
-    syntax: *const Parsed_File, symbols: *const Symbol_Index, scope: ssize, name: str,
+    syntax: *const Parsed_File,
+    symbols: *const Symbol_Index,
+    scope: ssize,
+    name: str,
 ) -> ssize {
     if !symbol_index_ready(symbols, syntax) {
         for i: 0..syntax.symbols.count {
@@ -378,7 +416,11 @@
 }
 
 #public analysis_lookup :: (
-    workspace: *const Workspace, file: ssize, scope: ssize, name: str, offset: ssize,
+    workspace: *const Workspace,
+    file: ssize,
+    scope: ssize,
+    name: str,
+    offset: ssize,
 ) -> Symbol_Id {
     if name == "_" return .{};
     syntax := &workspace.files[file].syntax;
@@ -461,11 +503,15 @@
 // The struct, or pointer to one, that `usings[index]` opens for a bare name
 // at `offset` in `scope`; 0 when that `using` is not in effect there.
 #public analysis_using_owner :: (
-    workspace: *Workspace, file: ssize, scope: ssize, offset: ssize, index: ssize,
+    workspace: *Workspace,
+    file: ssize,
+    scope: ssize,
+    offset: ssize,
+    index: ssize,
 ) -> Type_Id {
     node := workspace.files[file].syntax.nodes[workspace.files[file].syntax.usings[index]];
     if node.end > offset ||
-       !analysis_local_scope(&workspace.files[file].syntax, scope, node.scope) return 0;
+        !analysis_local_scope(&workspace.files[file].syntax, scope, node.scope) return 0;
     base: Type_Id = 0;
     if node.kind == .Parameter {
         if node.symbol < 0 return 0;
@@ -487,7 +533,11 @@
 // procedure or an earlier `using` statement around it; the latest wins.
 // `owner` receives the type the field is read from.
 #public analysis_using_field :: (
-    workspace: *Workspace, file: ssize, scope: ssize, name: str, offset: ssize,
+    workspace: *Workspace,
+    file: ssize,
+    scope: ssize,
+    name: str,
+    offset: ssize,
     owner: *Type_Id,
 ) -> Symbol_Id {
     index := workspace.files[file].syntax.usings.count;
@@ -497,7 +547,7 @@
         if base <= 0 continue;
         field := analysis_member(workspace, base, name, file);
         if !analysis_valid(workspace, field) ||
-           workspace.files[field.file].syntax.symbols[field.symbol].kind != 8 continue;
+            workspace.files[field.file].syntax.symbols[field.symbol].kind != 8 continue;
         owner.* = base;
         return field;
     }
@@ -508,7 +558,10 @@
 // compiler, the procedure's locals and top-level values do; type names and
 // members of an enclosing aggregate do not.
 #public analysis_precedes_using :: (
-    workspace: *const Workspace, file: ssize, scope: ssize, symbol: Symbol_Id,
+    workspace: *const Workspace,
+    file: ssize,
+    scope: ssize,
+    symbol: Symbol_Id,
 ) -> bool {
     if !analysis_valid(workspace, symbol) return false;
     syntax := &workspace.files[symbol.file].syntax;
@@ -527,7 +580,9 @@
 }
 
 #public analysis_inherent_node :: (
-    workspace: *const Workspace, file: ssize, symbol: ssize,
+    workspace: *const Workspace,
+    file: ssize,
+    symbol: ssize,
 ) -> ssize {
     syntax := &workspace.files[file].syntax;
     declaration := syntax.symbols[symbol];
@@ -552,7 +607,9 @@
 }
 
 #public analysis_inherent_owner :: (
-    workspace: *Workspace, file: ssize, symbol: ssize,
+    workspace: *Workspace,
+    file: ssize,
+    symbol: ssize,
 ) -> Type_Id {
     node := analysis_inherent_node(workspace, file, symbol);
     if node < 0 return 0;
@@ -561,7 +618,9 @@
 }
 
 #public analysis_owner_type :: (
-    workspace: *Workspace, file: ssize, scope: ssize,
+    workspace: *Workspace,
+    file: ssize,
+    scope: ssize,
 ) -> Type_Id {
     current := scope;
     syntax := &workspace.files[file].syntax;
@@ -584,32 +643,42 @@
 }
 
 #public analysis_type_identifier :: (
-    workspace: *Workspace, file: ssize, node: ssize,
+    workspace: *Workspace,
+    file: ssize,
+    node: ssize,
 ) -> Type_Id {
     expression := workspace.files[file].syntax.nodes[node];
     name := analysis_text(workspace, file, node);
     if name == {
-        case "true", "false"; return analysis_builtin(workspace, "bool");
-        case "null"; return 0;
-        case "#self";
-            receiver := analysis_lookup(workspace, file, expression.scope, name, expression.start);
-            if analysis_valid(workspace, receiver) {
-                analysis_bind(workspace, file, node, receiver);
-                if expression.start !=
-                   workspace.files[receiver.file].syntax.symbols[receiver.symbol].selection_start
-                    return analysis_type(workspace, receiver);
-            }
-            return analysis_owner_type(workspace, file, expression.scope);
-        case "#Self_Type";
-            return analysis_owner_type(workspace, file, expression.scope);
-        else;
+    case "true", "false";
+        return analysis_builtin(workspace, "bool");
+    case "null";
+        return 0;
+    case "#self";
+        receiver := analysis_lookup(workspace, file, expression.scope, name, expression.start);
+        if analysis_valid(workspace, receiver) {
+            analysis_bind(workspace, file, node, receiver);
+            if expression.start !=
+                workspace.files[receiver.file].syntax.symbols[receiver.symbol].selection_start
+                return analysis_type(workspace, receiver);
+        }
+        return analysis_owner_type(workspace, file, expression.scope);
+    case "#Self_Type";
+        return analysis_owner_type(workspace, file, expression.scope);
+    else;
     }
     symbol := analysis_lookup(workspace, file, expression.scope, name, expression.start);
     if workspace.files[file].syntax.usings.count > 0 &&
-       !analysis_precedes_using(workspace, file, expression.scope, symbol) {
+        !analysis_precedes_using(workspace, file, expression.scope, symbol) {
         owner: Type_Id = 0;
         field := analysis_using_field(
-            workspace, file, expression.scope, name, expression.start, &owner);
+            workspace,
+            file,
+            expression.scope,
+            name,
+            expression.start,
+            &owner
+        );
         if analysis_valid(workspace, field) {
             analysis_bind(workspace, file, node, field);
             return analysis_member_type(workspace, owner, field);
@@ -644,7 +713,9 @@
 }
 
 #public analysis_instance :: (
-    workspace: *Workspace, original: Type_Id, arguments: []const Type_Id,
+    workspace: *Workspace,
+    original: Type_Id,
+    arguments: []const Type_Id,
 ) -> Type_Id {
     if original <= 0 || original >= workspace.types.count return 0;
     symbol := workspace.types[original].symbol;
@@ -653,7 +724,7 @@
     for i: 0..workspace.types.count {
         existing := analysis_type_view(workspace, i);
         if existing.kind != kind || !analysis_same_symbol(existing.symbol, symbol) ||
-           existing.arguments.count != arguments.count continue;
+            existing.arguments.count != arguments.count continue;
         equal := true;
         for j: 0..arguments.count if existing.arguments[j] != arguments[j] equal = false;
         if equal return i;
@@ -677,7 +748,8 @@
 }
 
 #public analysis_parameter_names :: (
-    workspace: *const Workspace, owner: Symbol_Id,
+    workspace: *const Workspace,
+    owner: Symbol_Id,
 ) -> [..]str {
     names: [..]str;
     if !analysis_valid(workspace, owner) return names;
@@ -728,7 +800,10 @@
 }
 
 #public analysis_substitute :: (
-    workspace: *Workspace, type_id: Type_Id, names: []const str, arguments: []const Type_Id,
+    workspace: *Workspace,
+    type_id: Type_Id,
+    names: []const str,
+    arguments: []const Type_Id,
     depth: ssize = 0,
 ) -> Type_Id {
     if type_id <= 0 || type_id >= workspace.types.count || depth > 32 return 0;
@@ -741,18 +816,33 @@
     }
     if value.kind == .Pointer || value.kind == .Array_Type || value.kind == .Matrix_Type {
         element := analysis_substitute(workspace, value.element, names, arguments, depth + 1);
-        return analysis_new_type(workspace, value.kind, value.name, value.symbol, element,
-            value.matrix_rows, value.matrix_columns);
+        return analysis_new_type(
+            workspace,
+            value.kind,
+            value.name,
+            value.symbol,
+            element,
+            value.matrix_rows,
+            value.matrix_columns
+        );
     }
     if value.kind == .Procedure {
         result: Semantic_Type = .{
-            .kind = .Procedure, .name = value.name, .symbol = value.symbol,
+            .kind = .Procedure,
+            .name = value.name,
+            .symbol = value.symbol,
         };
         for parameter: value.parameters
-            result.parameters.push(analysis_substitute(workspace, parameter, names, arguments,
-                depth + 1));
-        result.return_type = analysis_substitute(workspace, value.return_type, names, arguments,
-            depth + 1);
+            result.parameters.push(
+                analysis_substitute(workspace, parameter, names, arguments, depth + 1)
+            );
+        result.return_type = analysis_substitute(
+            workspace,
+            value.return_type,
+            names,
+            arguments,
+            depth + 1
+        );
         workspace.types.push(result);
         return workspace.types.count - 1;
     }
@@ -764,7 +854,7 @@
         return analysis_instance(workspace, type_id, actual.view());
     }
     if analysis_valid(workspace, value.symbol) &&
-       (value.kind == .Struct_Type || value.kind == .Union_Type || value.kind == .Enum) {
+        (value.kind == .Struct_Type || value.kind == .Union_Type || value.kind == .Enum) {
         captures := analysis_parameter_names(workspace, value.symbol);
         defer captures.free();
         actual: [..]Type_Id;
@@ -781,7 +871,10 @@
 }
 
 #public analysis_member :: (
-    workspace: *Workspace, base: Type_Id, name: str, from_file: ssize,
+    workspace: *Workspace,
+    base: Type_Id,
+    name: str,
+    from_file: ssize,
 ) -> Symbol_Id {
     if name == "_" return .{};
     if base <= 0 || base >= workspace.types.count return .{};
@@ -799,8 +892,11 @@
         defer i = symbol_index_named(symbols, syntax, name, i);
         member := syntax.symbols[i];
         if member.parent_symbol != value.symbol.symbol && member.scope != owner.body_scope continue;
-        if value.symbol.file != from_file && (!member.is_public ||
-            (member.is_unit && !analysis_same_unit(workspace, value.symbol.file, from_file)))
+        if value.symbol.file != from_file && (
+            !member.is_public || (
+                member.is_unit && !analysis_same_unit(workspace, value.symbol.file, from_file)
+            )
+        )
             continue;
         return .{ .file = value.symbol.file, .symbol = i };
     }
@@ -811,9 +907,12 @@
             if member.name != name || member.kind != 12 continue;
             owner_type := analysis_inherent_owner(workspace, file, i);
             if owner_type <= 0 ||
-               !analysis_same_symbol(workspace.types[owner_type].symbol, value.symbol) continue;
-            if file != from_file && (!member.is_public ||
-                (member.is_unit && !analysis_same_unit(workspace, file, from_file))) continue;
+                !analysis_same_symbol(workspace.types[owner_type].symbol, value.symbol) continue;
+            if file != from_file && (
+                !member.is_public || (
+                    member.is_unit && !analysis_same_unit(workspace, file, from_file)
+                )
+            ) continue;
             return .{ .file = file, .symbol = i };
         }
     }
@@ -821,7 +920,9 @@
 }
 
 #public analysis_member_type :: (
-    workspace: *Workspace, base: Type_Id, symbol: Symbol_Id,
+    workspace: *Workspace,
+    base: Type_Id,
+    symbol: Symbol_Id,
 ) -> Type_Id {
     result := analysis_type(workspace, symbol);
     if base <= 0 || base >= workspace.types.count return result;
@@ -829,14 +930,16 @@
     if value.kind == .Pointer return analysis_member_type(workspace, value.element, symbol);
     if value.arguments.count == 0 return result;
     if result > 0 && analysis_same_symbol(workspace.types[result].symbol, value.symbol) &&
-       workspace.types[result].kind != .Procedure return base;
+        workspace.types[result].kind != .Procedure return base;
     names := analysis_parameter_names(workspace, value.symbol);
     defer names.free();
     return analysis_substitute(workspace, result, names.view(), value.arguments);
 }
 
 #public analysis_builtin_member_type :: (
-    workspace: *Workspace, type_id: Type_Id, name: str,
+    workspace: *Workspace,
+    type_id: Type_Id,
+    name: str,
 ) -> Type_Id {
     if type_id <= 0 return 0;
     value := analysis_type_view(workspace, type_id);
@@ -880,7 +983,11 @@
 }
 
 #public analysis_wrapper_type :: (
-    workspace: *Workspace, file: ssize, node: ssize, name: str, arguments: []const Type_Id,
+    workspace: *Workspace,
+    file: ssize,
+    node: ssize,
+    name: str,
+    arguments: []const Type_Id,
 ) -> Type_Id {
     expression := workspace.files[file].syntax.nodes[node];
     declaration := analysis_lookup(workspace, file, expression.scope, name, expression.start);
@@ -897,8 +1004,12 @@
 }
 
 #public analysis_generic_match :: (
-    workspace: *const Workspace, pattern: Type_Id, actual: Type_Id,
-    names: *[..]str, types: *[..]Type_Id, depth: ssize = 0,
+    workspace: *const Workspace,
+    pattern: Type_Id,
+    actual: Type_Id,
+    names: *[..]str,
+    types: *[..]Type_Id,
+    depth: ssize = 0,
 ) -> bool {
     if pattern <= 0 || actual <= 0 || depth > 32 return true;
     expected := analysis_type_view(workspace, pattern);
@@ -915,22 +1026,37 @@
     if expected.kind == .Matrix_Type && !analysis_matrix_shape_matches(expected, found)
         return false;
     if expected.kind == .Pointer || expected.kind == .Array_Type || expected.kind == .Matrix_Type
-        return analysis_generic_match(workspace, expected.element, found.element,
-            names, types, depth + 1);
+        return analysis_generic_match(
+            workspace,
+            expected.element,
+            found.element,
+            names,
+            types,
+            depth + 1
+        );
     if expected.kind == .Builtin return expected.name == found.name;
     if expected.symbol.symbol >= 0 && !analysis_same_symbol(expected.symbol, found.symbol)
         return false;
     if expected.arguments.count != found.arguments.count return false;
     for i: 0..expected.arguments.count {
-        if !analysis_generic_match(workspace, expected.arguments[i], found.arguments[i],
-            names, types, depth + 1) return false;
+        if !analysis_generic_match(
+            workspace,
+            expected.arguments[i],
+            found.arguments[i],
+            names,
+            types,
+            depth + 1
+        ) return false;
     }
     return true;
 }
 
 // Recognize literal dimensions and simple constant aliases without evaluating user code.
 #public analysis_matrix_dimension :: (
-    workspace: *Workspace, file: ssize, node: ssize, depth: ssize = 0,
+    workspace: *Workspace,
+    file: ssize,
+    node: ssize,
+    depth: ssize = 0,
 ) -> ssize {
     if node < 0 || depth > 16 return -1;
     expression := workspace.files[file].syntax.nodes[node];
@@ -955,14 +1081,17 @@
 }
 
 #public analysis_matrix_shape_matches :: (left: Analysis_Type_View, right: Analysis_Type_View) -> bool {
-    return (left.matrix_rows < 0 || right.matrix_rows < 0 ||
-            left.matrix_rows == right.matrix_rows) &&
-           (left.matrix_columns < 0 || right.matrix_columns < 0 ||
-            left.matrix_columns == right.matrix_columns);
+    return (left.matrix_rows < 0 || right.matrix_rows < 0 || left.matrix_rows == right.matrix_rows) &&
+        (
+            left.matrix_columns < 0 || right.matrix_columns < 0 || left.matrix_columns == right.matrix_columns
+        );
 }
 
 #public analysis_call_result :: (
-    workspace: *Workspace, file: ssize, node: ssize, procedure: Type_Id,
+    workspace: *Workspace,
+    file: ssize,
+    node: ssize,
+    procedure: Type_Id,
 ) -> Type_Id {
     if procedure <= 0 || procedure >= workspace.types.count return 0;
     value := analysis_type_view(workspace, procedure);
@@ -974,10 +1103,15 @@
         if rows < 0 return 0;
         columns := workspace.files[file].syntax.nodes[rows].next_sibling;
         if columns < 0 || workspace.files[file].syntax.nodes[columns].next_sibling >= 0 return 0;
-        return analysis_new_type(workspace, .Matrix_Type, "Matrix", .{},
+        return analysis_new_type(
+            workspace,
+            .Matrix_Type,
+            "Matrix",
+            .{},
             analysis_expression_type(workspace, file, element),
             analysis_matrix_dimension(workspace, file, rows),
-            analysis_matrix_dimension(workspace, file, columns));
+            analysis_matrix_dimension(workspace, file, columns)
+        );
     }
     if value.kind == .Struct_Type || value.kind == .Union_Type || value.kind == .Enum {
         arguments: [..]Type_Id;
@@ -1002,8 +1136,13 @@
         index := analysis_call_parameter(workspace, procedure, argument.name, position);
         actual := analysis_expression_type(workspace, file, argument.value);
         if index >= 0 && index < value.parameters.count {
-            expected := analysis_call_expected_type(workspace, file, procedure, index,
-                argument.value);
+            expected := analysis_call_expected_type(
+                workspace,
+                file,
+                procedure,
+                index,
+                argument.value
+            );
             analysis_contextual_aggregate(workspace, file, argument.value, expected);
             actual = analysis_expression_type(workspace, file, argument.value);
             _ := analysis_generic_match(workspace, expected, actual, &names, &types);
@@ -1020,7 +1159,10 @@
 }
 
 #public analysis_contextual_aggregate :: (
-    workspace: *Workspace, file: ssize, node: ssize, type_id: Type_Id,
+    workspace: *Workspace,
+    file: ssize,
+    node: ssize,
+    type_id: Type_Id,
 ) {
     if node < 0 || type_id <= 0 return;
     expression := workspace.files[file].syntax.nodes[node];
@@ -1040,7 +1182,10 @@
 }
 
 #public analysis_select_overload :: (
-    workspace: *Workspace, file: ssize, node: ssize, initial: Type_Id,
+    workspace: *Workspace,
+    file: ssize,
+    node: ssize,
+    initial: Type_Id,
 ) -> Type_Id {
     call := workspace.files[file].syntax.nodes[node];
     if call.left < 0 return initial;
@@ -1076,8 +1221,13 @@
             if index < 0 || index >= value.parameters.count score -= 20;
             else {
                 used[index] = true;
-                expected := analysis_call_expected_type(workspace, file, type_id, index,
-                    argument.value);
+                expected := analysis_call_expected_type(
+                    workspace,
+                    file,
+                    type_id,
+                    index,
+                    argument.value
+                );
                 if analysis_generic_match(workspace, expected, actual, &names, &types) {
                     score += 2;
                     if actual == expected score += 2;
@@ -1091,19 +1241,22 @@
             if used[index] || index == variadic continue;
             parameter := analysis_parameter_symbol(workspace, type_id, index);
             if parameter.symbol < 0 ||
-               workspace.files[parameter.file].syntax.symbols[parameter.symbol].value_node < 0
+                workspace.files[parameter.file].syntax.symbols[parameter.symbol].value_node < 0
                 score -= 20;
         }
         used.free();
         names.free();
         types.free();
-        if score > best_score { best_score = score; best = type_id; }
+        if score > best_score {
+            best_score = score;
+            best = type_id;
+        }
     }
     selected := workspace.types[best].symbol;
     // Calling through an alias selects the target's overload, but the callee
     // token still names the alias.
     if analysis_valid(workspace, selected) && analysis_text(workspace, file, call.left) ==
-       workspace.files[selected.file].syntax.symbols[selected.symbol].name
+        workspace.files[selected.file].syntax.symbols[selected.symbol].name
         analysis_bind(workspace, file, call.left, selected);
     workspace.files[file].semantic.node_types[call.left] = best;
     return best;
@@ -1144,8 +1297,8 @@ analysis_type_spine :: (workspace: *Workspace, file: ssize, node: ssize) {
     length: ssize = 0;
     current := syntax.nodes[node].left;
     while current >= 0 && length <= ANALYSIS_SPINE_LIMIT &&
-          workspace.files[file].semantic.node_types[current] == -1 &&
-          analysis_left_spine(syntax.nodes[current].kind) {
+        workspace.files[file].semantic.node_types[current] == -1 &&
+        analysis_left_spine(syntax.nodes[current].kind) {
         length += 1;
         current = syntax.nodes[current].left;
     }
@@ -1154,7 +1307,7 @@ analysis_type_spine :: (workspace: *Workspace, file: ssize, node: ssize) {
     defer spine.free();
     current = syntax.nodes[node].left;
     while current >= 0 && workspace.files[file].semantic.node_types[current] == -1 &&
-          analysis_left_spine(syntax.nodes[current].kind) {
+        analysis_left_spine(syntax.nodes[current].kind) {
         spine.push(current);
         current = syntax.nodes[current].left;
     }
@@ -1166,10 +1319,12 @@ analysis_type_spine :: (workspace: *Workspace, file: ssize, node: ssize) {
 }
 
 #public analysis_expression_type :: (
-    workspace: *Workspace, file: ssize, node: ssize,
+    workspace: *Workspace,
+    file: ssize,
+    node: ssize,
 ) -> Type_Id {
     if file < 0 || file >= workspace.files.count || node < 0 ||
-       node >= workspace.files[file].syntax.nodes.count return 0;
+        node >= workspace.files[file].syntax.nodes.count return 0;
     cached := workspace.files[file].semantic.node_types[node];
     if cached >= 0 return cached;
     if cached == -2 return 0;
@@ -1183,201 +1338,217 @@ analysis_type_spine :: (workspace: *Workspace, file: ssize, node: ssize) {
     expression := workspace.files[file].syntax.nodes[node];
     result: Type_Id = 0;
     if expression.kind == {
-        case .Identifier; result = analysis_type_identifier(workspace, file, node);
-        case .Literal; result = analysis_literal(workspace, file, node);
-        case .Pattern_Capture;
-            subject := analysis_expression_type(workspace, file, expression.left);
-            name := analysis_text(workspace, file, expression.right);
-            constructor := analysis_member(workspace, subject, name, file);
-            if expression.right < 0 {
-                result = subject;
-                if subject > 0 && workspace.types[subject].kind == .Tuple &&
-                   expression.argument_index >= 0 &&
-                   expression.argument_index < workspace.types[subject].arguments.count
-                    result = workspace.types[subject].arguments[expression.argument_index];
-            } else if expression.argument_index < 0 result = subject;
-            else if analysis_valid(workspace, constructor) {
-                analysis_bind(workspace, file, expression.right, constructor);
-                variant := analysis_member_type(workspace, subject, constructor);
-                if variant > 0 && workspace.types[variant].kind == .Procedure &&
-                   expression.argument_index >= 0 &&
-                   expression.argument_index < workspace.types[variant].parameters.count
-                    result = workspace.types[variant].parameters[expression.argument_index];
-                else if expression.right >= 0 &&
-                    workspace.files[file].syntax.nodes[expression.right].kind == .Field
-                    result = variant;
-            } else if subject > 0 {
-                wrapper := analysis_type_view(workspace, subject);
-                if wrapper.name == {
-                    case "Option";
-                        if (name == "?" || name == "Some") && wrapper.arguments.count == 1
-                            result = wrapper.arguments[0];
-                    case "Result";
-                        if wrapper.arguments.count == 2 {
-                            if name == { case "Ok"; result = wrapper.arguments[1];
-                                case "Err"; result = wrapper.arguments[0]; else; }
-                        }
+    case .Identifier;
+        result = analysis_type_identifier(workspace, file, node);
+    case .Literal;
+        result = analysis_literal(workspace, file, node);
+    case .Pattern_Capture;
+        subject := analysis_expression_type(workspace, file, expression.left);
+        name := analysis_text(workspace, file, expression.right);
+        constructor := analysis_member(workspace, subject, name, file);
+        if expression.right < 0 {
+            result = subject;
+            if subject > 0 && workspace.types[subject].kind == .Tuple &&
+                expression.argument_index >= 0 &&
+                expression.argument_index < workspace.types[subject].arguments.count
+                result = workspace.types[subject].arguments[expression.argument_index];
+        } else if expression.argument_index < 0 result = subject;
+        else if analysis_valid(workspace, constructor) {
+            analysis_bind(workspace, file, expression.right, constructor);
+            variant := analysis_member_type(workspace, subject, constructor);
+            if variant > 0 && workspace.types[variant].kind == .Procedure &&
+                expression.argument_index >= 0 &&
+                expression.argument_index < workspace.types[variant].parameters.count
+                result = workspace.types[variant].parameters[expression.argument_index];
+            else if expression.right >= 0 &&
+                workspace.files[file].syntax.nodes[expression.right].kind == .Field
+                result = variant;
+        } else if subject > 0 {
+            wrapper := analysis_type_view(workspace, subject);
+            if wrapper.name == {
+            case "Option";
+                if (name == "?" || name == "Some") && wrapper.arguments.count == 1
+                    result = wrapper.arguments[0];
+            case "Result";
+                if wrapper.arguments.count == 2 {
+                    if name == {
+                    case "Ok";
+                        result = wrapper.arguments[1];
+                    case "Err";
+                        result = wrapper.arguments[0];
                     else;
-                        if name == "?" || name == "Some" result = subject;
-                }
-            }
-        case .Declaration, .Parameter;
-            if expression.symbol >= 0 {
-                result = analysis_type(workspace, .{ .file = file, .symbol = expression.symbol });
-            }
-        case .Member;
-            base := analysis_expression_type(workspace, file, expression.left);
-            name := analysis_text(workspace, file, expression.right);
-            symbol := analysis_member(workspace, base, name, file);
-            analysis_bind(workspace, file, expression.right, symbol);
-            if analysis_valid(workspace, symbol) {
-                result = analysis_member_type(workspace, base, symbol);
-                if expression.right >= 0
-                    workspace.files[file].semantic.node_types[expression.right] = result;
-            } else {
-                result = analysis_builtin_member_type(workspace, base, name);
-                if expression.right >= 0 && result > 0
-                    workspace.files[file].semantic.node_types[expression.right] = result;
-            }
-        case .Call;
-            callee := analysis_expression_type(workspace, file, expression.left);
-            selected := analysis_select_overload(workspace, file, node, callee);
-            result = analysis_call_result(workspace, file, node, selected);
-        case .Index;
-            base := analysis_expression_type(workspace, file, expression.left);
-            if base > 0 {
-                value := analysis_type_view(workspace, base);
-                slice := analysis_slice_index(workspace, file, expression.first_child);
-                if value.kind == .Matrix_Type {
-                    result = value.element;
-                } else if value.kind == .Array_Type {
-                    if slice result = base;
-                    else result = value.element;
-                } else if value.kind == .Pointer result = value.element;
-                else if value.kind == .Builtin &&
-                        (value.name == "str" || value.name == "string16") {
-                    if slice result = base;
-                    else if value.name == "string16" result = analysis_builtin(workspace, "u16");
-                    else result = analysis_builtin(workspace, "u8");
-                }
-            }
-        case .Unary, .Type;
-            if expression.kind == .Type && analysis_text(workspace, file, node) == "(" {
-                child := expression.first_child;
-                value: Semantic_Type = .{ .kind = .Tuple };
-                while child >= 0 {
-                    item := workspace.files[file].syntax.nodes[child];
-                    element := child;
-                    if item.kind == .Parameter element = item.type_node;
-                    value.arguments.push(analysis_expression_type(workspace, file, element));
-                    child = item.next_sibling;
-                }
-                if value.arguments.count == 1 {
-                    result = value.arguments[0];
-                    value.arguments.free();
-                } else {
-                    workspace.types.push(value);
-                    result = workspace.types.count - 1;
-                }
-                workspace.files[file].semantic.node_types[node] = result;
-                return result;
-            }
-            inner := expression.left;
-            if inner < 0 inner = expression.type_node;
-            if inner < 0 inner = expression.value_node;
-            element := analysis_expression_type(workspace, file, inner);
-            operator := analysis_text(workspace, file, node);
-            if operator == {
-                case "$";
-                    result = analysis_new_type(workspace, .Generic,
-                        analysis_text(workspace, file, inner));
-                case "*", "&";
-                    span := workspace.files[file].syntax.language.tokens[expression.token];
-                    if operator == "*" && span.start > expression.start && element > 0
-                        result = workspace.types[element].element;
-                    else result = analysis_new_type(workspace, .Pointer, "", .{}, element);
-                case "[", "[]", "[..]", "[*]";
-                    result = analysis_new_type(workspace, .Array_Type, "", .{}, element);
-                case "...";
-                    span := workspace.files[file].syntax.language.tokens[expression.token];
-                    if span.start == expression.start
-                        result = analysis_new_type(workspace, .Array_Type, "", .{}, element);
-                    else result = element;
-                case "!"; result = analysis_builtin(workspace, "bool");
-                case "cast", "acast";
-                    result = analysis_expression_type(workspace, file, expression.type_node);
-                case "#string"; result = analysis_builtin(workspace, "str");
-                case "#char"; result = analysis_builtin(workspace, "rune");
-                case "?"; {
-                    arguments := .[element];
-                    result = analysis_wrapper_type(workspace, file, node, "Option",
-                        arguments.view());
-                    if result == 0 result = element;
-                }
-                else; result = element;
-            }
-        case .Binary;
-            result = analysis_expression_type(workspace, file, expression.left);
-            operator := analysis_text(workspace, file, node);
-            if operator == "="
-                analysis_contextual_aggregate(workspace, file, expression.right, result);
-            if operator == {
-                case "==", "!=", "<", ">", "<=", ">=", "&&", "||";
-                    result = analysis_builtin(workspace, "bool");
-                case "!";
-                    payload := analysis_expression_type(workspace, file, expression.right);
-                    arguments := .[result, payload];
-                    result = analysis_wrapper_type(workspace, file, node, "Result",
-                        arguments.view());
-                else;
-            }
-            _ := analysis_expression_type(workspace, file, expression.right);
-        case .Aggregate;
-            result = analysis_expression_type(workspace, file, expression.left);
-            analysis_contextual_aggregate(workspace, file, node, result);
-        case .Field;
-            result = analysis_expression_type(workspace, file, expression.value_node);
-        case .If;
-            condition := expression.first_child;
-            if condition >= 0 {
-                then_node := workspace.files[file].syntax.nodes[condition].next_sibling;
-                result = analysis_expression_type(workspace, file, then_node);
-            }
-        case .Return, .Statement;
-            child := expression.value_node;
-            if child < 0 child = expression.first_child;
-            result = analysis_expression_type(workspace, file, child);
-            if expression.kind == .Return {
-                scope := expression.scope;
-                syntax := &workspace.files[file].syntax;
-                symbols := &workspace.files[file].semantic.index;
-                while scope >= 0 {
-                    found := false;
-                    for position: 0..symbol_index_count(symbols, syntax, scope, true) {
-                        i := symbol_index_at(symbols, syntax, scope, position, true);
-                        owner := workspace.files[file].syntax.symbols[i];
-                        if owner.kind != 12 || owner.body_scope != scope continue;
-                        procedure := analysis_type(workspace, .{ .file = file, .symbol = i });
-                        if procedure > 0 {
-                            expected := workspace.types[procedure].return_type;
-                            analysis_contextual_aggregate(workspace, file, child, expected);
-                        }
-                        found = true;
-                        break;
                     }
-                    if found break;
-                    scope = workspace.files[file].syntax.scopes[scope].parent;
                 }
+            else;
+                if name == "?" || name == "Some" result = subject;
             }
-        case .Procedure; {
+        }
+    case .Declaration, .Parameter;
+        if expression.symbol >= 0 {
+            result = analysis_type(workspace, .{ .file = file, .symbol = expression.symbol });
+        }
+    case .Member;
+        base := analysis_expression_type(workspace, file, expression.left);
+        name := analysis_text(workspace, file, expression.right);
+        symbol := analysis_member(workspace, base, name, file);
+        analysis_bind(workspace, file, expression.right, symbol);
+        if analysis_valid(workspace, symbol) {
+            result = analysis_member_type(workspace, base, symbol);
+            if expression.right >= 0
+                workspace.files[file].semantic.node_types[expression.right] = result;
+        } else {
+            result = analysis_builtin_member_type(workspace, base, name);
+            if expression.right >= 0 && result > 0
+                workspace.files[file].semantic.node_types[expression.right] = result;
+        }
+    case .Call;
+        callee := analysis_expression_type(workspace, file, expression.left);
+        selected := analysis_select_overload(workspace, file, node, callee);
+        result = analysis_call_result(workspace, file, node, selected);
+    case .Index;
+        base := analysis_expression_type(workspace, file, expression.left);
+        if base > 0 {
+            value := analysis_type_view(workspace, base);
+            slice := analysis_slice_index(workspace, file, expression.first_child);
+            if value.kind == .Matrix_Type {
+                result = value.element;
+            } else if value.kind == .Array_Type {
+                if slice result = base;
+                else result = value.element;
+            } else if value.kind == .Pointer result = value.element;
+            else if value.kind == .Builtin &&
+                (value.name == "str" || value.name == "string16") {
+                if slice result = base;
+                else if value.name == "string16" result = analysis_builtin(workspace, "u16");
+                else result = analysis_builtin(workspace, "u8");
+            }
+        }
+    case .Unary, .Type;
+        if expression.kind == .Type && analysis_text(workspace, file, node) == "(" {
+            child := expression.first_child;
+            value: Semantic_Type = .{ .kind = .Tuple };
+            while child >= 0 {
+                item := workspace.files[file].syntax.nodes[child];
+                element := child;
+                if item.kind == .Parameter element = item.type_node;
+                value.arguments.push(analysis_expression_type(workspace, file, element));
+                child = item.next_sibling;
+            }
+            if value.arguments.count == 1 {
+                result = value.arguments[0];
+                value.arguments.free();
+            } else {
+                workspace.types.push(value);
+                result = workspace.types.count - 1;
+            }
+            workspace.files[file].semantic.node_types[node] = result;
+            return result;
+        }
+        inner := expression.left;
+        if inner < 0 inner = expression.type_node;
+        if inner < 0 inner = expression.value_node;
+        element := analysis_expression_type(workspace, file, inner);
+        operator := analysis_text(workspace, file, node);
+        if operator == {
+        case "$";
+            result = analysis_new_type(workspace, .Generic, analysis_text(workspace, file, inner));
+        case "*", "&";
+            span := workspace.files[file].syntax.language.tokens[expression.token];
+            if operator == "*" && span.start > expression.start && element > 0
+                result = workspace.types[element].element;
+            else result = analysis_new_type(workspace, .Pointer, "", .{}, element);
+        case "[", "[]", "[..]", "[*]";
+            result = analysis_new_type(workspace, .Array_Type, "", .{}, element);
+        case "...";
+            span := workspace.files[file].syntax.language.tokens[expression.token];
+            if span.start == expression.start
+                result = analysis_new_type(workspace, .Array_Type, "", .{}, element);
+            else result = element;
+        case "!";
+            result = analysis_builtin(workspace, "bool");
+        case "cast", "acast";
+            result = analysis_expression_type(workspace, file, expression.type_node);
+        case "#string";
+            result = analysis_builtin(workspace, "str");
+        case "#char";
+            result = analysis_builtin(workspace, "rune");
+        case "?";
+            {
+                arguments := .[element];
+                result = analysis_wrapper_type(workspace, file, node, "Option", arguments.view());
+                if result == 0 result = element;
+            }
+        else;
+            result = element;
+        }
+    case .Binary;
+        result = analysis_expression_type(workspace, file, expression.left);
+        operator := analysis_text(workspace, file, node);
+        if operator == "="
+            analysis_contextual_aggregate(workspace, file, expression.right, result);
+        if operator == {
+        case "==", "!=", "<", ">", "<=", ">=", "&&", "||";
+            result = analysis_builtin(workspace, "bool");
+        case "!";
+            payload := analysis_expression_type(workspace, file, expression.right);
+            arguments := .[result, payload];
+            result = analysis_wrapper_type(workspace, file, node, "Result", arguments.view());
+        else;
+        }
+        _ := analysis_expression_type(workspace, file, expression.right);
+    case .Aggregate;
+        result = analysis_expression_type(workspace, file, expression.left);
+        analysis_contextual_aggregate(workspace, file, node, result);
+    case .Field;
+        result = analysis_expression_type(workspace, file, expression.value_node);
+    case .If;
+        condition := expression.first_child;
+        if condition >= 0 {
+            then_node := workspace.files[file].syntax.nodes[condition].next_sibling;
+            result = analysis_expression_type(workspace, file, then_node);
+        }
+    case .Return, .Statement;
+        child := expression.value_node;
+        if child < 0 child = expression.first_child;
+        result = analysis_expression_type(workspace, file, child);
+        if expression.kind == .Return {
+            scope := expression.scope;
+            syntax := &workspace.files[file].syntax;
+            symbols := &workspace.files[file].semantic.index;
+            while scope >= 0 {
+                found := false;
+                for position: 0..symbol_index_count(symbols, syntax, scope, true) {
+                    i := symbol_index_at(symbols, syntax, scope, position, true);
+                    owner := workspace.files[file].syntax.symbols[i];
+                    if owner.kind != 12 || owner.body_scope != scope continue;
+                    procedure := analysis_type(workspace, .{ .file = file, .symbol = i });
+                    if procedure > 0 {
+                        expected := workspace.types[procedure].return_type;
+                        analysis_contextual_aggregate(workspace, file, child, expected);
+                    }
+                    found = true;
+                    break;
+                }
+                if found break;
+                scope = workspace.files[file].syntax.scopes[scope].parent;
+            }
+        }
+    case .Procedure;
+        {
             if expression.symbol >= 0 {
                 result = analysis_type(workspace, .{ .file = file, .symbol = expression.symbol });
             }
         }
-        else;
+    else;
     }
     fact_kind: s32 = 0;
-    if expression.kind == { case .Identifier, .Member; fact_kind = 2; case .Call; fact_kind = 3; else; }
+    if expression.kind == {
+    case .Identifier, .Member;
+        fact_kind = 2;
+    case .Call;
+        fact_kind = 3;
+    else;
+    }
     if fact_kind > 0 {
         fact_at := expression.start;
         if expression.kind == .Member && expression.right >= 0
@@ -1399,89 +1570,95 @@ analysis_type_spine :: (workspace: *Workspace, file: ssize, node: ssize) {
     declaration := workspace.files[id.file].syntax.symbols[id.symbol];
     result: Type_Id = 0;
     if declaration.kind == {
-        case 23, 10, 11;
-            kind: Type_Kind = .Struct_Type;
-            if declaration.kind == 10 kind = .Enum;
-            if declaration.value_node >= 0 &&
-               workspace.files[id.file].syntax.nodes[declaration.value_node].kind == .Union_Type
-                kind = .Union_Type;
-            result = analysis_new_type(workspace, kind, declaration.name, id);
-        case 2;
-            for i: 0..workspace.files[id.file].syntax.imports.count {
-                dependency := workspace.files[id.file].syntax.imports[i];
-                if dependency.symbol != id.symbol continue;
-                target := analysis_import_target(workspace, id.file, i);
-                if target >= 0 result = analysis_new_type(workspace, .Module, declaration.name,
-                    .{ .file = target });
-            }
-        case 26;
-            result = analysis_new_type(workspace, .Generic, declaration.name, id);
-        case 22;
-            if declaration.parent_symbol >= 0 {
-                owner: Symbol_Id = .{ .file = id.file, .symbol = declaration.parent_symbol };
-                result = analysis_type(workspace, owner);
-                child := workspace.files[id.file].syntax.nodes[declaration.node].first_child;
-                if child >= 0 {
-                    variant: Semantic_Type = .{
-                        .kind = .Procedure, .name = declaration.name, .symbol = id,
-                        .return_type = result,
-                    };
-                    while child >= 0 {
-                        parameter := workspace.files[id.file].syntax.nodes[child];
-                        variant.parameters.push(analysis_expression_type(workspace, id.file,
-                            parameter.type_node));
-                        child = parameter.next_sibling;
-                    }
-                    workspace.types.push(variant);
-                    result = workspace.types.count - 1;
+    case 23, 10, 11;
+        kind: Type_Kind = .Struct_Type;
+        if declaration.kind == 10 kind = .Enum;
+        if declaration.value_node >= 0 &&
+            workspace.files[id.file].syntax.nodes[declaration.value_node].kind == .Union_Type
+            kind = .Union_Type;
+        result = analysis_new_type(workspace, kind, declaration.name, id);
+    case 2;
+        for i: 0..workspace.files[id.file].syntax.imports.count {
+            dependency := workspace.files[id.file].syntax.imports[i];
+            if dependency.symbol != id.symbol continue;
+            target := analysis_import_target(workspace, id.file, i);
+            if target >= 0 result = analysis_new_type(
+                workspace,
+                .Module,
+                declaration.name,
+                .{ .file = target }
+            );
+        }
+    case 26;
+        result = analysis_new_type(workspace, .Generic, declaration.name, id);
+    case 22;
+        if declaration.parent_symbol >= 0 {
+            owner: Symbol_Id = .{ .file = id.file, .symbol = declaration.parent_symbol };
+            result = analysis_type(workspace, owner);
+            child := workspace.files[id.file].syntax.nodes[declaration.node].first_child;
+            if child >= 0 {
+                variant: Semantic_Type = .{
+                    .kind = .Procedure,
+                    .name = declaration.name,
+                    .symbol = id,
+                    .return_type = result,
+                };
+                while child >= 0 {
+                    parameter := workspace.files[id.file].syntax.nodes[child];
+                    variant.parameters.push(
+                        analysis_expression_type(workspace, id.file, parameter.type_node)
+                    );
+                    child = parameter.next_sibling;
                 }
+                workspace.types.push(variant);
+                result = workspace.types.count - 1;
             }
-        case 12, 6;
-            value: Semantic_Type = .{ .kind = .Procedure, .name = declaration.name, .symbol = id };
-            // Publish the procedure identity before following recursive return types.
-            workspace.types.push(value);
-            result = workspace.types.count - 1;
-            workspace.files[id.file].semantic.symbol_types[id.symbol] = result;
-            syntax := &workspace.files[id.file].syntax;
-            symbols := &workspace.files[id.file].semantic.index;
-            for position: 0..symbol_index_count(symbols, syntax, declaration.body_scope) {
-                index := symbol_index_at(symbols, syntax, declaration.body_scope, position);
-                parameter := workspace.files[id.file].syntax.symbols[index];
-                if parameter.scope != declaration.body_scope || parameter.node < 0 continue;
-                if workspace.files[id.file].syntax.nodes[parameter.node].kind != .Parameter
-                    continue;
-                parameter_type := analysis_type(workspace, .{ .file = id.file, .symbol = index });
-                workspace.types[result].parameters.push(parameter_type);
-            }
-            return_node := declaration.type_node;
-            if declaration.value_node >= 0
-                return_node = workspace.files[id.file].syntax.nodes[
-                    declaration.value_node].type_node;
-            return_type := analysis_expression_type(workspace, id.file, return_node);
-            if return_type == 0 return_type = analysis_builtin(workspace, "void");
-            workspace.types[result].return_type = return_type;
-        else;
-            node_kind := workspace.files[id.file].syntax.nodes[declaration.node].kind;
-            previous := declaration.token - 1;
-            generic_parameter := node_kind == .Parameter &&
-                analysis_text(workspace, id.file, declaration.type_node) == "type";
-            if node_kind == .Parameter && previous >= 0 {
-                token := workspace.files[id.file].syntax.language.tokens[previous];
-                source := workspace.files[id.file].source;
-                if source.substring(token.start, token.end) == "$" generic_parameter = true;
-            }
-            if node_kind == .Parameter && declaration.name == "#self" && declaration.type_node < 0
-                result = analysis_owner_type(workspace, id.file, declaration.scope);
-            else if generic_parameter
-                result = analysis_new_type(workspace, .Generic, declaration.name);
-            else result = analysis_expression_type(workspace, id.file, declaration.type_node);
-            if result == 0
-                result = analysis_expression_type(workspace, id.file, declaration.value_node);
-            ordinal := workspace.files[id.file].syntax.nodes[declaration.node].argument_index;
-            if result > 0 && ordinal >= 0 && workspace.types[result].kind == .Tuple &&
-               ordinal < workspace.types[result].arguments.count
-                result = workspace.types[result].arguments[ordinal];
-            analysis_contextual_aggregate(workspace, id.file, declaration.value_node, result);
+        }
+    case 12, 6;
+        value: Semantic_Type = .{ .kind = .Procedure, .name = declaration.name, .symbol = id };
+        // Publish the procedure identity before following recursive return types.
+        workspace.types.push(value);
+        result = workspace.types.count - 1;
+        workspace.files[id.file].semantic.symbol_types[id.symbol] = result;
+        syntax := &workspace.files[id.file].syntax;
+        symbols := &workspace.files[id.file].semantic.index;
+        for position: 0..symbol_index_count(symbols, syntax, declaration.body_scope) {
+            index := symbol_index_at(symbols, syntax, declaration.body_scope, position);
+            parameter := workspace.files[id.file].syntax.symbols[index];
+            if parameter.scope != declaration.body_scope || parameter.node < 0 continue;
+            if workspace.files[id.file].syntax.nodes[parameter.node].kind != .Parameter
+                continue;
+            parameter_type := analysis_type(workspace, .{ .file = id.file, .symbol = index });
+            workspace.types[result].parameters.push(parameter_type);
+        }
+        return_node := declaration.type_node;
+        if declaration.value_node >= 0
+            return_node = workspace.files[id.file].syntax.nodes[declaration.value_node].type_node;
+        return_type := analysis_expression_type(workspace, id.file, return_node);
+        if return_type == 0 return_type = analysis_builtin(workspace, "void");
+        workspace.types[result].return_type = return_type;
+    else;
+        node_kind := workspace.files[id.file].syntax.nodes[declaration.node].kind;
+        previous := declaration.token - 1;
+        generic_parameter := node_kind == .Parameter &&
+            analysis_text(workspace, id.file, declaration.type_node) == "type";
+        if node_kind == .Parameter && previous >= 0 {
+            token := workspace.files[id.file].syntax.language.tokens[previous];
+            source := workspace.files[id.file].source;
+            if source.substring(token.start, token.end) == "$" generic_parameter = true;
+        }
+        if node_kind == .Parameter && declaration.name == "#self" && declaration.type_node < 0
+            result = analysis_owner_type(workspace, id.file, declaration.scope);
+        else if generic_parameter
+            result = analysis_new_type(workspace, .Generic, declaration.name);
+        else result = analysis_expression_type(workspace, id.file, declaration.type_node);
+        if result == 0
+            result = analysis_expression_type(workspace, id.file, declaration.value_node);
+        ordinal := workspace.files[id.file].syntax.nodes[declaration.node].argument_index;
+        if result > 0 && ordinal >= 0 && workspace.types[result].kind == .Tuple &&
+            ordinal < workspace.types[result].arguments.count
+            result = workspace.types[result].arguments[ordinal];
+        analysis_contextual_aggregate(workspace, id.file, declaration.value_node, result);
     }
     if declaration.kind == 13 {
         fact := workspace_compiler_fact(workspace, id.file, declaration.selection_start, 1);
@@ -1515,11 +1692,12 @@ analysis_type_spine :: (workspace: *Workspace, file: ssize, node: ssize) {
 
 #public analysis_numeric :: (name: str) -> bool {
     if name == {
-        case "rune", "ssize", "usize", "f16", "f32", "f64", "f80", "f128",
-             "c32", "c64", "c128", "c160", "c256", "int8_t", "int16_t", "int32_t",
-             "int64_t", "__int128", "uint8_t", "uint16_t", "uint32_t", "uint64_t";
-            return true;
-        else; return language_integer_type(name);
+    case "rune", "ssize", "usize", "f16", "f32", "f64", "f80", "f128",
+    "c32", "c64", "c128", "c160", "c256", "int8_t", "int16_t", "int32_t",
+    "int64_t", "__int128", "uint8_t", "uint16_t", "uint32_t", "uint64_t";
+        return true;
+    else;
+        return language_integer_type(name);
     }
 }
 
@@ -1530,9 +1708,9 @@ analysis_type_spine :: (workspace: *Workspace, file: ssize, node: ssize) {
     if left.kind == .Generic || right.kind == .Generic return true;
     if left.kind == .Builtin && left.name == "any" return true;
     if left.kind == .Builtin && right.kind == .Builtin &&
-       analysis_numeric(left.name) && analysis_numeric(right.name) return true;
+        analysis_numeric(left.name) && analysis_numeric(right.name) return true;
     if left.kind == .Builtin && right.kind == .Builtin && right.name == "str" &&
-       (left.name == "string16" || left.name == "cstr" || left.name == "cstring16") return true;
+        (left.name == "string16" || left.name == "cstr" || left.name == "cstring16") return true;
     if left.kind != right.kind return false;
     if left.kind == .Builtin return left.name == right.name;
     if left.kind == .Matrix_Type && !analysis_matrix_shape_matches(left, right) return false;
@@ -1547,7 +1725,10 @@ analysis_type_spine :: (workspace: *Workspace, file: ssize, node: ssize) {
 }
 
 #public analysis_suppress_diagnostics :: (
-    syntax: *const Parsed_File, node: ssize, roles: *[..]s32, depth: ssize = 0,
+    syntax: *const Parsed_File,
+    node: ssize,
+    roles: *[..]s32,
+    depth: ssize = 0,
 ) {
     if node < 0 || depth > 64 return;
     roles.*[node] = -1;
@@ -1564,14 +1745,22 @@ analysis_type_spine :: (workspace: *Workspace, file: ssize, node: ssize) {
 }
 
 #public analysis_add_diagnostic :: (
-    workspace: *Workspace, file: ssize, start: ssize, end: ssize, message: str,
+    workspace: *Workspace,
+    file: ssize,
+    start: ssize,
+    end: ssize,
+    message: str,
 ) {
     for existing: workspace.files[file].semantic.diagnostics.view() {
         if existing.start == start && existing.end == end && existing.message == message return;
     }
-    workspace.files[file].semantic.diagnostics.push(.{
-        .start = start, .end = end, .message = message,
-    });
+    workspace.files[file].semantic.diagnostics.push(
+        .{
+            .start = start,
+            .end = end,
+            .message = message,
+        }
+    );
 }
 
 #public analysis_matrix_diagnostics :: (workspace: *Workspace, file: ssize, index: ssize) {
@@ -1581,27 +1770,50 @@ analysis_type_spine :: (workspace: *Workspace, file: ssize, node: ssize) {
     value := analysis_type_view(workspace, expected);
     if node.matrix_rows < 0 {
         if value.kind == .Matrix_Type
-            analysis_add_diagnostic(workspace, file, node.start, node.end,
-                "Matrix initializers require #matrix .[...; ...].");
+            analysis_add_diagnostic(
+                workspace,
+                file,
+                node.start,
+                node.end,
+                "Matrix initializers require #matrix .[...; ...]."
+            );
         return;
     }
     if value.kind != .Matrix_Type {
-        analysis_add_diagnostic(workspace, file, node.start, node.end,
-            "#matrix literal requires a Matrix type.");
+        analysis_add_diagnostic(
+            workspace,
+            file,
+            node.start,
+            node.end,
+            "#matrix literal requires a Matrix type."
+        );
         return;
     }
     empty := node.matrix_rows == 0 && (value.matrix_rows == 0 || value.matrix_columns == 0);
-    if !empty && ((value.matrix_rows >= 0 && value.matrix_rows != node.matrix_rows) ||
-                 (value.matrix_columns >= 0 && value.matrix_columns != node.matrix_columns))
-        analysis_add_diagnostic(workspace, file, node.start, node.end,
-            "Matrix literal dimensions do not match the declared type.");
+    if !empty && (
+        (value.matrix_rows >= 0 && value.matrix_rows != node.matrix_rows) || (
+            value.matrix_columns >= 0 && value.matrix_columns != node.matrix_columns
+        )
+    )
+        analysis_add_diagnostic(
+            workspace,
+            file,
+            node.start,
+            node.end,
+            "Matrix literal dimensions do not match the declared type."
+        );
     child := node.first_child;
     while child >= 0 {
         actual := workspace.files[file].semantic.node_types[child];
         if !analysis_compatible(workspace, value.element, actual) {
             element := workspace.files[file].syntax.nodes[child];
-            analysis_add_diagnostic(workspace, file, element.start, element.end,
-                "Matrix element type does not match the declared type.");
+            analysis_add_diagnostic(
+                workspace,
+                file,
+                element.start,
+                element.end,
+                "Matrix element type does not match the declared type."
+            );
         }
         child = workspace.files[file].syntax.nodes[child].next_sibling;
     }
@@ -1619,10 +1831,13 @@ analysis_type_spine :: (workspace: *Workspace, file: ssize, node: ssize) {
             defer j = symbol_index_scoped(symbols, syntax, declaration.scope, declaration.name, j);
             other := syntax.symbols[j];
             if other.kind != 12 && other.kind != 6 {
-                workspace.files[file].semantic.diagnostics.push(.{
-                    .start = declaration.selection_start, .end = declaration.selection_end,
-                    .message = "Duplicate declaration in the same scope.",
-                });
+                workspace.files[file].semantic.diagnostics.push(
+                    .{
+                        .start = declaration.selection_start,
+                        .end = declaration.selection_end,
+                        .message = "Duplicate declaration in the same scope.",
+                    }
+                );
                 break;
             }
         }
@@ -1663,47 +1878,61 @@ analysis_type_spine :: (workspace: *Workspace, file: ssize, node: ssize) {
         if node.kind == .Aggregate && syntax.language.diagnostics.count == 0
             analysis_matrix_diagnostics(workspace, file, i);
         if node.kind == .Identifier && roles[i] > 0 && node.token >= 0 &&
-           workspace.files[file].semantic.node_types[i] == 0 &&
-           workspace.files[file].semantic.bindings[node.token].symbol < 0 &&
-           syntax.language.diagnostics.count == 0 {
+            workspace.files[file].semantic.node_types[i] == 0 &&
+            workspace.files[file].semantic.bindings[node.token].symbol < 0 &&
+            syntax.language.diagnostics.count == 0 {
             name := analysis_text(workspace, file, i);
             // The compiler installs OUT and HOST without source declarations.
             if name == "_" || name == "OUT" || name == "HOST" ||
-               name.starts_with("#") || !language_identifier_valid(name) continue;
-            analysis_add_diagnostic(workspace, file, node.start, node.end,
-                "Unresolved identifier.");
+                name.starts_with("#") || !language_identifier_valid(name) continue;
+            analysis_add_diagnostic(workspace, file, node.start, node.end, "Unresolved identifier.");
         }
         if node.kind == .Member && node.left >= 0 && node.right >= 0 {
             base := workspace.files[file].semantic.node_types[node.left];
             name := analysis_text(workspace, file, node.right);
             if base > 0 && language_identifier_valid(name) &&
-               analysis_member(workspace, base, name, file).symbol < 0 {
+                analysis_member(workspace, base, name, file).symbol < 0 {
                 kind := workspace.types[base].kind;
                 if kind == .Struct_Type || kind == .Union_Type || kind == .Enum || kind == .Module {
                     member := syntax.nodes[node.right];
-                    analysis_add_diagnostic(workspace, file, member.start, member.end,
-                        "Unknown member on this type.");
+                    analysis_add_diagnostic(
+                        workspace,
+                        file,
+                        member.start,
+                        member.end,
+                        "Unknown member on this type."
+                    );
                 }
             }
         }
         if node.kind == .Declaration && node.symbol >= 0 && node.type_node >= 0 &&
-           node.value_node >= 0 {
+            node.value_node >= 0 {
             expected := workspace.files[file].semantic.node_types[node.type_node];
             actual := workspace.files[file].semantic.node_types[node.value_node];
             if !analysis_compatible(workspace, expected, actual) {
                 value := syntax.nodes[node.value_node];
-                analysis_add_diagnostic(workspace, file, value.start, value.end,
-                    "Initializer type does not match the declared type.");
+                analysis_add_diagnostic(
+                    workspace,
+                    file,
+                    value.start,
+                    value.end,
+                    "Initializer type does not match the declared type."
+                );
             }
         }
         if node.kind == .Binary && analysis_text(workspace, file, i) == "=" &&
-           node.left >= 0 && node.right >= 0 {
+            node.left >= 0 && node.right >= 0 {
             expected := workspace.files[file].semantic.node_types[node.left];
             actual := workspace.files[file].semantic.node_types[node.right];
             if !analysis_compatible(workspace, expected, actual) {
                 value := syntax.nodes[node.right];
-                analysis_add_diagnostic(workspace, file, value.start, value.end,
-                    "Assigned value has an incompatible type.");
+                analysis_add_diagnostic(
+                    workspace,
+                    file,
+                    value.start,
+                    value.end,
+                    "Assigned value has an incompatible type."
+                );
             }
         }
         if node.kind == .Call && node.left >= 0 {
@@ -1718,12 +1947,22 @@ analysis_type_spine :: (workspace: *Workspace, file: ssize, node: ssize) {
                 if argument.value >= 0
                     actual = workspace.files[file].semantic.node_types[argument.value];
                 if index >= 0 && index < workspace.types[callee].parameters.count {
-                    expected := analysis_call_expected_type(workspace, file, callee, index,
-                        argument.value);
+                    expected := analysis_call_expected_type(
+                        workspace,
+                        file,
+                        callee,
+                        index,
+                        argument.value
+                    );
                     if !analysis_compatible(workspace, expected, actual) {
                         span := syntax.nodes[argument.value];
-                        analysis_add_diagnostic(workspace, file, span.start, span.end,
-                            "Argument type does not match the procedure parameter.");
+                        analysis_add_diagnostic(
+                            workspace,
+                            file,
+                            span.start,
+                            span.end,
+                            "Argument type does not match the procedure parameter."
+                        );
                     }
                 }
                 child = syntax.nodes[child].next_sibling;
@@ -1740,12 +1979,22 @@ analysis_type_spine :: (workspace: *Workspace, file: ssize, node: ssize) {
             if edge.declaration == i && edge.ambiguous ambiguous = true;
         }
         if ambiguous {
-            analysis_add_diagnostic(workspace, file, dependency.start, dependency.end,
-                "Ambiguous module path: both file and directory entries exist.");
+            analysis_add_diagnostic(
+                workspace,
+                file,
+                dependency.start,
+                dependency.end,
+                "Ambiguous module path: both file and directory entries exist."
+            );
             continue;
         }
-        analysis_add_diagnostic(workspace, file, dependency.start, dependency.end,
-            "Unresolved module path.");
+        analysis_add_diagnostic(
+            workspace,
+            file,
+            dependency.start,
+            dependency.end,
+            "Unresolved module path."
+        );
     }
 }
 
@@ -1823,14 +2072,16 @@ analysis_prepare :: (workspace: *Workspace) {
     if offset > 0 {
         previous := language_token_at(language, offset - 1);
         if previous >= 0 && previous != token && previous < bindings.count &&
-           language.tokens[previous].end == offset && bindings[previous].symbol >= 0
+            language.tokens[previous].end == offset && bindings[previous].symbol >= 0
             return previous;
     }
     return token;
 }
 
 #public analysis_symbol_at :: (
-    workspace: *Workspace, file: ssize, offset: ssize,
+    workspace: *Workspace,
+    file: ssize,
+    offset: ssize,
 ) -> Symbol_Id {
     token := analysis_token_at(workspace, file, offset);
     if token < 0 || token >= workspace.files[file].semantic.bindings.count return .{};
@@ -1844,8 +2095,11 @@ analysis_prepare :: (workspace: *Workspace) {
 }
 
 #public analysis_collect_exports :: (
-    workspace: *const Workspace, file: ssize, public_only: bool,
-    symbols: *[..]Symbol_Id, depth: ssize,
+    workspace: *const Workspace,
+    file: ssize,
+    public_only: bool,
+    symbols: *[..]Symbol_Id,
+    depth: ssize,
 ) {
     if file < 0 return;
     pending: [..]ssize;
@@ -1873,7 +2127,7 @@ analysis_prepare :: (workspace: *Workspace) {
         for i: 0..syntax.imports.count {
             dependency := syntax.imports[i];
             if dependency.symbol >= 0 ||
-               (!dependency.exported && !(dependency.load && dependency.embedded)) continue;
+                (!dependency.exported && !(dependency.load && dependency.embedded)) continue;
             target := analysis_import_target(workspace, current, i);
             if target < 0 continue;
             seen := false;
@@ -1884,7 +2138,9 @@ analysis_prepare :: (workspace: *Workspace) {
 }
 
 #public analysis_visible_symbols :: (
-    workspace: *Workspace, file: ssize, offset: ssize,
+    workspace: *Workspace,
+    file: ssize,
+    offset: ssize,
 ) -> [..]Symbol_Id {
     analyze_document(workspace, file);
     result: [..]Symbol_Id;
@@ -1925,7 +2181,7 @@ analysis_prepare :: (workspace: *Workspace) {
             shadowed := false;
             for existing: result.view() {
                 if workspace.files[existing.file].syntax.symbols[existing.symbol].name ==
-                   syntax.symbols[i].name shadowed = true;
+                    syntax.symbols[i].name shadowed = true;
             }
             if !shadowed analysis_push_unique(&result, .{ .file = file, .symbol = i });
         }
@@ -1950,8 +2206,13 @@ analysis_prepare :: (workspace: *Workspace) {
     for i: 0..syntax.imports.count {
         dependency := syntax.imports[i];
         if dependency.symbol >= 0 || (dependency.embedded && !dependency.load) continue;
-        analysis_collect_exports(workspace, analysis_import_target(workspace, file, i),
-            true, &result, 0);
+        analysis_collect_exports(
+            workspace,
+            analysis_import_target(workspace, file, i),
+            true,
+            &result,
+            0
+        );
     }
     for other: 0..workspace.files.count {
         if other != file && analysis_same_unit(workspace, file, other)
@@ -1963,7 +2224,11 @@ analysis_prepare :: (workspace: *Workspace) {
 }
 
 #public analysis_push_using_fields :: (
-    workspace: *Workspace, file: ssize, scope: ssize, offset: ssize, result: *[..]Symbol_Id,
+    workspace: *Workspace,
+    file: ssize,
+    scope: ssize,
+    offset: ssize,
+    result: *[..]Symbol_Id,
 ) {
     index := workspace.files[file].syntax.usings.count;
     while index > 0 {
@@ -1975,14 +2240,21 @@ analysis_prepare :: (workspace: *Workspace) {
         for field: fields.view() {
             declaration := workspace.files[field.file].syntax.symbols[field.symbol];
             if declaration.kind != 8 continue;
-            if field.file != file && (!declaration.is_public ||
-                (declaration.is_unit && !analysis_same_unit(workspace, field.file, file)))
+            if field.file != file && (
+                !declaration.is_public || (
+                    declaration.is_unit && !analysis_same_unit(workspace, field.file, file)
+                )
+            )
                 continue;
-            shadowed := analysis_precedes_using(workspace, file, scope,
-                analysis_lookup(workspace, file, scope, declaration.name, offset));
+            shadowed := analysis_precedes_using(
+                workspace,
+                file,
+                scope,
+                analysis_lookup(workspace, file, scope, declaration.name, offset)
+            );
             for existing: result.*.view() {
                 if workspace.files[existing.file].syntax.symbols[existing.symbol].name ==
-                   declaration.name shadowed = true;
+                    declaration.name shadowed = true;
             }
             if !shadowed analysis_push_unique(result, field);
         }
@@ -2014,7 +2286,7 @@ analysis_prepare :: (workspace: *Workspace) {
             if member.kind != 12 continue;
             owner_type := analysis_inherent_owner(workspace, file, i);
             if owner_type > 0 &&
-               analysis_same_symbol(workspace.types[owner_type].symbol, value.symbol)
+                analysis_same_symbol(workspace.types[owner_type].symbol, value.symbol)
                 analysis_push_unique(&result, .{ .file = file, .symbol = i });
         }
     }
@@ -2022,7 +2294,9 @@ analysis_prepare :: (workspace: *Workspace) {
 }
 
 #public analysis_members_at :: (
-    workspace: *Workspace, file: ssize, offset: ssize,
+    workspace: *Workspace,
+    file: ssize,
+    offset: ssize,
 ) -> [..]Symbol_Id {
     analyze_document(workspace, file);
     empty: [..]Symbol_Id;
@@ -2037,7 +2311,7 @@ analysis_prepare :: (workspace: *Workspace) {
         if offset <= base.end || offset > node.end + 1 continue;
         span := node.end - node.start;
         if best < 0 || base.end > syntax.nodes[best].end ||
-           (base.end == syntax.nodes[best].end && span < best_span) {
+            (base.end == syntax.nodes[best].end && span < best_span) {
             best = node.left;
             best_span = span;
         }
@@ -2049,8 +2323,11 @@ analysis_prepare :: (workspace: *Workspace) {
     while index < result.count {
         id := result[index];
         declaration := workspace.files[id.file].syntax.symbols[id.symbol];
-        if id.file != file && (!declaration.is_public ||
-            (declaration.is_unit && !analysis_same_unit(workspace, id.file, file))) {
+        if id.file != file && (
+            !declaration.is_public || (
+                declaration.is_unit && !analysis_same_unit(workspace, id.file, file)
+            )
+        ) {
             for next: index + 1..result.count result[next - 1] = result[next];
             _ := array_pop_last(&result);
         } else index += 1;
@@ -2064,7 +2341,10 @@ analysis_prepare :: (workspace: *Workspace) {
 }
 
 #public analysis_write_type :: (
-    out: *String_Builder, workspace: *const Workspace, type_id: Type_Id, depth: ssize = 0,
+    out: *String_Builder,
+    workspace: *const Workspace,
+    type_id: Type_Id,
+    depth: ssize = 0,
 ) {
     if type_id <= 0 || type_id >= workspace.types.count || depth > 16 {
         out.write_string("unknown");
@@ -2072,45 +2352,45 @@ analysis_prepare :: (workspace: *Workspace) {
     }
     value := analysis_type_view(workspace, type_id);
     if value.kind == {
-        case .Matrix_Type;
-            out.write_string("Matrix(");
-            analysis_write_type(out, workspace, value.element, depth + 1);
-            out.write_string(", ");
-            if value.matrix_rows >= 0 out.writef("{}", value.matrix_rows);
-            else out.write_string("?");
-            out.write_string(", ");
-            if value.matrix_columns >= 0 out.writef("{}", value.matrix_columns);
-            else out.write_string("?");
-            out.write_string(")");
-        case .Pointer, .Array_Type;
-            if value.kind == .Pointer out.write_string("*");
-            else out.write_string("[]");
-            analysis_write_type(out, workspace, value.element, depth + 1);
-        case .Procedure;
-            out.write_string("(");
-            for i: 0..value.parameters.count {
-                if i > 0 out.write_string(", ");
-                analysis_write_type(out, workspace, value.parameters[i], depth + 1);
-            }
-            out.write_string(") -> ");
-            analysis_write_type(out, workspace, value.return_type, depth + 1);
-        case .Tuple;
+    case .Matrix_Type;
+        out.write_string("Matrix(");
+        analysis_write_type(out, workspace, value.element, depth + 1);
+        out.write_string(", ");
+        if value.matrix_rows >= 0 out.writef("{}", value.matrix_rows);
+        else out.write_string("?");
+        out.write_string(", ");
+        if value.matrix_columns >= 0 out.writef("{}", value.matrix_columns);
+        else out.write_string("?");
+        out.write_string(")");
+    case .Pointer, .Array_Type;
+        if value.kind == .Pointer out.write_string("*");
+        else out.write_string("[]");
+        analysis_write_type(out, workspace, value.element, depth + 1);
+    case .Procedure;
+        out.write_string("(");
+        for i: 0..value.parameters.count {
+            if i > 0 out.write_string(", ");
+            analysis_write_type(out, workspace, value.parameters[i], depth + 1);
+        }
+        out.write_string(") -> ");
+        analysis_write_type(out, workspace, value.return_type, depth + 1);
+    case .Tuple;
+        out.write_string("(");
+        for i: 0..value.arguments.count {
+            if i > 0 out.write_string(", ");
+            analysis_write_type(out, workspace, value.arguments[i], depth + 1);
+        }
+        out.write_string(")");
+    else;
+        out.write_string(value.name);
+        if value.arguments.count > 0 {
             out.write_string("(");
             for i: 0..value.arguments.count {
                 if i > 0 out.write_string(", ");
                 analysis_write_type(out, workspace, value.arguments[i], depth + 1);
             }
             out.write_string(")");
-        else;
-            out.write_string(value.name);
-            if value.arguments.count > 0 {
-                out.write_string("(");
-                for i: 0..value.arguments.count {
-                    if i > 0 out.write_string(", ");
-                    analysis_write_type(out, workspace, value.arguments[i], depth + 1);
-                }
-                out.write_string(")");
-            }
+        }
     }
 }
 

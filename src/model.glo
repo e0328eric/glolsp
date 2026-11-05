@@ -3,351 +3,391 @@
 #import "language.glo";
 
 #public {
-    // Avoid the reflection enum's Struct/Union spellings in derive expansion.
-    Syntax_Kind :: enum  {
-        Root;
-        Declaration;
-        Parameter;
-        Pattern_Capture;
-        Pattern_Binding;
-        Procedure;
-        Struct_Type;
-        Union_Type;
-        Enum;
-        Typeclass;
-        Inherent;
-        Import;
-        Block;
-        Identifier;
-        Literal;
-        Member;
-        Call;
-        Index;
-        Unary;
-        Binary;
-        Aggregate;
-        Field;
-        Return;
-        If;
-        While;
-        For;
-        Statement;
-        Error;
-        Type;
+
+// Avoid the reflection enum's Struct/Union spellings in derive expansion.
+Syntax_Kind :: enum {
+    Root;
+    Declaration;
+    Parameter;
+    Pattern_Capture;
+    Pattern_Binding;
+    Procedure;
+    Struct_Type;
+    Union_Type;
+    Enum;
+    Typeclass;
+    Inherent;
+    Import;
+    Block;
+    Identifier;
+    Literal;
+    Member;
+    Call;
+    Index;
+    Unary;
+    Binary;
+    Aggregate;
+    Field;
+    Return;
+    If;
+    While;
+    For;
+    Statement;
+    Error;
+    Type;
+}
+
+Syntax_Node :: struct {
+    kind: Syntax_Kind;
+    start: ssize;
+    end: ssize;
+    token: ssize = -1;
+    parent: ssize = -1;
+    left: ssize = -1;
+    right: ssize = -1;
+    first_child: ssize = -1;
+    last_child: ssize = -1;
+    next_sibling: ssize = -1;
+    scope: ssize = -1;
+    symbol: ssize = -1;
+    type_node: ssize = -1;
+    value_node: ssize = -1;
+    argument_index: ssize = -1;
+    matrix_rows: ssize = -1;
+    matrix_columns: ssize = -1;
+}
+
+Syntax_Symbol :: struct {
+    name: str;
+    detail: str;
+    documentation: str;
+    node: ssize = -1;
+    token: ssize = -1;
+    scope: ssize = -1;
+    body_scope: ssize = -1;
+    type_node: ssize = -1;
+    value_node: ssize = -1;
+    parent_symbol: ssize = -1;
+    kind: s32 = 13;
+    is_public: bool;
+    is_unit: bool;
+    start: ssize;
+    end: ssize;
+    selection_start: ssize;
+    selection_end: ssize;
+    // Pattern bindings become visible after their failure block has ended.
+    visible_from: ssize;
+}
+
+Syntax_Scope :: struct {
+    parent: ssize = -1;
+    owner: ssize = -1;
+    start: ssize;
+    end: ssize;
+}
+
+Syntax_Import :: struct {
+    path: str;
+    path_token: ssize = -1;
+    node: ssize = -1;
+    symbol: ssize = -1;
+    load: bool;
+    exported: bool;
+    embedded: bool;
+    start: ssize;
+    end: ssize;
+}
+
+Parsed_File :: struct {
+    source: str;
+    language: Language_Analysis;
+    nodes: [..]Syntax_Node;
+    symbols: [..]Syntax_Symbol;
+    scopes: [..]Syntax_Scope;
+    imports: [..]Syntax_Import;
+    // `using` parameter and statement nodes, in source order.
+    usings: [..]ssize;
+}
+
+Symbol_Id :: struct {
+    file: ssize = -1;
+    symbol: ssize = -1;
+}
+
+Type_Id :: ssize;
+
+Type_Kind :: enum {
+    Unknown;
+    Builtin;
+    Struct_Type;
+    Union_Type;
+    Enum;
+    Procedure;
+    Module;
+    Pointer;
+    Array_Type;
+    Matrix_Type;
+    Tuple;
+    Generic;
+}
+
+Semantic_Type :: struct {
+    kind: Type_Kind;
+    name: str;
+    symbol: Symbol_Id;
+    element: Type_Id = -1;
+    matrix_rows: ssize = -1;
+    matrix_columns: ssize = -1;
+    return_type: Type_Id = -1;
+    parameters: [..]Type_Id;
+    arguments: [..]Type_Id;
+}
+
+// Symbols grouped by scope and by name, so that lookups visit only their
+// candidates. Every list and chain is in symbol order. It is rebuilt with
+// the semantics of each parse; callers verify each candidate, and a stale
+// index degrades to visiting every symbol.
+Symbol_Index :: struct {
+    // Symbols declared in scope `s` are `in_scope[scope_starts[s]..scope_starts[s + 1]]`.
+    scope_starts: [..]ssize;
+    in_scope: [..]ssize;
+    // Symbols whose body is scope `s`, laid out the same way.
+    body_starts: [..]ssize;
+    in_body: [..]ssize;
+    // Chains of symbols that share a scope and name, or only a name. The
+    // open-addressed tables map a key to the first symbol of its chain.
+    scoped_keys: [..]u64;
+    scoped_heads: [..]ssize;
+    scoped_next: [..]ssize;
+    named_keys: [..]u64;
+    named_heads: [..]ssize;
+    named_next: [..]ssize;
+    // Typeclass declarations, whose operations share their scope.
+    typeclasses: [..]ssize;
+}
+
+File_Semantics :: struct {
+    bindings: [..]Symbol_Id;
+    symbol_types: [..]Type_Id;
+    node_types: [..]Type_Id;
+    diagnostics: [..]Language_Diagnostic;
+    revision: ssize = -1;
+    index: Symbol_Index;
+}
+
+symbol_index_free :: (index: *Symbol_Index) {
+    index.scope_starts.free();
+    index.in_scope.free();
+    index.body_starts.free();
+    index.in_body.free();
+    index.scoped_keys.free();
+    index.scoped_heads.free();
+    index.scoped_next.free();
+    index.named_keys.free();
+    index.named_heads.free();
+    index.named_next.free();
+    index.typeclasses.free();
+}
+
+file_semantics_free :: (semantics: *File_Semantics) {
+    semantics.bindings.free();
+    semantics.symbol_types.free();
+    semantics.node_types.free();
+    semantics.diagnostics.free();
+    symbol_index_free(&semantics.index);
+}
+
+// FNV-1a over the name, mixed with the scope and finalized so that the
+// low bits address the table.
+symbol_index_key :: (scope: ssize, name: str) -> u64 {
+    key: u64 = 16#cbf2_9ce4_8422_2325;
+    for byte: name.bytes() key = (key ^ cast(u64) byte) *% 16#100_0000_01b3;
+    key ^= cast(u64)(scope + 2) *% 16#9e37_79b9_7f4a_7c15;
+    key ^= key >> 33;
+    key = key *% 16#ff51_afd7_ed55_8ccd;
+    return key ^ (key >> 33);
+}
+
+// The slot holding `key`, or the empty slot where it would go.
+symbol_index_slot :: (keys: []const u64, heads: []const ssize, key: u64) -> ssize {
+    mask := cast(u64)(heads.count - 1);
+    slot := cast(ssize)(key & mask);
+    while heads[slot] >= 0 && keys[slot] != key slot = cast(ssize)(cast(u64)(slot + 1) & mask);
+    return slot;
+}
+
+// Prepend `symbol` to the chain of `key`.
+symbol_index_insert :: (
+    keys: *[..]u64,
+    heads: *[..]ssize,
+    next: *[..]ssize,
+    key: u64,
+    symbol: ssize,
+) {
+    slot := symbol_index_slot(keys.view(), heads.view(), key);
+    if heads.*[slot] >= 0 next.*[symbol] = heads.*[slot];
+    keys.*[slot] = key;
+    heads.*[slot] = symbol;
+}
+
+// The first symbol of the chain of `key`, or -1.
+symbol_index_head :: (keys: []const u64, heads: []const ssize, key: u64) -> ssize {
+    if heads.count == 0 return -1;
+    return heads[symbol_index_slot(keys, heads, key)];
+}
+
+// Group symbol indices by `scope_of`, in symbol order.
+symbol_index_group :: (
+    syntax: *const Parsed_File,
+    starts: *[..]ssize,
+    members: *[..]ssize,
+    body: bool,
+) {
+    groups := syntax.scopes.count;
+    for 0..groups + 1 starts.push(0);
+    for symbol: syntax.symbols.view() {
+        group := symbol.scope;
+        if body group = symbol.body_scope;
+        if group >= 0 && group < groups starts.*[group + 1] += 1;
     }
-
-    Syntax_Node :: struct  {
-        kind: Syntax_Kind;
-        start: ssize;
-        end: ssize;
-        token: ssize = -1;
-        parent: ssize = -1;
-        left: ssize = -1;
-        right: ssize = -1;
-        first_child: ssize = -1;
-        last_child: ssize = -1;
-        next_sibling: ssize = -1;
-        scope: ssize = -1;
-        symbol: ssize = -1;
-        type_node: ssize = -1;
-        value_node: ssize = -1;
-        argument_index: ssize = -1;
-        matrix_rows: ssize = -1;
-        matrix_columns: ssize = -1;
+    for group: 0..groups starts.*[group + 1] += starts.*[group];
+    fill: [..]ssize;
+    defer fill.free();
+    for group: 0..groups fill.push(starts.*[group]);
+    for 0..starts.*[groups] members.push(-1);
+    for i: 0..syntax.symbols.count {
+        group := syntax.symbols[i].scope;
+        if body group = syntax.symbols[i].body_scope;
+        if group < 0 || group >= groups continue;
+        members.*[fill[group]] = i;
+        fill[group] += 1;
     }
+}
 
-    Syntax_Symbol :: struct  {
-        name: str;
-        detail: str;
-        documentation: str;
-        node: ssize = -1;
-        token: ssize = -1;
-        scope: ssize = -1;
-        body_scope: ssize = -1;
-        type_node: ssize = -1;
-        value_node: ssize = -1;
-        parent_symbol: ssize = -1;
-        kind: s32 = 13;
-        is_public: bool;
-        is_unit: bool;
-        start: ssize;
-        end: ssize;
-        selection_start: ssize;
-        selection_end: ssize;
-        // Pattern bindings become visible after their failure block has ended.
-        visible_from: ssize;
+symbol_index_build :: (index: *Symbol_Index, syntax: *const Parsed_File) {
+    symbol_index_free(index);
+    symbol_index_group(syntax, &index.scope_starts, &index.in_scope, false);
+    symbol_index_group(syntax, &index.body_starts, &index.in_body, true);
+    // At most half of the slots are used, so probes stay short.
+    slots: ssize = 1;
+    while slots < 2 * syntax.symbols.count slots *= 2;
+    for 0..slots {
+        index.scoped_keys.push(0);
+        index.scoped_heads.push(-1);
+        index.named_keys.push(0);
+        index.named_heads.push(-1);
     }
-
-    Syntax_Scope :: struct  {
-        parent: ssize = -1;
-        owner: ssize = -1;
-        start: ssize;
-        end: ssize;
+    for 0..syntax.symbols.count {
+        index.scoped_next.push(-1);
+        index.named_next.push(-1);
     }
-
-    Syntax_Import :: struct  {
-        path: str;
-        path_token: ssize = -1;
-        node: ssize = -1;
-        symbol: ssize = -1;
-        load: bool;
-        exported: bool;
-        embedded: bool;
-        start: ssize;
-        end: ssize;
+    // Prepend in reverse so that every chain ascends.
+    i := syntax.symbols.count;
+    while i > 0 {
+        i -= 1;
+        symbol := syntax.symbols[i];
+        symbol_index_insert(
+            &index.scoped_keys,
+            &index.scoped_heads,
+            &index.scoped_next,
+            symbol_index_key(symbol.scope, symbol.name),
+            i
+        );
+        symbol_index_insert(
+            &index.named_keys,
+            &index.named_heads,
+            &index.named_next,
+            symbol_index_key(-2, symbol.name),
+            i
+        );
     }
-
-    Parsed_File :: struct {
-        source: str;
-        language: Language_Analysis;
-        nodes: [..]Syntax_Node;
-        symbols: [..]Syntax_Symbol;
-        scopes: [..]Syntax_Scope;
-        imports: [..]Syntax_Import;
-        // `using` parameter and statement nodes, in source order.
-        usings: [..]ssize;
+    for i: 0..syntax.symbols.count {
+        value := syntax.symbols[i].value_node;
+        if syntax.symbols[i].kind == 11 && value >= 0 && value < syntax.nodes.count &&
+            syntax.nodes[value].kind == .Typeclass index.typeclasses.push(i);
     }
+}
 
-    Symbol_Id :: struct  { file: ssize = -1; symbol: ssize = -1; }
+// Whether the index describes `syntax`, rather than an earlier parse.
+symbol_index_ready :: (index: *const Symbol_Index, syntax: *const Parsed_File) -> bool {
+    return index.scoped_next.count == syntax.symbols.count &&
+        index.scope_starts.count == syntax.scopes.count + 1;
+}
 
-    Type_Id :: ssize;
+// The candidates declared in `scope` (or, with `body`, whose body it is),
+// walked by position: the index's list, or else every symbol.
+symbol_index_count :: (
+    index: *const Symbol_Index,
+    syntax: *const Parsed_File,
+    scope: ssize,
+    body: bool = false,
+) -> ssize {
+    if !symbol_index_ready(index, syntax) return syntax.symbols.count;
+    if scope < 0 || scope >= syntax.scopes.count return 0;
+    if body return index.body_starts[scope + 1] - index.body_starts[scope];
+    return index.scope_starts[scope + 1] - index.scope_starts[scope];
+}
 
-    Type_Kind :: enum  {
-        Unknown;
-        Builtin;
-        Struct_Type;
-        Union_Type;
-        Enum;
-        Procedure;
-        Module;
-        Pointer;
-        Array_Type;
-        Matrix_Type;
-        Tuple;
-        Generic;
-    }
+symbol_index_at :: (
+    index: *const Symbol_Index,
+    syntax: *const Parsed_File,
+    scope: ssize,
+    position: ssize,
+    body: bool = false,
+) -> ssize {
+    if !symbol_index_ready(index, syntax) return position;
+    if body return index.in_body[index.body_starts[scope] + position];
+    return index.in_scope[index.scope_starts[scope] + position];
+}
 
-    Semantic_Type :: struct {
-        kind: Type_Kind;
-        name: str;
-        symbol: Symbol_Id;
-        element: Type_Id = -1;
-        matrix_rows: ssize = -1;
-        matrix_columns: ssize = -1;
-        return_type: Type_Id = -1;
-        parameters: [..]Type_Id;
-        arguments: [..]Type_Id;
-    }
-
-    // Symbols grouped by scope and by name, so that lookups visit only their
-    // candidates. Every list and chain is in symbol order. It is rebuilt with
-    // the semantics of each parse; callers verify each candidate, and a stale
-    // index degrades to visiting every symbol.
-    Symbol_Index :: struct {
-        // Symbols declared in scope `s` are `in_scope[scope_starts[s]..scope_starts[s + 1]]`.
-        scope_starts: [..]ssize;
-        in_scope: [..]ssize;
-        // Symbols whose body is scope `s`, laid out the same way.
-        body_starts: [..]ssize;
-        in_body: [..]ssize;
-        // Chains of symbols that share a scope and name, or only a name. The
-        // open-addressed tables map a key to the first symbol of its chain.
-        scoped_keys: [..]u64;
-        scoped_heads: [..]ssize;
-        scoped_next: [..]ssize;
-        named_keys: [..]u64;
-        named_heads: [..]ssize;
-        named_next: [..]ssize;
-        // Typeclass declarations, whose operations share their scope.
-        typeclasses: [..]ssize;
-    }
-
-    File_Semantics :: struct {
-        bindings: [..]Symbol_Id;
-        symbol_types: [..]Type_Id;
-        node_types: [..]Type_Id;
-        diagnostics: [..]Language_Diagnostic;
-        revision: ssize = -1;
-        index: Symbol_Index;
-    }
-
-    symbol_index_free :: (index: *Symbol_Index) {
-        index.scope_starts.free();
-        index.in_scope.free();
-        index.body_starts.free();
-        index.in_body.free();
-        index.scoped_keys.free();
-        index.scoped_heads.free();
-        index.scoped_next.free();
-        index.named_keys.free();
-        index.named_heads.free();
-        index.named_next.free();
-        index.typeclasses.free();
-    }
-
-    file_semantics_free :: (semantics: *File_Semantics) {
-        semantics.bindings.free();
-        semantics.symbol_types.free();
-        semantics.node_types.free();
-        semantics.diagnostics.free();
-        symbol_index_free(&semantics.index);
-    }
-
-    // FNV-1a over the name, mixed with the scope and finalized so that the
-    // low bits address the table.
-    symbol_index_key :: (scope: ssize, name: str) -> u64 {
-        key: u64 = 16#cbf2_9ce4_8422_2325;
-        for byte: name.bytes() key = (key ^ cast(u64)byte) *% 16#100_0000_01b3;
-        key ^= cast(u64)(scope + 2) *% 16#9e37_79b9_7f4a_7c15;
-        key ^= key >> 33;
-        key = key *% 16#ff51_afd7_ed55_8ccd;
-        return key ^ (key >> 33);
-    }
-
-    // The slot holding `key`, or the empty slot where it would go.
-    symbol_index_slot :: (keys: []const u64, heads: []const ssize, key: u64) -> ssize {
-        mask := cast(u64)(heads.count - 1);
-        slot := cast(ssize)(key & mask);
-        while heads[slot] >= 0 && keys[slot] != key slot = cast(ssize)(cast(u64)(slot + 1) & mask);
-        return slot;
-    }
-
-    // Prepend `symbol` to the chain of `key`.
-    symbol_index_insert :: (
-        keys: *[..]u64, heads: *[..]ssize, next: *[..]ssize, key: u64, symbol: ssize,
-    ) {
-        slot := symbol_index_slot(keys.view(), heads.view(), key);
-        if heads.*[slot] >= 0 next.*[symbol] = heads.*[slot];
-        keys.*[slot] = key;
-        heads.*[slot] = symbol;
-    }
-
-    // The first symbol of the chain of `key`, or -1.
-    symbol_index_head :: (keys: []const u64, heads: []const ssize, key: u64) -> ssize {
-        if heads.count == 0 return -1;
-        return heads[symbol_index_slot(keys, heads, key)];
-    }
-
-    // Group symbol indices by `scope_of`, in symbol order.
-    symbol_index_group :: (
-        syntax: *const Parsed_File, starts: *[..]ssize, members: *[..]ssize, body: bool,
-    ) {
-        groups := syntax.scopes.count;
-        for 0..groups + 1 starts.push(0);
-        for symbol: syntax.symbols.view() {
-            group := symbol.scope;
-            if body group = symbol.body_scope;
-            if group >= 0 && group < groups starts.*[group + 1] += 1;
+// The next symbol after `after` (-1 to start) declared in `scope` as `name`.
+symbol_index_scoped :: (
+    index: *const Symbol_Index,
+    syntax: *const Parsed_File,
+    scope: ssize,
+    name: str,
+    after: ssize,
+) -> ssize {
+    if !symbol_index_ready(index, syntax) {
+        for i: after + 1..syntax.symbols.count {
+            if syntax.symbols[i].scope == scope && syntax.symbols[i].name == name return i;
         }
-        for group: 0..groups starts.*[group + 1] += starts.*[group];
-        fill: [..]ssize;
-        defer fill.free();
-        for group: 0..groups fill.push(starts.*[group]);
-        for 0..starts.*[groups] members.push(-1);
-        for i: 0..syntax.symbols.count {
-            group := syntax.symbols[i].scope;
-            if body group = syntax.symbols[i].body_scope;
-            if group < 0 || group >= groups continue;
-            members.*[fill[group]] = i;
-            fill[group] += 1;
-        }
+        return -1;
     }
+    i: ssize = -1;
+    if after >= 0 i = index.scoped_next[after];
+    else i = symbol_index_head(
+        index.scoped_keys.view(),
+        index.scoped_heads.view(),
+        symbol_index_key(scope, name)
+    );
+    while i >= 0 && (syntax.symbols[i].scope != scope || syntax.symbols[i].name != name)
+        i = index.scoped_next[i];
+    return i;
+}
 
-    symbol_index_build :: (index: *Symbol_Index, syntax: *const Parsed_File) {
-        symbol_index_free(index);
-        symbol_index_group(syntax, &index.scope_starts, &index.in_scope, false);
-        symbol_index_group(syntax, &index.body_starts, &index.in_body, true);
-        // At most half of the slots are used, so probes stay short.
-        slots: ssize = 1;
-        while slots < 2 * syntax.symbols.count slots *= 2;
-        for 0..slots {
-            index.scoped_keys.push(0);
-            index.scoped_heads.push(-1);
-            index.named_keys.push(0);
-            index.named_heads.push(-1);
+// The next symbol after `after` (-1 to start) named `name`, in any scope.
+symbol_index_named :: (
+    index: *const Symbol_Index,
+    syntax: *const Parsed_File,
+    name: str,
+    after: ssize,
+) -> ssize {
+    if !symbol_index_ready(index, syntax) {
+        for i: after + 1..syntax.symbols.count {
+            if syntax.symbols[i].name == name return i;
         }
-        for 0..syntax.symbols.count {
-            index.scoped_next.push(-1);
-            index.named_next.push(-1);
-        }
-        // Prepend in reverse so that every chain ascends.
-        i := syntax.symbols.count;
-        while i > 0 {
-            i -= 1;
-            symbol := syntax.symbols[i];
-            symbol_index_insert(&index.scoped_keys, &index.scoped_heads, &index.scoped_next,
-                symbol_index_key(symbol.scope, symbol.name), i);
-            symbol_index_insert(&index.named_keys, &index.named_heads, &index.named_next,
-                symbol_index_key(-2, symbol.name), i);
-        }
-        for i: 0..syntax.symbols.count {
-            value := syntax.symbols[i].value_node;
-            if syntax.symbols[i].kind == 11 && value >= 0 && value < syntax.nodes.count &&
-               syntax.nodes[value].kind == .Typeclass index.typeclasses.push(i);
-        }
+        return -1;
     }
+    i: ssize = -1;
+    if after >= 0 i = index.named_next[after];
+    else i = symbol_index_head(
+        index.named_keys.view(),
+        index.named_heads.view(),
+        symbol_index_key(-2, name)
+    );
+    while i >= 0 && syntax.symbols[i].name != name i = index.named_next[i];
+    return i;
+}
 
-    // Whether the index describes `syntax`, rather than an earlier parse.
-    symbol_index_ready :: (index: *const Symbol_Index, syntax: *const Parsed_File) -> bool {
-        return index.scoped_next.count == syntax.symbols.count &&
-            index.scope_starts.count == syntax.scopes.count + 1;
-    }
-
-    // The candidates declared in `scope` (or, with `body`, whose body it is),
-    // walked by position: the index's list, or else every symbol.
-    symbol_index_count :: (
-        index: *const Symbol_Index, syntax: *const Parsed_File, scope: ssize, body: bool = false,
-    ) -> ssize {
-        if !symbol_index_ready(index, syntax) return syntax.symbols.count;
-        if scope < 0 || scope >= syntax.scopes.count return 0;
-        if body return index.body_starts[scope + 1] - index.body_starts[scope];
-        return index.scope_starts[scope + 1] - index.scope_starts[scope];
-    }
-
-    symbol_index_at :: (
-        index: *const Symbol_Index, syntax: *const Parsed_File, scope: ssize, position: ssize,
-        body: bool = false,
-    ) -> ssize {
-        if !symbol_index_ready(index, syntax) return position;
-        if body return index.in_body[index.body_starts[scope] + position];
-        return index.in_scope[index.scope_starts[scope] + position];
-    }
-
-    // The next symbol after `after` (-1 to start) declared in `scope` as `name`.
-    symbol_index_scoped :: (
-        index: *const Symbol_Index, syntax: *const Parsed_File, scope: ssize, name: str,
-        after: ssize,
-    ) -> ssize {
-        if !symbol_index_ready(index, syntax) {
-            for i: after + 1..syntax.symbols.count {
-                if syntax.symbols[i].scope == scope && syntax.symbols[i].name == name return i;
-            }
-            return -1;
-        }
-        i: ssize = -1;
-        if after >= 0 i = index.scoped_next[after];
-        else i = symbol_index_head(index.scoped_keys.view(), index.scoped_heads.view(),
-            symbol_index_key(scope, name));
-        while i >= 0 && (syntax.symbols[i].scope != scope || syntax.symbols[i].name != name)
-            i = index.scoped_next[i];
-        return i;
-    }
-
-    // The next symbol after `after` (-1 to start) named `name`, in any scope.
-    symbol_index_named :: (
-        index: *const Symbol_Index, syntax: *const Parsed_File, name: str, after: ssize,
-    ) -> ssize {
-        if !symbol_index_ready(index, syntax) {
-            for i: after + 1..syntax.symbols.count {
-                if syntax.symbols[i].name == name return i;
-            }
-            return -1;
-        }
-        i: ssize = -1;
-        if after >= 0 i = index.named_next[after];
-        else i = symbol_index_head(index.named_keys.view(), index.named_heads.view(),
-            symbol_index_key(-2, name));
-        while i >= 0 && syntax.symbols[i].name != name i = index.named_next[i];
-        return i;
-    }
 }

@@ -23,101 +23,106 @@
 #import "glosso.glo";
 
 #public {
-    Workspace_Import :: struct  {
-        declaration: ssize;
-        target: ssize = -1;
-        ambiguous: bool;
-    }
 
-    Workspace_Path_Completions :: struct {
-        paths: [..]str;
-        incomplete: bool;
-    }
+Workspace_Import :: struct {
+    declaration: ssize;
+    target: ssize = -1;
+    ambiguous: bool;
+}
 
-    Compiler_Binding :: struct { name: str; target: Symbol_Id; }
-    Compiler_Fact :: struct {
-        start: ssize;
-        end: ssize;
-        kind: s32; // 1 binding, 2 expression, 3 call
-        type_name: str;
-        type_definition: Symbol_Id;
-        definition: Symbol_Id;
-        declaration: Symbol_Id; // Syntax declaration before compiler callee selection.
-    }
+Workspace_Path_Completions :: struct {
+    paths: [..]str;
+    incomplete: bool;
+}
 
-    Source_File :: struct {
-        uri: str;
-        path: str;
-        source: str;
-        version: ssize;
-        open: bool;
-        // Editor URIs that currently have this file open, e.g. through a
-        // symlinked directory and its target. `open` is true while any remain.
-        aliases: [..]str;
-        active: bool;
-        relevant: bool;
-        // Discovered files count toward `file_limit`; editor buffers, the
-        // prelude, and generated sources do not.
-        counted: bool;
-        syntax: Parsed_File;
-        semantic: File_Semantics;
-        imports: [..]Workspace_Import;
-        revision: ssize;
-        generated: bool;
-        generated_origin: ssize = -1;
-        generated_start: ssize;
-        generated_end: ssize;
-        // The compiler epoch and result application that last emitted this
-        // generated source. Older entries are unreferenced and reusable.
-        generated_epoch: ssize = -1;
-        generated_apply: ssize = -1;
-        generated_files: [..]ssize;
-        compiler_bindings: [..]Compiler_Binding;
-        compiler_facts: [..]Compiler_Fact;
-        // Lookup keys for removing duplicates from the arrays above.
-        compiler_binding_keys: HashMap(u64, ssize);
-        compiler_fact_keys: HashSet(u64);
-        // `start << 32 | index` for every fact, sorted, and the longest fact.
-        // Offset lookups binary-search this instead of scanning every fact.
-        compiler_fact_order: [..]u64;
-        compiler_fact_span: ssize;
-        compiler_epoch: ssize = -1;
-        compiler_requested: bool;
-        diagnostics_pending: bool;
-        compiler_ready: bool;
-        compiler_document: Serialization_Document;
-        compiler_error: str;
-        compiler_output: str;
-    }
+Compiler_Binding :: struct {
+    name: str;
+    target: Symbol_Id;
+}
+Compiler_Fact :: struct {
+    start: ssize;
+    end: ssize;
+    kind: s32; // 1 binding, 2 expression, 3 call
+    type_name: str;
+    type_definition: Symbol_Id;
+    definition: Symbol_Id;
+    declaration: Symbol_Id; // Syntax declaration before compiler callee selection.
+}
 
-    Workspace :: struct {
-        files: [..]Source_File;
-        roots: [..]str;
-        // The editor's URI for each root. It differs from the resolved root
-        // when the folder was opened through a symbolic link.
-        root_uris: [..]str;
-        import_paths: [..]str;
-        std_path: str;
-        prelude: ssize = -1;
-        types: [..]Semantic_Type;
-        unit_owners: [..]ssize;
-        file_limit: ssize = 4096;
-        counted_files: ssize;
-        uncounted_loads: ssize;
-        // Search workspace roots for module names. `glosso compile` does not,
-        // so this is opt-in through `rootsAsModulePaths`.
-        roots_as_module_paths: bool;
-        compiler_applies: ssize;
-        source_limit: ssize = 16 * 1024 * 1024;
-        compiler_step_limit: u64 = 16777216;
-        import_depth: ssize;
-        revision: ssize;
-        generation: ssize;
-        analyzed_generation: ssize = -1;
-        compiler_epoch: ssize;
-        parse_count: ssize;
-        truncated: bool;
-    }
+Source_File :: struct {
+    uri: str;
+    path: str;
+    source: str;
+    version: ssize;
+    open: bool;
+    // Editor URIs that currently have this file open, e.g. through a
+    // symlinked directory and its target. `open` is true while any remain.
+    aliases: [..]str;
+    active: bool;
+    relevant: bool;
+    // Discovered files count toward `file_limit`; editor buffers, the
+    // prelude, and generated sources do not.
+    counted: bool;
+    syntax: Parsed_File;
+    semantic: File_Semantics;
+    imports: [..]Workspace_Import;
+    revision: ssize;
+    generated: bool;
+    generated_origin: ssize = -1;
+    generated_start: ssize;
+    generated_end: ssize;
+    // The compiler epoch and result application that last emitted this
+    // generated source. Older entries are unreferenced and reusable.
+    generated_epoch: ssize = -1;
+    generated_apply: ssize = -1;
+    generated_files: [..]ssize;
+    compiler_bindings: [..]Compiler_Binding;
+    compiler_facts: [..]Compiler_Fact;
+    // Lookup keys for removing duplicates from the arrays above.
+    compiler_binding_keys: HashMap(u64, ssize);
+    compiler_fact_keys: HashSet(u64);
+    // `start << 32 | index` for every fact, sorted, and the longest fact.
+    // Offset lookups binary-search this instead of scanning every fact.
+    compiler_fact_order: [..]u64;
+    compiler_fact_span: ssize;
+    compiler_epoch: ssize = -1;
+    compiler_requested: bool;
+    diagnostics_pending: bool;
+    compiler_ready: bool;
+    compiler_document: Serialization_Document;
+    compiler_error: str;
+    compiler_output: str;
+}
+
+Workspace :: struct {
+    files: [..]Source_File;
+    roots: [..]str;
+    // The editor's URI for each root. It differs from the resolved root
+    // when the folder was opened through a symbolic link.
+    root_uris: [..]str;
+    import_paths: [..]str;
+    std_path: str;
+    prelude: ssize = -1;
+    types: [..]Semantic_Type;
+    unit_owners: [..]ssize;
+    file_limit: ssize = 4096;
+    counted_files: ssize;
+    uncounted_loads: ssize;
+    // Search workspace roots for module names. `glosso compile` does not,
+    // so this is opt-in through `rootsAsModulePaths`.
+    roots_as_module_paths: bool;
+    compiler_applies: ssize;
+    source_limit: ssize = 16 * 1024 * 1024;
+    compiler_step_limit: u64 = 16777216;
+    import_depth: ssize;
+    revision: ssize;
+    generation: ssize;
+    analyzed_generation: ssize = -1;
+    compiler_epoch: ssize;
+    parse_count: ssize;
+    truncated: bool;
+}
+
 }
 
 #public workspace_byte :: (text: str, at: ssize) -> u8 {
@@ -127,10 +132,14 @@
 
 #public workspace_hex :: (byte: u8) -> s32 {
     if byte == {
-        case #char "0"..=#char "9"; return cast(s32)(byte - #char "0");
-        case #char "a"..=#char "f"; return cast(s32)(byte - #char "a") + 10;
-        case #char "A"..=#char "F"; return cast(s32)(byte - #char "A") + 10;
-        else; return -1;
+    case #char "0"..=#char "9";
+        return cast(s32)(byte - #char "0");
+    case #char "a"..=#char "f";
+        return cast(s32)(byte - #char "a") + 10;
+    case #char "A"..=#char "F";
+        return cast(s32)(byte - #char "A") + 10;
+    else;
+        return -1;
     }
 }
 
@@ -146,8 +155,9 @@
 
 #public workspace_drive_path :: (path: str) -> bool {
     first := workspace_byte(path, 0);
-    return ((first >= #char "A" && first <= #char "Z") ||
-        (first >= #char "a" && first <= #char "z")) &&
+    return (
+        (first >= #char "A" && first <= #char "Z") || (first >= #char "a" && first <= #char "z")
+    ) &&
         workspace_byte(path, 1) == #char ":" &&
         (workspace_byte(path, 2) == #char "/" || workspace_byte(path, 2) == #char "\\");
 }
@@ -179,7 +189,7 @@
     // resolving imports calls this thousands of times per editor event.
     // Release that scratch space unless the result itself is temporary.
     if context.allocator.procedure == context.temp_allocator.procedure &&
-       context.allocator.data == context.temp_allocator.data
+        context.allocator.data == context.temp_allocator.data
         return workspace_resolve_path(path);
     mark := temp_mark();
     defer temp_rewind(mark);
@@ -190,30 +200,33 @@ workspace_resolve_path :: (path: str) -> str {
     if path.count == 0 return "".clone();
     #if OUT.os == Target_OS.Windows {
         if canonical(path) == {
-            case .Ok(value);
-                defer value.free();
-                return workspace_windows_path(value);
-            case .Err;
+        case .Ok(value);
+            defer value.free();
+            return workspace_windows_path(value);
+        case .Err;
         }
         if absolute(path) == {
-            case .Ok(value);
-                defer value.free();
-                return workspace_windows_path(value);
-            case .Err; return workspace_windows_path(path);
+        case .Ok(value);
+            defer value.free();
+            return workspace_windows_path(value);
+        case .Err;
+            return workspace_windows_path(path);
         }
     }
     if workspace_drive_path(path) || workspace_prefix(path, "\\\\") ||
-       workspace_prefix(path, "//") return workspace_windows_path(path);
+        workspace_prefix(path, "//") return workspace_windows_path(path);
     if canonical(path) == {
-        case .Ok(value); return value;
-        case .Err;
+    case .Ok(value);
+        return value;
+    case .Err;
     }
     lexical: str;
     if absolute(path) == {
-        case .Ok(value);
-            defer value.free();
-            lexical = path_clean(value);
-        case .Err; lexical = path_clean(path);
+    case .Ok(value);
+        defer value.free();
+        lexical = path_clean(value);
+    case .Err;
+        lexical = path_clean(path);
     }
     // A missing file keeps the resolved spelling of its nearest existing
     // directory, so saving or deleting it never changes its identity.
@@ -232,7 +245,7 @@ workspace_resolve_path :: (path: str) -> str {
     defer decoded.free();
     if decoded.count == 0 || remote return decoded.clone();
     if decoded.count > 3 && workspace_byte(decoded, 0) == #char "/" &&
-       workspace_drive_path(decoded.substring_view(1, decoded.count))
+        workspace_drive_path(decoded.substring_view(1, decoded.count))
         return workspace_normalize_path(decoded.substring_view(1, decoded.count));
     return workspace_normalize_path(decoded);
 }
@@ -258,14 +271,15 @@ workspace_uri_decode :: (uri: str) -> (str, bool) {
     while at < uri.count {
         byte := workspace_byte(uri, at);
         if #partial byte == {
-            case #char "%";
-                if at + 2 >= uri.count return "".clone(), false;
-                high := workspace_hex(workspace_byte(uri, at + 1));
-                low := workspace_hex(workspace_byte(uri, at + 2));
-                if high < 0 || low < 0 return "".clone(), false;
-                byte = cast(u8)(high * 16 + low);
-                at += 2;
-            case #char "?", #char "#"; return "".clone(), false;
+        case #char "%";
+            if at + 2 >= uri.count return "".clone(), false;
+            high := workspace_hex(workspace_byte(uri, at + 1));
+            low := workspace_hex(workspace_byte(uri, at + 2));
+            if high < 0 || low < 0 return "".clone(), false;
+            byte = cast(u8)(high * 16 + low);
+            at += 2;
+        case #char "?", #char "#";
+            return "".clone(), false;
         }
         if byte == 0 return "".clone(), false;
         out.write_byte(byte);
@@ -291,13 +305,13 @@ workspace_encode_uri :: (normalized: str) -> str {
     hex :: "0123456789ABCDEF";
     for byte: normalized.bytes() {
         if byte == {
-            case #char "A"..=#char "Z", #char "a"..=#char "z", #char "0"..=#char "9",
-                 #char "-", #char "_", #char ".", #char "~", #char "/", #char ":";
-                out.write_byte(byte);
-            else;
-                out.write_byte(#char "%");
-                out.write_byte(hex.bytes()[cast(ssize)(byte / 16)]);
-                out.write_byte(hex.bytes()[cast(ssize)(byte % 16)]);
+        case #char "A"..=#char "Z", #char "a"..=#char "z", #char "0"..=#char "9",
+        #char "-", #char "_", #char ".", #char "~", #char "/", #char ":";
+            out.write_byte(byte);
+        else;
+            out.write_byte(#char "%");
+            out.write_byte(hex.bytes()[cast(ssize)(byte / 16)]);
+            out.write_byte(hex.bytes()[cast(ssize)(byte % 16)]);
         }
     }
     return out.into_string();
@@ -305,12 +319,13 @@ workspace_encode_uri :: (normalized: str) -> str {
 
 #public workspace_environment :: (name: str) -> str {
     if environment_get(name) == {
-        case .Ok(value);
-            if value == {
-                case ?found; return found.value.clone();
-                case null;
-            }
-        case .Err;
+    case .Ok(value);
+        if value == {
+        case ?found;
+            return found.value.clone();
+        case null;
+        }
+    case .Err;
     }
     return "".clone();
 }
@@ -406,11 +421,11 @@ workspace_encode_uri :: (normalized: str) -> str {
     for i: 0..workspace.root_uris.count {
         root := workspace.roots[i];
         if workspace_suffix(root, "/") || !workspace_prefix(path, root) ||
-           (path.count > root.count && path[root.count] != #char "/") continue;
+            (path.count > root.count && path[root.count] != #char "/") continue;
         spelled, remote := workspace_uri_decode(workspace.root_uris[i]);
         defer spelled.free();
         if remote || workspace_byte(spelled, 0) != #char "/" ||
-           workspace_drive_path(spelled.substring_view(1, spelled.count)) continue;
+            workspace_drive_path(spelled.substring_view(1, spelled.count)) continue;
         lexical := path_clean(spelled);
         defer lexical.free();
         if lexical == root || workspace_suffix(lexical, "/") continue;
@@ -428,8 +443,10 @@ workspace_encode_uri :: (normalized: str) -> str {
 workspace_untitled_path :: (index: ssize) -> str {
     base: str;
     if temp_directory_path() == {
-        case .Ok(value); base = value;
-        case .Err; base = "/tmp".clone();
+    case .Ok(value);
+        base = value;
+    case .Err;
+        base = "/tmp".clone();
     }
     defer base.free();
     name := tprint("glolsp-untitled/{}.glo", index);
@@ -455,7 +472,7 @@ workspace_untitled_path :: (index: ssize) -> str {
     file.compiler_fact_order.free();
     file.compiler_fact_span = 0;
     for fact, index: file.compiler_facts.view() {
-        file.compiler_fact_order.push((cast(u64)fact.start << 32) | cast(u64)index);
+        file.compiler_fact_order.push((cast(u64) fact.start << 32) | cast(u64) index);
         if fact.end - fact.start > file.compiler_fact_span
             file.compiler_fact_span = fact.end - fact.start;
     }
@@ -469,8 +486,12 @@ workspace_untitled_path :: (index: ssize) -> str {
 }
 
 /// The earliest-reported fact of `kind` (any kind for 0) whose range holds `at`.
-#public workspace_compiler_fact :: (workspace: *const Workspace, file: ssize, at: ssize,
-    kind: s32 = 0) -> Compiler_Fact {
+#public workspace_compiler_fact :: (
+    workspace: *const Workspace,
+    file: ssize,
+    at: ssize,
+    kind: s32 = 0
+) -> Compiler_Fact {
     facts := workspace.files[file].compiler_facts.view();
     order := workspace.files[file].compiler_fact_order.view();
     if order.count != facts.count {
@@ -551,7 +572,9 @@ workspace_clear_aliases :: (file: *Source_File) {
         file.compiler_error.free();
         file.compiler_output.free();
         workspace_clear_aliases(file);
-        file.source.free(); file.path.free(); file.uri.free();
+        file.source.free();
+        file.path.free();
+        file.uri.free();
     }
     workspace.files.free();
     workspace.counted_files = 0;
@@ -576,7 +599,10 @@ workspace_clear_aliases :: (file: *Source_File) {
 /// `file_limit` bounds discovered files only: an editor buffer, the prelude,
 /// or a generated source is always admitted.
 #public workspace_allocate :: (
-    workspace: *Workspace, uri: str, path: str, counted: bool = true,
+    workspace: *Workspace,
+    uri: str,
+    path: str,
+    counted: bool = true,
 ) -> ssize {
     if counted && workspace.uncounted_loads > 0 counted = false;
     if counted && workspace.counted_files >= workspace.file_limit {
@@ -617,25 +643,31 @@ workspace_clear_aliases :: (file: *Source_File) {
         return -1;
     }
     if read_file_up_to(normalized, workspace.source_limit + 1) == {
-        case .Err; return -1;
-        case .Ok(source);
-            defer source.free();
-            if source.count > workspace.source_limit || !source.bytes().utf8_is_valid() return -1;
-            if index < 0 {
-                uri := workspace_file_uri(workspace, normalized);
-                defer uri.free();
-                index = workspace_allocate(workspace, uri, normalized);
-            }
-            if index < 0 return -1;
-            workspace.import_depth += 1;
-            defer { workspace.import_depth -= 1; }
-            if !workspace_replace_source(workspace, index, source) return -1;
-            return index;
+    case .Err;
+        return -1;
+    case .Ok(source);
+        defer source.free();
+        if source.count > workspace.source_limit || !source.bytes().utf8_is_valid() return -1;
+        if index < 0 {
+            uri := workspace_file_uri(workspace, normalized);
+            defer uri.free();
+            index = workspace_allocate(workspace, uri, normalized);
+        }
+        if index < 0 return -1;
+        workspace.import_depth += 1;
+        defer {
+            workspace.import_depth -= 1;
+        }
+        if !workspace_replace_source(workspace, index, source) return -1;
+        return index;
     }
 }
 
 #public workspace_open :: (
-    workspace: *Workspace, uri: str, source: str, version: ssize,
+    workspace: *Workspace,
+    uri: str,
+    source: str,
+    version: ssize,
 ) -> ssize {
     if source.count > workspace.source_limit || !source.bytes().utf8_is_valid() return -1;
     index := workspace_find(workspace, uri);
@@ -668,7 +700,10 @@ workspace_clear_aliases :: (file: *Source_File) {
 }
 
 #public workspace_change :: (
-    workspace: *Workspace, index: ssize, source: str, version: ssize,
+    workspace: *Workspace,
+    index: ssize,
+    source: str,
+    version: ssize,
 ) -> bool {
     if index < 0 || index >= workspace.files.count return false;
     if !workspace.files[index].open || version <= workspace.files[index].version return false;
@@ -683,10 +718,10 @@ workspace_clear_aliases :: (file: *Source_File) {
     path := workspace.files[index].path.clone();
     defer path.free();
     if read_file_up_to(path, workspace.source_limit + 1) == {
-        case .Ok(source);
-            defer source.free();
-            if workspace_replace_source(workspace, index, source) return;
-        case .Err;
+    case .Ok(source);
+        defer source.free();
+        if workspace_replace_source(workspace, index, source) return;
+    case .Err;
     }
     workspace_unload(workspace, index);
 }
@@ -724,34 +759,38 @@ workspace_clear_aliases :: (file: *Source_File) {
             at += 1;
             byte = workspace_byte(raw, at);
             if byte == {
-                case #char "\\", #char "\"", #char "/";
-                case #char "n"; byte = #char "\n";
-                case #char "r"; byte = #char "\r";
-                case #char "t"; byte = #char "\t";
-                case #char "x";
-                    high := workspace_hex(workspace_byte(raw, at + 1));
-                    low := workspace_hex(workspace_byte(raw, at + 2));
-                    if high < 0 || low < 0 return "".clone();
-                    byte = cast(u8)(high * 16 + low);
-                    at += 2;
-                case #char "u";
-                    if workspace_byte(raw, at + 1) != #char "{" return "".clone();
-                    at += 2;
-                    scalar: u32 = 0;
-                    digits: ssize = 0;
-                    while workspace_byte(raw, at) != #char "}" {
-                        digit := workspace_hex(workspace_byte(raw, at));
-                        if digit < 0 || digits >= 6 return "".clone();
-                        scalar = scalar * 16 + cast(u32)digit;
-                        digits += 1;
-                        at += 1;
-                    }
-                    if digits == 0 || scalar == 0 || scalar > 16#10_ffff ||
-                       (scalar >= 16#d800 && scalar <= 16#dfff) return "".clone();
-                    _ := out.write_rune(cast(rune)scalar);
+            case #char "\\", #char "\"", #char "/";
+            case #char "n";
+                byte = #char "\n";
+            case #char "r";
+                byte = #char "\r";
+            case #char "t";
+                byte = #char "\t";
+            case #char "x";
+                high := workspace_hex(workspace_byte(raw, at + 1));
+                low := workspace_hex(workspace_byte(raw, at + 2));
+                if high < 0 || low < 0 return "".clone();
+                byte = cast(u8)(high * 16 + low);
+                at += 2;
+            case #char "u";
+                if workspace_byte(raw, at + 1) != #char "{" return "".clone();
+                at += 2;
+                scalar: u32 = 0;
+                digits: ssize = 0;
+                while workspace_byte(raw, at) != #char "}" {
+                    digit := workspace_hex(workspace_byte(raw, at));
+                    if digit < 0 || digits >= 6 return "".clone();
+                    scalar = scalar * 16 + cast(u32) digit;
+                    digits += 1;
                     at += 1;
-                    continue;
-                else; return "".clone();
+                }
+                if digits == 0 || scalar == 0 || scalar > 16#10_ffff ||
+                    (scalar >= 16#d800 && scalar <= 16#dfff) return "".clone();
+                _ := out.write_rune(cast(rune) scalar);
+                at += 1;
+                continue;
+            else;
+                return "".clone();
             }
         }
         if byte == 0 return "".clone();
@@ -788,12 +827,16 @@ workspace_clear_aliases :: (file: *Source_File) {
     normalized := workspace_normalize_path(path);
     defer normalized.free();
     index := workspace_find_path(workspace, normalized);
-    return (index >= 0 && workspace.files[index].active) || is_regular_file(normalized).unwrap_or(false);
+    return (index >= 0 && workspace.files[index].active) || is_regular_file(normalized).unwrap_or(
+        false
+    );
 }
 
 // Probe without loading source: completion must not grow or reparse the workspace.
 #public workspace_module_path :: (
-    workspace: *const Workspace, root: str, name: str,
+    workspace: *const Workspace,
+    root: str,
+    name: str,
 ) -> (str, bool) {
     if root.count == 0 return "".clone(), false;
     base := path_join(root, name);
@@ -837,8 +880,11 @@ workspace_clear_aliases :: (file: *Source_File) {
 
 #public workspace_find_module :: (workspace: *const Workspace, name: str) -> (str, bool) {
     for i: 0..workspace_module_root_count(workspace) {
-        candidate, conflict := workspace_module_path(workspace,
-            workspace_module_root(workspace, i), name);
+        candidate, conflict := workspace_module_path(
+            workspace,
+            workspace_module_root(workspace, i),
+            name
+        );
         if candidate.count > 0 || conflict return candidate, conflict;
         candidate.free();
     }
@@ -851,7 +897,9 @@ workspace_clear_aliases :: (file: *Source_File) {
 }
 
 #public workspace_resolve_import :: (
-    workspace: *Workspace, source_path: str, declaration: Syntax_Import,
+    workspace: *Workspace,
+    source_path: str,
+    declaration: Syntax_Import,
 ) -> ssize {
     if declaration.embedded && !declaration.load return -1;
     name := workspace_import_path(declaration.path);
@@ -870,8 +918,11 @@ workspace_clear_aliases :: (file: *Source_File) {
     }
     if !workspace_valid_module(name) return -1;
     for i: 0..workspace_module_root_count(workspace) {
-        path, ambiguous := workspace_module_path(workspace,
-            workspace_module_root(workspace, i), name);
+        path, ambiguous := workspace_module_path(
+            workspace,
+            workspace_module_root(workspace, i),
+            name
+        );
         defer path.free();
         if ambiguous return -2;
         if path.count == 0 continue;
@@ -882,7 +933,9 @@ workspace_clear_aliases :: (file: *Source_File) {
 }
 
 #public workspace_completion_push :: (
-    result: *Workspace_Path_Completions, name: str, prefix: str,
+    result: *Workspace_Path_Completions,
+    name: str,
+    prefix: str,
 ) {
     if !workspace_prefix(name, prefix) return;
     for existing: result.paths.view() if existing == name return;
@@ -895,14 +948,21 @@ workspace_clear_aliases :: (file: *Source_File) {
 
 #public workspace_ignored_directory :: (name: str) -> bool {
     if name == {
-        case ".git", ".hg", ".svn", "build", "node_modules", ".cache"; return true;
-        else; return false;
+    case ".git", ".hg", ".svn", "build", "node_modules", ".cache";
+        return true;
+    else;
+        return false;
     }
 }
 
 #public workspace_completion_entry :: (
-    workspace: *const Workspace, result: *Workspace_Path_Completions,
-    prefix: str, parent: str, entry: str, directory: bool, load: bool,
+    workspace: *const Workspace,
+    result: *Workspace_Path_Completions,
+    prefix: str,
+    parent: str,
+    entry: str,
+    directory: bool,
+    load: bool,
 ) {
     if directory && workspace_ignored_directory(entry) return;
     if !directory && !workspace_suffix(entry, ".glo") return;
@@ -929,36 +989,54 @@ workspace_clear_aliases :: (file: *Source_File) {
 }
 
 #public workspace_completion_directory :: (
-    workspace: *const Workspace, result: *Workspace_Path_Completions,
-    directory_path: str, prefix: str, parent: str, load: bool,
+    workspace: *const Workspace,
+    result: *Workspace_Path_Completions,
+    directory_path: str,
+    prefix: str,
+    parent: str,
+    load: bool,
 ) -> Fs_Error!void {
     directory := Directory.open_directory(directory_path)?;
-    defer { _ := directory.close(); }
+    defer {
+        _ := directory.close();
+    }
     visited: ssize = 0;
     while !result.incomplete {
         next := directory.next()?;
         if next == {
-            case null; break;
-            case ?entry;
-                if visited >= workspace.file_limit {
-                    result.incomplete = true;
-                    break;
-                }
-                visited += 1;
-                path := path_join(directory_path, entry.name);
-                defer path.free();
-                entry_is_directory := is_directory(path).unwrap_or(false);
-                if entry_is_directory || is_regular_file(path).unwrap_or(false)
-                    workspace_completion_entry(workspace, result, prefix, parent,
-                        entry.name, entry_is_directory, load);
+        case null;
+            break;
+        case ?entry;
+            if visited >= workspace.file_limit {
+                result.incomplete = true;
+                break;
+            }
+            visited += 1;
+            path := path_join(directory_path, entry.name);
+            defer path.free();
+            entry_is_directory := is_directory(path).unwrap_or(false);
+            if entry_is_directory || is_regular_file(path).unwrap_or(false)
+                workspace_completion_entry(
+                    workspace,
+                    result,
+                    prefix,
+                    parent,
+                    entry.name,
+                    entry_is_directory,
+                    load
+                );
         }
     }
     return .Ok;
 }
 
 #public workspace_completion_root :: (
-    workspace: *const Workspace, result: *Workspace_Path_Completions,
-    root: str, prefix: str, parent: str, load: bool,
+    workspace: *const Workspace,
+    result: *Workspace_Path_Completions,
+    root: str,
+    prefix: str,
+    parent: str,
+    load: bool,
 ) {
     if root.count == 0 || result.incomplete return;
     joined := path_join(root, parent);
@@ -977,15 +1055,25 @@ workspace_clear_aliases :: (file: *Source_File) {
         relative := file.path.substring_view(base.to_string().count, file.path.count);
         end: ssize = 0;
         while end < relative.count && relative[end] != #char "/" end += 1;
-        workspace_completion_entry(workspace, result, prefix, parent,
-            relative.substring_view(0, end), end < relative.count, load);
+        workspace_completion_entry(
+            workspace,
+            result,
+            prefix,
+            parent,
+            relative.substring_view(0, end),
+            end < relative.count,
+            load
+        );
     }
 }
 
 /// Lists the current path component without parsing candidates or scanning subtrees.
 /// The caller owns the returned strings.
 #public workspace_complete_import :: (
-    workspace: *const Workspace, file: ssize, raw_prefix: str, load: bool,
+    workspace: *const Workspace,
+    file: ssize,
+    raw_prefix: str,
+    load: bool,
 ) -> Workspace_Path_Completions {
     result: Workspace_Path_Completions;
     prefix := workspace_import_path(raw_prefix);
@@ -997,8 +1085,14 @@ workspace_clear_aliases :: (file: *Source_File) {
     if load || workspace_source_import(prefix) {
         if file < 0 return result;
         source_path := workspace.files[file].path;
-        if source_path.count > 0 workspace_completion_root(workspace, &result,
-            path_dirname(source_path), prefix, parent, true);
+        if source_path.count > 0 workspace_completion_root(
+            workspace,
+            &result,
+            path_dirname(source_path),
+            prefix,
+            parent,
+            true
+        );
     } else {
         if prefix.count > 0 {
             check := prefix;
@@ -1006,8 +1100,14 @@ workspace_clear_aliases :: (file: *Source_File) {
             if !workspace_valid_module(check) return result;
         }
         for i: 0..workspace_module_root_count(workspace)
-            workspace_completion_root(workspace, &result, workspace_module_root(workspace, i),
-                prefix, parent, false);
+            workspace_completion_root(
+                workspace,
+                &result,
+                workspace_module_root(workspace, i),
+                prefix,
+                parent,
+                false
+            );
     }
     return result;
 }
@@ -1024,9 +1124,13 @@ workspace_clear_aliases :: (file: *Source_File) {
         target := workspace_resolve_import(workspace, source_path, declaration);
         ambiguous := target == -2;
         if target < 0 target = -1;
-        workspace.files[index].imports.push(.{
-            .declaration = i, .target = target, .ambiguous = ambiguous,
-        });
+        workspace.files[index].imports.push(
+            .{
+                .declaration = i,
+                .target = target,
+                .ambiguous = ambiguous,
+            }
+        );
     }
     changed := previous.count != workspace.files[index].imports.count;
     if !changed {
@@ -1074,7 +1178,7 @@ workspace_clear_aliases :: (file: *Source_File) {
             }
             for edge: workspace.files[i].imports.view() {
                 if edge.target < 0 || !workspace.files[edge.target].active ||
-                   workspace.files[edge.target].relevant continue;
+                    workspace.files[edge.target].relevant continue;
                 workspace.files[edge.target].relevant = true;
                 changed = true;
             }
@@ -1108,7 +1212,7 @@ workspace_clear_aliases :: (file: *Source_File) {
 
 #public workspace_walk_visit :: (path: str, entry: Directory_Entry, depth: ssize) -> Walk_Control {
     if #pattern ?pointer = context.user_ptr {
-        workspace := cast(*Workspace)pointer;
+        workspace := cast(*Workspace) pointer;
         if workspace.counted_files >= workspace.file_limit {
             workspace.truncated = true;
             return .Stop;
@@ -1117,8 +1221,10 @@ workspace_clear_aliases :: (file: *Source_File) {
             if depth >= 64 || workspace_ignored_directory(entry.name) return .Skip_Directory;
             // The walk aborts on a directory it cannot open; skip it instead.
             if Directory.open_directory(path) == {
-                case .Ok(directory); _ := directory.close();
-                case .Err; return .Skip_Directory;
+            case .Ok(directory);
+                _ := directory.close();
+            case .Err;
+                return .Skip_Directory;
             }
         }
         if entry.kind == File_Kind.Regular && workspace_suffix(path, ".glo")
@@ -1169,7 +1275,7 @@ workspace_clear_aliases :: (file: *Source_File) {
     defer path.free();
     if path.count == 0 || !is_directory(path).unwrap_or(false) return;
     scoped := context;
-    scoped.user_ptr = ?(cast(*void)workspace);
+    scoped.user_ptr = ?(cast(*void) workspace);
     #push_context scoped {
         _ := walk(path, workspace_walk_visit);
     }

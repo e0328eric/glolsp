@@ -81,7 +81,7 @@
     out.write_string("{\"range\":");
     write_range(out, source, diagnostic.start, diagnostic.end);
     out.write_string(",\"severity\":");
-    write_json_integer(out, cast(ssize)diagnostic.severity);
+    write_json_integer(out, cast(ssize) diagnostic.severity);
     out.write_string(",\"source\":\"glolsp\",\"message\":");
     write_json_string(out, diagnostic.message);
     out.write_byte(#char "}");
@@ -94,7 +94,11 @@
 /// Publishes to `uri` when given; otherwise to every editor URI that has the
 /// file open, so each alias of a symlinked file shows its diagnostics.
 #public server_publish :: (
-    server: *Server, output: *File, index: ssize, clear: bool = false, uri: str = "",
+    server: *Server,
+    output: *File,
+    index: ssize,
+    clear: bool = false,
+    uri: str = "",
 ) {
     file := &server.workspace.files[index];
     if uri.count > 0 server_publish_uri(server, output, index, uri, clear);
@@ -122,7 +126,7 @@ server_publish_uri :: (server: *Server, output: *File, index: ssize, uri: str, c
         if !server.workspace.files[i].open continue;
         server.workspace.files[i].diagnostics_pending = true;
         if !server.workspace.files[i].generated &&
-           server.workspace.files[i].compiler_epoch != server.workspace.compiler_epoch
+            server.workspace.files[i].compiler_epoch != server.workspace.compiler_epoch
             server.workspace.files[i].compiler_requested = true;
     }
     server_publish_ready(server, output);
@@ -132,7 +136,7 @@ server_publish_ready :: (server: *Server, output: *File) {
     for i: 0..server.workspace.files.count {
         file := &server.workspace.files[i];
         if file.open && file.diagnostics_pending &&
-           (file.generated || file.compiler_epoch == server.workspace.compiler_epoch) {
+            (file.generated || file.compiler_epoch == server.workspace.compiler_epoch) {
             file.diagnostics_pending = false;
             server_publish(server, output, i);
         }
@@ -159,16 +163,17 @@ server_start_analysis :: (server: *Server, output: *File) {
     if server.compiler_busy || server.shutdown return;
     index := server.compiler_preferred;
     if index < 0 || index >= server.workspace.files.count ||
-       !server.workspace.files[index].compiler_requested || !server.workspace.files[index].active ||
-       server.workspace.files[index].generated ||
-       server.workspace.files[index].compiler_epoch == server.workspace.compiler_epoch
+        !server.workspace.files[index].compiler_requested || !server.workspace.files[index].active ||
+        server.workspace.files[index].generated ||
+        server.workspace.files[index].compiler_epoch == server.workspace.compiler_epoch
         index = -1;
     if index < 0 {
         for i: 0..server.workspace.files.count {
             if server.workspace.files[i].active && !server.workspace.files[i].generated &&
-               server.workspace.files[i].compiler_requested &&
-               server.workspace.files[i].compiler_epoch != server.workspace.compiler_epoch {
-                index = i; break;
+                server.workspace.files[i].compiler_requested &&
+                server.workspace.files[i].compiler_epoch != server.workspace.compiler_epoch {
+                index = i;
+                break;
             }
         }
     }
@@ -176,12 +181,17 @@ server_start_analysis :: (server: *Server, output: *File) {
     input := compiler_input(&server.workspace, index);
     epoch := input.epoch;
     version := input.version;
-    #pattern ?jobs := server.jobs else { input.free(); return; };
-    if #pattern.Ok = jobs.send(input) {
+    #pattern ?jobs := server.jobs else {
+        input.free();
+        return;
+    };
+    if #pattern .Ok = jobs.send(input) {
         server.compiler_busy = true;
     } else {
         failed: Compiler_Result = .{
-            .file = index, .epoch = epoch, .version = version,
+            .file = index,
+            .epoch = epoch,
+            .version = version,
             .error = "Compiler worker is unavailable".clone(),
         };
         defer failed.free();
@@ -235,12 +245,7 @@ server_start_analysis :: (server: *Server, output: *File) {
             staged.free();
             staged = next.into_string();
         }
-        if workspace_change(
-            &server.workspace,
-            index,
-            staged,
-            json_integer(version)
-        ) {
+        if workspace_change(&server.workspace, index, staged, json_integer(version)) {
             server.compiler_preferred = index;
             server_publish_open(server, output);
         }
@@ -250,7 +255,7 @@ server_start_analysis :: (server: *Server, output: *File) {
 #public server_initialize_workspace :: (server: *Server, params: ?*Json) {
     options := json_field(params, "initializationOptions");
     step_limit := json_integer(json_field(options, "comptimeStepLimit"), 16777216);
-    if step_limit >= 0 server.workspace.compiler_step_limit = cast(u64)step_limit;
+    if step_limit >= 0 server.workspace.compiler_step_limit = cast(u64) step_limit;
     if json_is_text(json_field(options, "stdPath"))
         workspace_set_std_path(&server.workspace, json_text(json_field(options, "stdPath")));
     // Index open files and imports immediately. Scanning an entire checkout is
@@ -260,8 +265,10 @@ server_start_analysis :: (server: *Server, output: *File) {
     if limit > 0 server.workspace.file_limit = limit;
     // `glosso compile` searches only the standard library and module paths
     // for module names. Projects relying on their roots can opt in.
-    workspace_set_roots_as_module_paths(&server.workspace,
-        json_boolean(json_field(options, "rootsAsModulePaths"), false));
+    workspace_set_roots_as_module_paths(
+        &server.workspace,
+        json_boolean(json_field(options, "rootsAsModulePaths"), false)
+    );
     if #pattern ?paths = json_array(json_field(options, "importPaths")) {
         for i: 0..paths.*.count {
             path: ?*Json = ?&paths.*[i];
@@ -289,7 +296,7 @@ server_start_analysis :: (server: *Server, output: *File) {
 
 #public server_notification :: (server: *Server, output: *File, method: str, params: ?*Json) {
     if #partial method == {
-        case "initialized";
+    case "initialized";
         server_scan_roots(server);
         if server.register_watchers {
             registration :: #string,oneline
@@ -300,11 +307,11 @@ server_start_analysis :: (server: *Server, output: *File) {
             ;
             _ := rpc_send(output, registration);
         }
-        case "textDocument/didOpen";
+    case "textDocument/didOpen";
         server_did_open(server, output, params);
-        case "textDocument/didChange";
+    case "textDocument/didChange";
         server_did_change(server, output, params);
-        case "textDocument/didClose";
+    case "textDocument/didClose";
         item := json_field(params, "textDocument");
         uri := json_text(json_field(item, "uri"));
         index := workspace_find(&server.workspace, uri);
@@ -319,9 +326,9 @@ server_start_analysis :: (server: *Server, output: *File) {
             }
             server_publish_open(server, output);
         }
-        case "textDocument/didSave";
+    case "textDocument/didSave";
         server_publish_open(server, output);
-        case "$/cancelRequest";
+    case "$/cancelRequest";
         encoded: String_Builder;
         defer encoded.free();
         write_json_value(&encoded, json_field(params, "id"));
@@ -329,7 +336,7 @@ server_start_analysis :: (server: *Server, output: *File) {
             if server.pending_requests[i].id == encoded.to_string()
                 server.pending_requests[i].cancelled = true;
         }
-        case "workspace/didChangeWatchedFiles";
+    case "workspace/didChangeWatchedFiles";
         if #pattern ?changes = json_array(json_field(params, "changes")) {
             // Watch notifications may also name data read by compile-time code.
             // Invalidate and resolve imports once for the whole batch.
@@ -341,7 +348,7 @@ server_start_analysis :: (server: *Server, output: *File) {
             if changes.*.count > 0 workspace_refresh_imports(&server.workspace);
             server_publish_open(server, output);
         }
-        case "workspace/didChangeWorkspaceFolders";
+    case "workspace/didChangeWorkspaceFolders";
         event := json_field(params, "event");
         if #pattern ?removed = json_array(json_field(event, "removed")) {
             for i: 0..removed.*.count {
@@ -397,27 +404,27 @@ server_start_analysis :: (server: *Server, output: *File) {
 /// Analysis of a large document can take longer than these requests.
 #public server_method_syntactic :: (method: str) -> bool {
     if method == {
-        case "textDocument/foldingRange", "textDocument/formatting",
-             "textDocument/documentLink", "textDocument/selectionRange",
-             "textDocument/diagnostic";
+    case "textDocument/foldingRange", "textDocument/formatting",
+    "textDocument/documentLink", "textDocument/selectionRange",
+    "textDocument/diagnostic";
         return true;
-        else;
+    else;
         return false;
     }
 }
 
 #public server_method_known :: (method: str) -> bool {
     if method == {
-        case "workspace/symbol", "textDocument/documentSymbol", "textDocument/completion",
-             "textDocument/hover", "textDocument/definition", "textDocument/declaration",
-            "textDocument/typeDefinition",
-            "textDocument/references", "textDocument/documentHighlight",
-            "textDocument/prepareRename", "textDocument/rename", "textDocument/foldingRange",
-            "textDocument/semanticTokens/full", "textDocument/signatureHelp",
-            "textDocument/inlayHint", "textDocument/selectionRange", "textDocument/documentLink",
-            "textDocument/formatting", "textDocument/codeAction", "textDocument/diagnostic";
+    case "workspace/symbol", "textDocument/documentSymbol", "textDocument/completion",
+    "textDocument/hover", "textDocument/definition", "textDocument/declaration",
+    "textDocument/typeDefinition",
+    "textDocument/references", "textDocument/documentHighlight",
+    "textDocument/prepareRename", "textDocument/rename", "textDocument/foldingRange",
+    "textDocument/semanticTokens/full", "textDocument/signatureHelp",
+    "textDocument/inlayHint", "textDocument/selectionRange", "textDocument/documentLink",
+    "textDocument/formatting", "textDocument/codeAction", "textDocument/diagnostic";
         return true;
-        else;
+    else;
         return false;
     }
 }
@@ -432,7 +439,7 @@ server_start_analysis :: (server: *Server, output: *File) {
     if !in_standard return true;
     for root: workspace.roots.view() {
         if path.starts_with(root) &&
-           (path.count == root.count || path[root.count] == #char "/") return true;
+            (path.count == root.count || path[root.count] == #char "/") return true;
     }
     return false;
 }
@@ -447,7 +454,7 @@ server_start_analysis :: (server: *Server, output: *File) {
 ) {
     workspace := &server.workspace;
     if !workspace.files[file].generated &&
-       workspace.files[file].compiler_epoch != workspace.compiler_epoch {
+        workspace.files[file].compiler_epoch != workspace.compiler_epoch {
         workspace.files[file].compiler_requested = true;
         server.compiler_preferred = file;
     }
@@ -458,22 +465,22 @@ server_start_analysis :: (server: *Server, output: *File) {
     defer out.free();
     source := workspace.files[file].source;
     if method == {
-        case "textDocument/documentSymbol";
+    case "textDocument/documentSymbol";
         out.write_byte(#char "[");
         count: ssize = 0;
         ide_write_symbols(&out, workspace, file, "", server.hierarchical_symbols, &count);
         out.write_byte(#char "]");
-        case "textDocument/foldingRange";
+    case "textDocument/foldingRange";
         server_write_folding(&out, &workspace.files[file], server.folding_line_only);
-        case "textDocument/semanticTokens/full";
+    case "textDocument/semanticTokens/full";
         write_resolved_semantic_tokens(&out, workspace, file);
-        case "textDocument/documentLink";
+    case "textDocument/documentLink";
         ide_write_links(&out, workspace, file);
-        case "textDocument/diagnostic";
+    case "textDocument/diagnostic";
         out.write_string("{\"kind\":\"full\",\"items\":");
         server_write_diagnostics(&out, workspace, file);
         out.write_byte(#char "}");
-        case "textDocument/formatting";
+    case "textDocument/formatting";
         options := json_field(params, "options");
         layout_write_edits(
             &out,
@@ -481,7 +488,7 @@ server_start_analysis :: (server: *Server, output: *File) {
             json_integer(json_field(options, "tabSize"), 4),
             json_boolean(json_field(options, "insertSpaces"), true)
         );
-        case "textDocument/inlayHint";
+    case "textDocument/inlayHint";
         range := json_field(params, "range");
         start := json_offset(source, json_field(range, "start"));
         end := json_offset(source, json_field(range, "end"));
@@ -490,7 +497,7 @@ server_start_analysis :: (server: *Server, output: *File) {
             return;
         }
         ide_write_inlay_hints(&out, workspace, file, start, end);
-        case "textDocument/selectionRange";
+    case "textDocument/selectionRange";
         if #pattern null = json_array(json_field(params, "positions")) {
             _ := rpc_error(output, id, -32602, "Selection positions must be an array.");
             return;
@@ -508,7 +515,7 @@ server_start_analysis :: (server: *Server, output: *File) {
             }
         }
         out.write_byte(#char "]");
-        case "textDocument/codeAction";
+    case "textDocument/codeAction";
         range := json_field(params, "range");
         start := json_offset(source, json_field(range, "start"));
         end := json_offset(source, json_field(range, "end"));
@@ -517,7 +524,7 @@ server_start_analysis :: (server: *Server, output: *File) {
             return;
         }
         ide_write_code_actions(&out, workspace, file, range);
-        else;
+    else;
         offset := json_offset(source, json_field(params, "position"));
         if offset < 0 {
             _ := rpc_error(output, id, -32602, "Invalid UTF-16 document position.");
@@ -525,36 +532,35 @@ server_start_analysis :: (server: *Server, output: *File) {
         }
         symbol := analysis_symbol_at(workspace, file, offset);
         if method == {
-            case "textDocument/completion";
+        case "textDocument/completion";
             // triggerKind 2: typing a trigger character, not an explicit request.
             request := json_field(params, "context");
             triggered := json_integer(json_field(request, "triggerKind"), 1) == 2;
             ide_write_completion(&out, workspace, file, offset, triggered);
-            case "textDocument/hover";
+        case "textDocument/hover";
             ide_write_hover(&out, workspace, file, offset);
-            case "textDocument/definition", "textDocument/declaration";
+        case "textDocument/definition", "textDocument/declaration";
             target := symbol;
             if #partial method == {
-                case "textDocument/declaration";
-                    fact := workspace_compiler_fact(workspace, file, offset, 3);
-                    if analysis_valid(workspace, fact.declaration) target = fact.declaration;
+            case "textDocument/declaration";
+                fact := workspace_compiler_fact(workspace, file, offset, 3);
+                if analysis_valid(workspace, fact.declaration) target = fact.declaration;
             }
             if target.file >= 0 && target.symbol >= 0 ide_write_location(&out, workspace, target);
             else out.write_string("null");
-            case "textDocument/typeDefinition";
+        case "textDocument/typeDefinition";
             fact := workspace_compiler_fact(workspace, file, offset);
             ty := analysis_type(workspace, symbol);
             while ty > 0 && ty < workspace.types.count &&
-                  (workspace.types[ty].kind == .Pointer ||
-                   workspace.types[ty].kind == .Array_Type)
+                (workspace.types[ty].kind == .Pointer || workspace.types[ty].kind == .Array_Type)
                 ty = workspace.types[ty].element;
             if analysis_valid(workspace, fact.type_definition)
                 ide_write_location(&out, workspace, fact.type_definition);
             else if ty > 0 && ty < workspace.types.count &&
-               workspace.types[ty].symbol.symbol >= 0
+                workspace.types[ty].symbol.symbol >= 0
                 ide_write_location(&out, workspace, workspace.types[ty].symbol);
             else out.write_string("null");
-            case "textDocument/references", "textDocument/documentHighlight";
+        case "textDocument/references", "textDocument/documentHighlight";
             local_file: ssize = -1;
             highlight := method == "textDocument/documentHighlight";
             if highlight local_file = file;
@@ -568,14 +574,14 @@ server_start_analysis :: (server: *Server, output: *File) {
                 local_file,
                 highlight
             );
-            case "textDocument/signatureHelp";
+        case "textDocument/signatureHelp";
             ide_write_signature_help(&out, workspace, file, offset);
-            case "textDocument/prepareRename";
+        case "textDocument/prepareRename";
             // Rejection depends on references in every analysed file.
             analyze_workspace(workspace);
             token := analysis_token_at(workspace, file, offset);
             if symbol.symbol < 0 || token < 0 || !ide_renamed_token(workspace, file, token, symbol) ||
-               ide_rename_rejection(workspace, symbol).count > 0
+                ide_rename_rejection(workspace, symbol).count > 0
                 out.write_string("null");
             else {
                 span := workspace.files[file].syntax.language.tokens[token];
@@ -588,7 +594,7 @@ server_start_analysis :: (server: *Server, output: *File) {
                 );
                 out.write_byte(#char "}");
             }
-            case "textDocument/rename";
+        case "textDocument/rename";
             {
                 name := json_text(json_field(params, "newName"));
                 if symbol.symbol < 0 || !language_identifier_valid(name) {
@@ -606,7 +612,7 @@ server_start_analysis :: (server: *Server, output: *File) {
                 }
                 ide_write_rename(&out, workspace, symbol, name);
             }
-            else;
+        else;
             _ := rpc_error(output, id, -32601, "Method not found.");
             return;
         }
@@ -630,7 +636,7 @@ server_flush_pending :: (server: *Server, output: *File) {
         }
         defer request.body.free();
         defer request.id.free();
-        if #pattern.Ok(document) = json_parse_document(request.body) {
+        if #pattern .Ok(document) = json_parse_document(request.body) {
             defer document.destroy();
             id := json_field(?&document.root, "id");
             if request.cancelled || server.shutdown
@@ -665,7 +671,7 @@ server_flush_pending :: (server: *Server, output: *File) {
         request = true;
         valid_id := json_is_text(id) || json_is_integer(id);
         if #partial pointer.* == {
-            case .unit;
+        case .unit;
             valid_id = true;
         }
         if !valid_id {
@@ -701,10 +707,12 @@ server_flush_pending :: (server: *Server, output: *File) {
         server.initialized = true;
         text := json_field(json_field(params, "capabilities"), "textDocument");
         workspace_capabilities := json_field(json_field(params, "capabilities"), "workspace");
-        server.refresh_semantic_tokens = json_boolean(json_field(
-            json_field(workspace_capabilities, "semanticTokens"), "refreshSupport"));
-        server.refresh_inlay_hints = json_boolean(json_field(
-            json_field(workspace_capabilities, "inlayHint"), "refreshSupport"));
+        server.refresh_semantic_tokens = json_boolean(
+            json_field(json_field(workspace_capabilities, "semanticTokens"), "refreshSupport")
+        );
+        server.refresh_inlay_hints = json_boolean(
+            json_field(json_field(workspace_capabilities, "inlayHint"), "refreshSupport")
+        );
         server.register_watchers =
             json_boolean(
                 json_field(
@@ -773,10 +781,11 @@ server_flush_pending :: (server: *Server, output: *File) {
     // Diagnostics and edits that rename symbols require a checked snapshot.
     // Read-only editor features can use the current error-tolerant index while
     // the compiler runs. Retain these requests without blocking other traffic.
-    if (method == "textDocument/diagnostic" || method == "textDocument/rename" ||
-        method == "textDocument/prepareRename") &&
-       !server.workspace.files[file].generated &&
-       server.workspace.files[file].compiler_epoch != server.workspace.compiler_epoch {
+    if (
+        method == "textDocument/diagnostic" || method == "textDocument/rename" || method == "textDocument/prepareRename"
+    ) &&
+        !server.workspace.files[file].generated &&
+        server.workspace.files[file].compiler_epoch != server.workspace.compiler_epoch {
         // Re-encoding can fail, for example on a non-finite number, and
         // would lose the id. Keep the original text when there is one.
         text: str;
@@ -788,10 +797,14 @@ server_flush_pending :: (server: *Server, output: *File) {
         }
         encoded_id: String_Builder;
         write_json_value(&encoded_id, id);
-        server.pending_requests.push(.{
-            .body = text, .id = encoded_id.into_string(),
-            .file = file, .epoch = server.workspace.compiler_epoch,
-        });
+        server.pending_requests.push(
+            .{
+                .body = text,
+                .id = encoded_id.into_string(),
+                .file = file,
+                .epoch = server.workspace.compiler_epoch,
+            }
+        );
         server.workspace.files[file].compiler_requested = true;
         server.compiler_preferred = file;
         return 0;
@@ -804,15 +817,15 @@ server_flush_pending :: (server: *Server, output: *File) {
     arguments := get_cmdline_args();
     for i: 1..arguments.count {
         if arguments[i] == {
-            case "--help", "-h";
+        case "--help", "-h";
             print("glolsp 0.4.0 - Glosso language server\nusage: glolsp [--stdio]\n");
             return 0;
-            case "--version";
+        case "--version";
             print("glolsp 0.4.0\n");
             return 0;
-            case "--stdio";
+        case "--stdio";
             continue;
-            else;
+        else;
             // Clients may add their own flags, such as --clientProcessId=N.
             if arguments[i].starts_with("--") {
                 rpc_report(tprint("ignoring unsupported argument {} (use --help)", arguments[i]));
@@ -825,8 +838,13 @@ server_flush_pending :: (server: *Server, output: *File) {
     stdio := worker_private_stdio();
     output := stdio.output;
     server: Server;
-    #pattern.Ok(events) := Channel(Server_Event).new() else { return 1; };
-    #pattern.Ok(jobs) := Channel(Compiler_Input).new() else { events.free(); return 1; };
+    #pattern .Ok(events) := Channel(Server_Event).new() else {
+        return 1;
+    };
+    #pattern .Ok(jobs) := Channel(Compiler_Input).new() else {
+        events.free();
+        return 1;
+    };
     server.events = ?events;
     server.jobs = ?jobs;
     // Detached workers own channel references and all their inputs. Closing
@@ -837,7 +855,8 @@ server_flush_pending :: (server: *Server, output: *File) {
         jobs.close();
         jobs.free();
         for request: server.pending_requests.view() {
-            request.body.free(); request.id.free();
+            request.body.free();
+            request.id.free();
         }
         server.pending_requests.free();
     }
@@ -851,57 +870,61 @@ server_flush_pending :: (server: *Server, output: *File) {
         reset_temporary_storage();
         // Each event may replace source buffers; see position_cache_reset.
         position_cache_reset();
-        #pattern.Ok(received) := events.recv() else { return 1; };
-        #pattern ?event := received else { return 1; };
+        #pattern .Ok(received) := events.recv() else {
+            return 1;
+        };
+        #pattern ?event := received else {
+            return 1;
+        };
         defer event.free();
         if event == {
-            case .input(frame);
-                if frame.status == 2 {
-                    // The stream is still aligned; the id is unknown.
-                    rpc_report(tprint("skipped a {}-byte message: {}", frame.length, frame.reason));
-                    if !rpc_error(&output, null, -32600, tprint("Message skipped: {}.", frame.reason))
-                        return 1;
-                    continue;
-                }
-                if frame.status <= 0 {
-                    if frame.status == 0 && server.shutdown return 0;
-                    if frame.status == 0 rpc_report("input ended before shutdown and exit");
-                    else rpc_report(tprint("invalid LSP frame: {}; exiting", frame.reason));
+        case .input(frame);
+            if frame.status == 2 {
+                // The stream is still aligned; the id is unknown.
+                rpc_report(tprint("skipped a {}-byte message: {}", frame.length, frame.reason));
+                if !rpc_error(&output, null, -32600, tprint("Message skipped: {}.", frame.reason))
                     return 1;
+                continue;
+            }
+            if frame.status <= 0 {
+                if frame.status == 0 && server.shutdown return 0;
+                if frame.status == 0 rpc_report("input ended before shutdown and exit");
+                else rpc_report(tprint("invalid LSP frame: {}; exiting", frame.reason));
+                return 1;
+            }
+            if !frame.body.bytes().utf8_is_valid() {
+                _ := rpc_error(&output, null, -32700, "Message is not valid UTF-8.");
+                continue;
+            }
+            repaired := rpc_repair_surrogates(frame.body);
+            defer repaired.free();
+            body := frame.body;
+            if repaired.count > 0 body = repaired;
+            if json_parse_document(body) == {
+            case .Err;
+                if !rpc_error(&output, null, -32700, "Invalid JSON.") return 1;
+            case .Ok(message);
+                defer message.destroy();
+                status := server_process(&server, &output, &message.root, body);
+                if status == 1 return 0;
+                if status == 2 return 1;
+            }
+        case .checked(completed);
+            server.compiler_busy = false;
+            accepted := !server.shutdown && compiler_accept(&server.workspace, &completed);
+            // Generated sources may have been replaced.
+            position_cache_reset();
+            if accepted {
+                server.workspace.files[completed.file].compiler_requested = false;
+                // Applying facts can discover source files. That updates the
+                // index revision, but does not change any editor input.
+                for i: 0..server.pending_requests.count {
+                    if server.pending_requests[i].epoch == completed.epoch
+                        server.pending_requests[i].epoch = server.workspace.compiler_epoch;
                 }
-                if !frame.body.bytes().utf8_is_valid() {
-                    _ := rpc_error(&output, null, -32700, "Message is not valid UTF-8.");
-                    continue;
-                }
-                repaired := rpc_repair_surrogates(frame.body);
-                defer repaired.free();
-                body := frame.body;
-                if repaired.count > 0 body = repaired;
-                if json_parse_document(body) == {
-                    case .Err;
-                        if !rpc_error(&output, null, -32700, "Invalid JSON.") return 1;
-                    case .Ok(message);
-                        defer message.destroy();
-                        status := server_process(&server, &output, &message.root, body);
-                        if status == 1 return 0;
-                        if status == 2 return 1;
-                }
-            case .checked(completed);
-                server.compiler_busy = false;
-                accepted := !server.shutdown && compiler_accept(&server.workspace, &completed);
-                // Generated sources may have been replaced.
-                position_cache_reset();
-                if accepted {
-                    server.workspace.files[completed.file].compiler_requested = false;
-                    // Applying facts can discover source files. That updates the
-                    // index revision, but does not change any editor input.
-                    for i: 0..server.pending_requests.count {
-                        if server.pending_requests[i].epoch == completed.epoch
-                            server.pending_requests[i].epoch = server.workspace.compiler_epoch;
-                    }
-                    server_publish_ready(&server, &output);
-                    server_refresh_analysis(&server, &output);
-                }
+                server_publish_ready(&server, &output);
+                server_refresh_analysis(&server, &output);
+            }
         }
         server_flush_pending(&server, &output);
         server_start_analysis(&server, &output);

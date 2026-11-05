@@ -29,11 +29,13 @@
     if at >= parser.file.language.tokens.count return parser.file.language.tokens.count;
     next := at + 1;
     while next < parser.file.language.tokens.count &&
-          parser.file.language.tokens[next].kind == 4 next += 1;
+        parser.file.language.tokens[next].kind == 4 next += 1;
     return next;
 }
 
-#public syntax_advance :: (parser: *Syntax_Parser) { parser.at = syntax_next(parser, parser.at); }
+#public syntax_advance :: (parser: *Syntax_Parser) {
+    parser.at = syntax_next(parser, parser.at);
+}
 
 #public syntax_take :: (parser: *Syntax_Parser, text: str) -> bool {
     if syntax_text(parser) != text return false;
@@ -51,9 +53,13 @@
     end := start;
     if parser.at < parser.file.language.tokens.count
         end = parser.file.language.tokens[parser.at].end;
-    parser.file.language.diagnostics.push(.{
-        .start = start, .end = end, .message = message,
-    });
+    parser.file.language.diagnostics.push(
+        .{
+            .start = start,
+            .end = end,
+            .message = message,
+        }
+    );
 }
 
 #public syntax_expect :: (parser: *Syntax_Parser, text: str, message: str) {
@@ -71,9 +77,15 @@
         start = current.start;
         end = current.end;
     }
-    parser.file.nodes.push(.{
-        .kind = kind, .start = start, .end = end, .token = at, .scope = parser.scope,
-    });
+    parser.file.nodes.push(
+        .{
+            .kind = kind,
+            .start = start,
+            .end = end,
+            .token = at,
+            .scope = parser.scope,
+        }
+    );
     return index;
 }
 
@@ -94,36 +106,58 @@
 }
 
 // Evaluate the child before indexing the arena: parsing may grow its storage.
-#public Syntax_Slot :: enum  { Left; Right; Annotation; Value; }
+#public Syntax_Slot :: enum {
+    Left;
+    Right;
+    Annotation;
+    Value;
+}
 
 #public syntax_store :: (parser: *Syntax_Parser, node: ssize, slot: Syntax_Slot, child: ssize) {
     if slot == {
-        case .Left; parser.file.nodes[node].left = child;
-        case .Right; parser.file.nodes[node].right = child;
-        case .Annotation; parser.file.nodes[node].type_node = child;
-        case .Value; parser.file.nodes[node].value_node = child;
+    case .Left;
+        parser.file.nodes[node].left = child;
+    case .Right;
+        parser.file.nodes[node].right = child;
+    case .Annotation;
+        parser.file.nodes[node].type_node = child;
+    case .Value;
+        parser.file.nodes[node].value_node = child;
     }
 }
 
 #public syntax_scope :: (parser: *Syntax_Parser, owner: ssize) -> ssize {
     index := parser.file.scopes.count;
-    parser.file.scopes.push(.{
-        .parent = parser.scope, .owner = owner,
-        .start = syntax_offset(parser), .end = parser.file.source.count,
-    });
+    parser.file.scopes.push(
+        .{
+            .parent = parser.scope,
+            .owner = owner,
+            .start = syntax_offset(parser),
+            .end = parser.file.source.count,
+        }
+    );
     return index;
 }
 
 #public syntax_bind :: (parser: *Syntax_Parser, node: ssize, token: ssize, kind: s32) -> ssize {
     index := parser.file.symbols.count;
     current := parser.file.language.tokens[token];
-    parser.file.symbols.push(.{
-        .name = syntax_text(parser, token), .node = node, .token = token,
-        .scope = parser.scope, .parent_symbol = parser.owner, .kind = kind,
-        .is_public = parser.is_public, .is_unit = parser.is_unit,
-        .start = current.start, .end = current.end,
-        .selection_start = current.start, .selection_end = current.end,
-    });
+    parser.file.symbols.push(
+        .{
+            .name = syntax_text(parser, token),
+            .node = node,
+            .token = token,
+            .scope = parser.scope,
+            .parent_symbol = parser.owner,
+            .kind = kind,
+            .is_public = parser.is_public,
+            .is_unit = parser.is_unit,
+            .start = current.start,
+            .end = current.end,
+            .selection_start = current.start,
+            .selection_end = current.end,
+        }
+    );
     parser.file.nodes[node].symbol = index;
     return index;
 }
@@ -153,27 +187,36 @@
 
 #public syntax_precedence :: (text: str) -> ssize {
     if text == {
-        case "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^="; return 1;
-        case "||"; return 2;
-        case "&&"; return 3;
-        case "==", "!=", "<", ">", "<=", ">="; return 4;
-        case "..", "..=", "@"; return 5;
-        case "|", "^", "&", "!"; return 6;
-        case "<<", ">>"; return 7;
-        case "+", "-", "+%", "-%", "+|", "-|"; return 8;
-        case "*", "/", "%", "*%", "*|"; return 9;
-        else;
-            if text.count > 0 {
-                first := text.bytes()[0];
-                if first == {
-                    case #char "+", #char "-", #char "*", #char "/", #char "<",
-                         #char ">", #char "!", #char "=", #char "&", #char "|",
-                         #char "%", #char "^", #char "~";
-                        return 8;
-                    else;
-                }
+    case "=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=";
+        return 1;
+    case "||";
+        return 2;
+    case "&&";
+        return 3;
+    case "==", "!=", "<", ">", "<=", ">=";
+        return 4;
+    case "..", "..=", "@";
+        return 5;
+    case "|", "^", "&", "!";
+        return 6;
+    case "<<", ">>";
+        return 7;
+    case "+", "-", "+%", "-%", "+|", "-|";
+        return 8;
+    case "*", "/", "%", "*%", "*|";
+        return 9;
+    else;
+        if text.count > 0 {
+            first := text.bytes()[0];
+            if first == {
+            case #char "+", #char "-", #char "*", #char "/", #char "<",
+            #char ">", #char "!", #char "=", #char "&", #char "|",
+            #char "%", #char "^", #char "~";
+                return 8;
+            else;
             }
-            return 0;
+        }
+        return 0;
     }
 }
 
@@ -187,7 +230,7 @@
     if parser.type_context return false;
     if text == "{" || text == "where" return true;
     if after < parser.file.language.tokens.count &&
-       parser.file.language.tokens[after].kind == 7 return true;
+        parser.file.language.tokens[after].kind == 7 return true;
     return false;
 }
 
@@ -227,21 +270,22 @@
         }
     }
     if syntax_text(parser) == "(" ||
-       (directive == "#memory" && syntax_text(parser) == "{") {
+        (directive == "#memory" && syntax_text(parser) == "{") {
         close := parser.file.language.tokens[parser.at].matching;
         if close >= 0 parser.at = syntax_next(parser, close);
     }
     if directive == "#magic" || directive == "#foreign" {
         while parser.at < parser.file.language.tokens.count &&
-              (parser.file.language.tokens[parser.at].kind == 3 ||
-               parser.file.language.tokens[parser.at].kind == 1) syntax_advance(parser);
+            (
+                parser.file.language.tokens[parser.at].kind == 3 || parser.file.language.tokens[parser.at].kind == 1
+            ) syntax_advance(parser);
     }
 }
 
 #public syntax_parameter :: (parser: *Syntax_Parser, parent: ssize, bind: bool) -> ssize {
     start := parser.at;
     while syntax_text(parser).starts_with("#") && syntax_text(parser) != "#self" &&
-          syntax_text(parser, syntax_next(parser, parser.at)) != ":"
+        syntax_text(parser, syntax_next(parser, parser.at)) != ":"
         syntax_advance(parser);
     // The compiler accepts `using` and `noalias` in either order.
     uses := false;
@@ -253,8 +297,11 @@
     token := parser.at;
     // Only an identifier can be bound; `$` may end an incomplete buffer.
     identifier := token < parser.file.language.tokens.count &&
-        (parser.file.language.tokens[token].kind == 1 ||
-         syntax_text(parser, token).starts_with("`"));
+        (
+            parser.file.language.tokens[token].kind == 1 || syntax_text(parser, token).starts_with(
+                "`"
+            )
+        );
     if generic && !identifier {
         syntax_error(parser, "Expected a parameter name after '$'.");
         generic = false;
@@ -263,14 +310,20 @@
     if syntax_text(parser, receiver) == "*" {
         receiver = syntax_next(parser, receiver);
         while syntax_text(parser, receiver) == "const" ||
-              syntax_text(parser, receiver) == "volatile"
+            syntax_text(parser, receiver) == "volatile"
             receiver = syntax_next(parser, receiver);
     }
     if syntax_text(parser, receiver) != "#self" receiver = -1;
     next := syntax_next(parser, token);
     named := syntax_text(parser, next) == ":" || syntax_text(parser, next) == ":=" ||
-        (parser.stop_pipe && (syntax_text(parser, next) == "|" ||
-         syntax_text(parser, next) == "|->" || syntax_text(parser, next) == ","));
+        (
+            parser.stop_pipe && (
+                syntax_text(parser, next) == "|" || syntax_text(parser, next) == "|->" || syntax_text(
+                    parser,
+                    next
+                ) == ","
+            )
+        );
     node := syntax_node(parser, .Parameter, token);
     if uses parser.file.usings.push(node);
     if start < parser.file.language.tokens.count
@@ -333,7 +386,7 @@
     previous_pipe := parser.stop_pipe;
     parser.stop_pipe = pipes;
     while !empty && syntax_text(parser) != "" && syntax_text(parser) != close &&
-          syntax_text(parser) != "|->" {
+        syntax_text(parser) != "|->" {
         _ := syntax_parameter(parser, node, true);
         if !syntax_take(parser, ",") break;
     }
@@ -371,12 +424,12 @@
         before := parser.at;
         argument: ssize = -1;
         if syntax_text(parser) == "#inline" &&
-           syntax_text(parser, syntax_next(parser, parser.at)) == "for" {
+            syntax_text(parser, syntax_next(parser, parser.at)) == "for" {
             syntax_advance(parser);
             argument = syntax_control(parser, .For);
         } else argument = syntax_expression(parser, 0);
         if argument >= 0 && parser.file.nodes[parent].kind == .Aggregate &&
-           parser.file.nodes[argument].kind == .Binary {
+            parser.file.nodes[argument].kind == .Binary {
             assignment := parser.file.nodes[argument];
             if syntax_text(parser, assignment.token) == "=" && assignment.left >= 0 {
                 label := parser.file.nodes[assignment.left];
@@ -409,7 +462,7 @@
     rows: ssize = 0;
     columns: ssize = 0;
     while syntax_text(parser) != "" && syntax_text(parser) != "]" &&
-          syntax_text(parser) != "}" {
+        syntax_text(parser) != "}" {
         width: ssize = 0;
         while true {
             element := syntax_expression(parser, 0);
@@ -420,7 +473,7 @@
             syntax_child(parser, node, element);
             width += 1;
             if !syntax_take(parser, ",") || syntax_text(parser) == ";" ||
-               syntax_text(parser) == "]" break;
+                syntax_text(parser) == "]" break;
         }
         if rows > 0 && columns != width
             syntax_error(parser, "Matrix rows must have the same number of columns.");
@@ -439,109 +492,110 @@
     token := parser.at;
     text := syntax_text(parser);
     if text == "" || text == ";" || text == "," || text == ")" || text == "]" ||
-       text == "}" || text == "{" || text == ":" return -1;
+        text == "}" || text == "{" || text == ":" return -1;
     kind := parser.file.language.tokens[token].kind;
     if text == {
-        case "#matrix"; return syntax_matrix(parser);
-        case "|", "||", "||->"; return syntax_procedure(parser, -1);
-        case "(";
-            if syntax_is_procedure(parser) return syntax_procedure(parser, -1);
-            node := syntax_node(parser, .Type);
-            syntax_advance(parser);
-            while syntax_text(parser) != "" && syntax_text(parser) != ")" {
-                before := parser.at;
-                if syntax_text(parser, syntax_next(parser, parser.at)) == ":"
-                    _ := syntax_parameter(parser, node, false);
-                else syntax_child(parser, node, syntax_expression(parser, 0));
-                if parser.at == before {
-                    if syntax_closer(syntax_text(parser)) break;
-                    syntax_advance(parser);
-                }
-                if !syntax_take(parser, ",") break;
-            }
-            syntax_expect(parser, ")", "Expected ')' after expression or tuple.");
-            syntax_finish(parser, node);
-            return node;
-        case "[";
-            node := syntax_node(parser, .Type);
-            syntax_advance(parser);
-            if syntax_text(parser) != "]"
-                syntax_store(parser, node, .Right, syntax_expression(parser, 0));
-            syntax_expect(parser, "]", "Expected ']' in array type.");
-            _ := syntax_take(parser, "const");
-            _ := syntax_take(parser, "volatile");
-            syntax_store(parser, node, .Left, syntax_expression(parser, 10));
-            syntax_finish(parser, node);
-            return node;
-        case "*", "**", "&", "!", "!!", "-", "+", "~", "?", "$", "..", "..=", "...",
-             "==", "!=", "<", ">", "<=", ">=";
-            node := syntax_node(parser, .Unary);
-            syntax_advance(parser);
-            _ := syntax_take(parser, "const");
-            _ := syntax_take(parser, "volatile");
-            syntax_store(parser, node, .Left, syntax_expression(parser, 10));
-            syntax_finish(parser, node);
-            return node;
-        case ".";
-            dot := parser.at;
-            node := syntax_node(parser, .Member);
-            syntax_advance(parser);
-            if !syntax_member_follows(parser, dot) {
-                // An incomplete `.` must not swallow the next token.
-            } else if syntax_take(parser, "(") {
-                parser.file.nodes[node].kind = .Aggregate;
-                syntax_arguments(parser, node, ")");
-            } else if syntax_text(parser) == "{" || syntax_text(parser) == "[" {
-                parser.file.nodes[node].kind = .Aggregate;
-                close := "}";
-                if syntax_take(parser, "[") close = "]";
-                else syntax_advance(parser);
-                syntax_arguments(parser, node, close);
-            } else {
-                member := syntax_node(parser, .Identifier);
-                parser.file.nodes[node].right = member;
-                parser.file.nodes[node].token = parser.at;
+    case "#matrix";
+        return syntax_matrix(parser);
+    case "|", "||", "||->";
+        return syntax_procedure(parser, -1);
+    case "(";
+        if syntax_is_procedure(parser) return syntax_procedure(parser, -1);
+        node := syntax_node(parser, .Type);
+        syntax_advance(parser);
+        while syntax_text(parser) != "" && syntax_text(parser) != ")" {
+            before := parser.at;
+            if syntax_text(parser, syntax_next(parser, parser.at)) == ":"
+                _ := syntax_parameter(parser, node, false);
+            else syntax_child(parser, node, syntax_expression(parser, 0));
+            if parser.at == before {
+                if syntax_closer(syntax_text(parser)) break;
                 syntax_advance(parser);
             }
-            syntax_finish(parser, node);
-            return node;
-        case "cast", "acast";
-            node := syntax_node(parser, .Unary);
+            if !syntax_take(parser, ",") break;
+        }
+        syntax_expect(parser, ")", "Expected ')' after expression or tuple.");
+        syntax_finish(parser, node);
+        return node;
+    case "[";
+        node := syntax_node(parser, .Type);
+        syntax_advance(parser);
+        if syntax_text(parser) != "]"
+            syntax_store(parser, node, .Right, syntax_expression(parser, 0));
+        syntax_expect(parser, "]", "Expected ']' in array type.");
+        _ := syntax_take(parser, "const");
+        _ := syntax_take(parser, "volatile");
+        syntax_store(parser, node, .Left, syntax_expression(parser, 10));
+        syntax_finish(parser, node);
+        return node;
+    case "*", "**", "&", "!", "!!", "-", "+", "~", "?", "$", "..", "..=", "...",
+    "==", "!=", "<", ">", "<=", ">=";
+        node := syntax_node(parser, .Unary);
+        syntax_advance(parser);
+        _ := syntax_take(parser, "const");
+        _ := syntax_take(parser, "volatile");
+        syntax_store(parser, node, .Left, syntax_expression(parser, 10));
+        syntax_finish(parser, node);
+        return node;
+    case ".";
+        dot := parser.at;
+        node := syntax_node(parser, .Member);
+        syntax_advance(parser);
+        if !syntax_member_follows(parser, dot) {
+            // An incomplete `.` must not swallow the next token.
+        } else if syntax_take(parser, "(") {
+            parser.file.nodes[node].kind = .Aggregate;
+            syntax_arguments(parser, node, ")");
+        } else if syntax_text(parser) == "{" || syntax_text(parser) == "[" {
+            parser.file.nodes[node].kind = .Aggregate;
+            close := "}";
+            if syntax_take(parser, "[") close = "]";
+            else syntax_advance(parser);
+            syntax_arguments(parser, node, close);
+        } else {
+            member := syntax_node(parser, .Identifier);
+            parser.file.nodes[node].right = member;
+            parser.file.nodes[node].token = parser.at;
             syntax_advance(parser);
-            if syntax_take(parser, "(") {
-                syntax_store(parser, node, .Annotation, syntax_expression(parser, 0));
-                syntax_expect(parser, ")", "Expected ')' after cast type.");
-            }
-            syntax_store(parser, node, .Left, syntax_expression(parser, 10));
-            syntax_finish(parser, node);
-            return node;
-        case "ifx";
-            node := syntax_node(parser, .If);
-            outer := parser.scope;
-            parser.scope = syntax_scope(parser, node);
-            inner := parser.scope;
-            parser.file.nodes[node].scope = inner;
-            syntax_advance(parser);
-            condition := syntax_expression(parser, 0);
-            syntax_child(parser, node, condition);
-            syntax_pattern_condition(parser, condition);
-            _ := syntax_take(parser, "then");
-            if syntax_text(parser) == "{" {
-                subject := syntax_switch_subject(parser, condition);
-                syntax_child(parser, node, syntax_block(parser, true, subject));
-            }
-            else syntax_child(parser, node, syntax_expression(parser, 0));
-            if syntax_take(parser, "else") {
-                parser.scope = outer;
-                syntax_child(parser, node, syntax_expression(parser, 0));
-            }
-            syntax_finish(parser, node);
-            parser.file.scopes[inner].end = parser.file.nodes[node].end;
+        }
+        syntax_finish(parser, node);
+        return node;
+    case "cast", "acast";
+        node := syntax_node(parser, .Unary);
+        syntax_advance(parser);
+        if syntax_take(parser, "(") {
+            syntax_store(parser, node, .Annotation, syntax_expression(parser, 0));
+            syntax_expect(parser, ")", "Expected ')' after cast type.");
+        }
+        syntax_store(parser, node, .Left, syntax_expression(parser, 10));
+        syntax_finish(parser, node);
+        return node;
+    case "ifx";
+        node := syntax_node(parser, .If);
+        outer := parser.scope;
+        parser.scope = syntax_scope(parser, node);
+        inner := parser.scope;
+        parser.file.nodes[node].scope = inner;
+        syntax_advance(parser);
+        condition := syntax_expression(parser, 0);
+        syntax_child(parser, node, condition);
+        syntax_pattern_condition(parser, condition);
+        _ := syntax_take(parser, "then");
+        if syntax_text(parser) == "{" {
+            subject := syntax_switch_subject(parser, condition);
+            syntax_child(parser, node, syntax_block(parser, true, subject));
+        } else syntax_child(parser, node, syntax_expression(parser, 0));
+        if syntax_take(parser, "else") {
             parser.scope = outer;
-            return node;
-        case "#import", "#load", "#export", "#embed";
-            return syntax_import(parser, -1);
-        else;
+            syntax_child(parser, node, syntax_expression(parser, 0));
+        }
+        syntax_finish(parser, node);
+        parser.file.scopes[inner].end = parser.file.nodes[node].end;
+        parser.scope = outer;
+        return node;
+    case "#import", "#load", "#export", "#embed";
+        return syntax_import(parser, -1);
+    else;
     }
     if kind == 7 && text != "#self" && text != "#Self_Type" {
         node := syntax_node(parser, .Unary);
@@ -574,7 +628,7 @@
                 syntax_advance(parser);
             }
             while parser.at < parser.file.language.tokens.count &&
-                  parser.file.language.tokens[parser.at].kind == 3 {
+                parser.file.language.tokens[parser.at].kind == 3 {
                 syntax_child(parser, node, syntax_node(parser, .Literal));
                 syntax_advance(parser);
             }
@@ -627,9 +681,9 @@
             question := parser.file.language.tokens[parser.at];
             after := syntax_next(parser, parser.at);
             if parser.file.nodes[left].end < question.start &&
-               after < parser.file.language.tokens.count &&
-               parser.file.language.tokens[after].start == question.end &&
-               syntax_starts_operand(parser, after) break;
+                after < parser.file.language.tokens.count &&
+                parser.file.language.tokens[after].start == question.end &&
+                syntax_starts_operand(parser, after) break;
             node := syntax_node(parser, .Unary);
             parser.file.nodes[node].left = left;
             parser.file.nodes[node].start = parser.file.nodes[left].start;
@@ -668,7 +722,10 @@
         if text == "(" || text == "[" {
             node_kind := Syntax_Kind.Call;
             close := ")";
-            if text == "[" { node_kind = .Index; close = "]"; }
+            if text == "[" {
+                node_kind = .Index;
+                close = "]";
+            }
             node := syntax_node(parser, node_kind);
             parser.file.nodes[node].start = parser.file.nodes[left].start;
             parser.file.nodes[node].left = left;
@@ -682,7 +739,7 @@
         if precedence == 0 || precedence < minimum break;
         following := syntax_text(parser, syntax_next(parser, parser.at));
         if text != "=" && text != ".." && text != "..=" &&
-           (following == ")" || following == "," || following == ";" || following == "}") {
+            (following == ")" || following == "," || following == ";" || following == "}") {
             node := syntax_node(parser, .Unary);
             parser.file.nodes[node].left = left;
             parser.file.nodes[node].start = parser.file.nodes[left].start;
@@ -725,7 +782,7 @@
     path := "";
     path_token: ssize = -1;
     if parser.at < parser.file.language.tokens.count &&
-       parser.file.language.tokens[parser.at].kind == 3 {
+        parser.file.language.tokens[parser.at].kind == 3 {
         path_token = parser.at;
         literal := syntax_text(parser);
         if literal.count >= 2 path = literal.substring(1, literal.count - 1);
@@ -751,7 +808,7 @@
             before := parser.at;
             // Selected names belong to the imported module, not local scope.
             while parser.at < parser.file.language.tokens.count &&
-                  (parser.file.language.tokens[parser.at].kind == 1 || syntax_text(parser) == ".")
+                (parser.file.language.tokens[parser.at].kind == 1 || syntax_text(parser) == ".")
                 syntax_advance(parser);
             if parser.at == before || !syntax_take(parser, ",") break;
         }
@@ -759,11 +816,19 @@
     }
     _ := syntax_take(parser, ";");
     syntax_finish(parser, node);
-    parser.file.imports.push(.{
-        .path = path, .path_token = path_token, .node = node, .symbol = symbol, .start = start,
-        .end = parser.file.nodes[node].end, .load = directive == "#load",
-        .exported = directive == "#export", .embedded = embedded,
-    });
+    parser.file.imports.push(
+        .{
+            .path = path,
+            .path_token = path_token,
+            .node = node,
+            .symbol = symbol,
+            .start = start,
+            .end = parser.file.nodes[node].end,
+            .load = directive == "#load",
+            .exported = directive == "#export",
+            .embedded = embedded,
+        }
+    );
     return node;
 }
 
@@ -801,9 +866,14 @@
     kind := Syntax_Kind.Struct_Type;
     lsp_kind: s32 = 23;
     if #partial text == {
-        case "union"; kind = .Union_Type;
-        case "enum", "enum_flags"; kind = .Enum; lsp_kind = 10;
-        case "typeclass"; kind = .Typeclass; lsp_kind = 11;
+    case "union";
+        kind = .Union_Type;
+    case "enum", "enum_flags";
+        kind = .Enum;
+        lsp_kind = 10;
+    case "typeclass";
+        kind = .Typeclass;
+        lsp_kind = 11;
     }
     node := syntax_node(parser, kind);
     if owner >= 0 parser.file.symbols[owner].kind = lsp_kind;
@@ -892,7 +962,7 @@
         type_node := syntax_type_expression(parser, 2);
         parser.file.nodes[node].type_node = type_node;
         if syntax_text(parser) == ":" || syntax_text(parser) == "::" ||
-           syntax_text(parser) == "=" || syntax_text(parser) == ":=" {
+            syntax_text(parser) == "=" || syntax_text(parser) == ":=" {
             separator = syntax_text(parser);
             syntax_advance(parser);
         } else separator = "";
@@ -900,7 +970,7 @@
     value: ssize = -1;
     text := syntax_text(parser);
     if text == "struct" || text == "union" || text == "enum" || text == "enum_flags" ||
-       text == "typeclass" {
+        text == "typeclass" {
         value = syntax_aggregate(parser, symbol);
     } else if syntax_is_procedure(parser) {
         value = syntax_procedure(parser, symbol);
@@ -920,7 +990,7 @@
     if value >= 0 {
         value_kind := parser.file.nodes[value].kind;
         if value_kind == .Procedure || value_kind == .Struct_Type || value_kind == .Union_Type ||
-           value_kind == .Enum || value_kind == .Typeclass {
+            value_kind == .Enum || value_kind == .Typeclass {
             cursor := token;
             while cursor < parser.at {
                 if syntax_text(parser, cursor) == "{" {
@@ -969,7 +1039,7 @@
     owner: ssize = -1;
     target := owner_node;
     while parser.file.nodes[target].kind == .Call ||
-          parser.file.nodes[target].kind == .Unary {
+        parser.file.nodes[target].kind == .Unary {
         next := parser.file.nodes[target].left;
         if next < 0 break;
         target = next;
@@ -995,8 +1065,11 @@
 }
 
 #public syntax_capture :: (
-    parser: *Syntax_Parser, pattern: ssize, subject: ssize,
-    constructor: ssize = -1, argument: ssize = -1,
+    parser: *Syntax_Parser,
+    pattern: ssize,
+    subject: ssize,
+    constructor: ssize = -1,
+    argument: ssize = -1,
 ) {
     // Prefix and `@` chains can be arbitrarily long, so walk them in a loop
     // instead of recursing along them.
@@ -1022,7 +1095,7 @@
             defer operands.free();
             left := current;
             while left >= 0 && parser.file.nodes[left].kind == .Binary &&
-                  syntax_text(parser, parser.file.nodes[left].token) == "@" {
+                syntax_text(parser, parser.file.nodes[left].token) == "@" {
                 operands.push(parser.file.nodes[left].right);
                 left = parser.file.nodes[left].left;
             }
@@ -1075,11 +1148,11 @@
     token := parser.file.language.tokens[at];
     if token.kind == 1 || token.kind == 2 || token.kind == 3 || token.kind == 7 return true;
     if syntax_text(parser, at) == {
-        case "(", "[", ".", ".{", ".[", "?", "*", "&", "!", "-", "~", "$", "cast", "acast", "ifx",
-             "struct", "union", "enum", "null", "true", "false";
-            return true;
-        else;
-            return false;
+    case "(", "[", ".", ".{", ".[", "?", "*", "&", "!", "-", "~", "$", "cast", "acast", "ifx",
+    "struct", "union", "enum", "null", "true", "false";
+        return true;
+    else;
+        return false;
     }
 }
 
@@ -1087,7 +1160,7 @@
     if condition < 0 return;
     expression := parser.file.nodes[condition];
     if expression.kind != .Binary || syntax_text(parser, expression.token) != "=" ||
-       expression.left < 0 return;
+        expression.left < 0 return;
     pattern := parser.file.nodes[expression.left];
     if pattern.kind == .Unary && syntax_text(parser, pattern.token) == "#pattern"
         syntax_capture(parser, pattern.left, expression.right);
@@ -1099,7 +1172,7 @@
         text := syntax_text(parser, cursor);
         if text == ":=" return true;
         if text == "=" || text == ";" || text == "," || text == "{" ||
-           text == "}" || text == ")" || text == "]" return false;
+            text == "}" || text == ")" || text == "]" return false;
         // A bare '{' ends the pattern; '.{' and '.[' are aggregate patterns.
         if text == "." {
             next := syntax_next(parser, cursor);
@@ -1155,7 +1228,9 @@
 }
 
 #public syntax_block :: (
-    parser: *Syntax_Parser, nested: bool = true, subject: ssize = -1,
+    parser: *Syntax_Parser,
+    nested: bool = true,
+    subject: ssize = -1,
 ) -> ssize {
     node := syntax_node(parser, .Block);
     outer := parser.scope;
@@ -1194,7 +1269,9 @@
 }
 
 #public syntax_control :: (
-    parser: *Syntax_Parser, kind: Syntax_Kind, transparent: bool = false,
+    parser: *Syntax_Parser,
+    kind: Syntax_Kind,
+    transparent: bool = false,
 ) -> ssize {
     node := syntax_node(parser, kind);
     outer := parser.scope;
@@ -1293,8 +1370,9 @@
         parser.file.symbols[symbol].type_node = declaration.type_node;
         parser.file.symbols[symbol].value_node = declaration.value_node;
         parser.file.symbols[symbol].end = declaration.end;
-        parser.file.symbols[symbol].detail = parser.file.source.substring(
-            parser.file.symbols[symbol].start, declaration.end).trim();
+        parser.file.symbols[symbol].detail = parser.file.source
+            .substring(parser.file.symbols[symbol].start, declaration.end)
+            .trim();
         syntax_child(parser, group, node);
     }
     syntax_child(parser, group, last);
@@ -1314,116 +1392,123 @@
     text := syntax_text(parser);
     if text == "" || text == "}" return -1;
     if text == {
-        case "#public", "#private"; return syntax_visibility(parser);
-        case "#thread_local", "#noalias", "#as", "#from";
-            syntax_advance(parser);
-            return syntax_statement(parser);
-        case "#memory";
-            node := syntax_node(parser, .Statement);
-            syntax_advance(parser);
-            trusted := syntax_take(parser, ",");
-            legacy := syntax_text(parser) == "trusted" &&
-                syntax_text(parser, syntax_next(parser, parser.at)) == "(";
-            if trusted || legacy {
-                if !trusted
-                    syntax_error(parser, "Use { ... } for a trusted block.");
-                if !syntax_take(parser, "trusted")
-                    syntax_error(parser, "Expected 'trusted' after '#memory,'.");
-                if syntax_text(parser) == "(" {
-                    syntax_error(parser, "Trusted blocks take no arguments; use a comment.");
-                    close := parser.file.language.tokens[parser.at].matching;
-                    if close >= 0 parser.at = syntax_next(parser, close);
-                }
-                if parser.scope == 0
-                    syntax_error(parser, "Trusted blocks require a statement scope.");
-                if syntax_text(parser) == "{" {
-                    // Analyze the block normally, including names and local declarations.
-                    parser.file.nodes[node].kind = .Block;
-                    syntax_child(parser, node, syntax_block(parser));
-                } else syntax_error(parser, "#memory,trusted requires a statement block.");
-                _ := syntax_take(parser, ";");
-                syntax_finish(parser, node);
-                return node;
-            }
-            if syntax_text(parser) == "{" {
-                close := parser.file.language.tokens[parser.at].matching;
-                if close >= 0 {
-                    parser.at = syntax_next(parser, close);
-                    return syntax_statement(parser);
-                }
-            }
-            syntax_child(parser, node, syntax_expression(parser, 0));
-            if syntax_text(parser) == "{" {
+    case "#public", "#private";
+        return syntax_visibility(parser);
+    case "#thread_local", "#noalias", "#as", "#from";
+        syntax_advance(parser);
+        return syntax_statement(parser);
+    case "#memory";
+        node := syntax_node(parser, .Statement);
+        syntax_advance(parser);
+        trusted := syntax_take(parser, ",");
+        legacy := syntax_text(parser) == "trusted" &&
+            syntax_text(parser, syntax_next(parser, parser.at)) == "(";
+        if trusted || legacy {
+            if !trusted
+                syntax_error(parser, "Use { ... } for a trusted block.");
+            if !syntax_take(parser, "trusted")
+                syntax_error(parser, "Expected 'trusted' after '#memory,'.");
+            if syntax_text(parser) == "(" {
+                syntax_error(parser, "Trusted blocks take no arguments; use a comment.");
                 close := parser.file.language.tokens[parser.at].matching;
                 if close >= 0 parser.at = syntax_next(parser, close);
             }
+            if parser.scope == 0
+                syntax_error(parser, "Trusted blocks require a statement scope.");
+            if syntax_text(parser) == "{" {
+                // Analyze the block normally, including names and local declarations.
+                parser.file.nodes[node].kind = .Block;
+                syntax_child(parser, node, syntax_block(parser));
+            } else syntax_error(parser, "#memory,trusted requires a statement block.");
             _ := syntax_take(parser, ";");
             syntax_finish(parser, node);
             return node;
-        case "{"; return syntax_block(parser);
-        case "if"; return syntax_control(parser, .If);
-        case "#if"; return syntax_control(parser, .If, true);
-        case "while"; return syntax_control(parser, .While);
-        case "for"; return syntax_control(parser, .For);
-        case "#pattern";
-            if syntax_pattern_binding_ahead(parser) return syntax_pattern_binding(parser);
-        case "#module_params"; return syntax_module_parameters(parser);
-        case "#import", "#load", "#export", "#embed";
-            return syntax_import(parser, -1);
-        case "return";
-            node := syntax_node(parser, .Return);
-            syntax_advance(parser);
-            while syntax_text(parser) != "" && syntax_text(parser) != ";" &&
-                  syntax_text(parser) != "}" {
-                before := parser.at;
-                syntax_child(parser, node, syntax_expression(parser, 0));
-                if parser.at == before break;
-                if !syntax_take(parser, ",") break;
+        }
+        if syntax_text(parser) == "{" {
+            close := parser.file.language.tokens[parser.at].matching;
+            if close >= 0 {
+                parser.at = syntax_next(parser, close);
+                return syntax_statement(parser);
             }
-            _ := syntax_take(parser, ";");
-            syntax_finish(parser, node);
-            return node;
-        case "defer", "using", "context";
-            node := syntax_node(parser, .Statement);
-            if text == "using" parser.file.usings.push(node);
-            syntax_advance(parser);
-            syntax_child(parser, node, syntax_statement(parser));
-            syntax_finish(parser, node);
-            return node;
-        case "case";
-            node := syntax_node(parser, .Statement);
-            syntax_advance(parser);
-            while syntax_text(parser) != "" && syntax_text(parser) != ";" {
-                before := parser.at;
-                pattern := syntax_expression(parser, 0);
-                syntax_child(parser, node, pattern);
-                if parser.match_subject >= 0 && pattern >= 0 &&
-                   parser.file.nodes[pattern].kind != .Identifier
-                    syntax_capture(parser, pattern, parser.match_subject);
-                if parser.at == before break;
-                if !syntax_take(parser, ",") break;
-            }
-            _ := syntax_take(parser, ";");
-            syntax_finish(parser, node);
-            return node;
-        case "else", "break", "continue", ";";
-            node := syntax_node(parser, .Statement);
-            syntax_advance(parser);
-            _ := syntax_take(parser, ";");
-            syntax_finish(parser, node);
-            return node;
-        else;
+        }
+        syntax_child(parser, node, syntax_expression(parser, 0));
+        if syntax_text(parser) == "{" {
+            close := parser.file.language.tokens[parser.at].matching;
+            if close >= 0 parser.at = syntax_next(parser, close);
+        }
+        _ := syntax_take(parser, ";");
+        syntax_finish(parser, node);
+        return node;
+    case "{";
+        return syntax_block(parser);
+    case "if";
+        return syntax_control(parser, .If);
+    case "#if";
+        return syntax_control(parser, .If, true);
+    case "while";
+        return syntax_control(parser, .While);
+    case "for";
+        return syntax_control(parser, .For);
+    case "#pattern";
+        if syntax_pattern_binding_ahead(parser) return syntax_pattern_binding(parser);
+    case "#module_params";
+        return syntax_module_parameters(parser);
+    case "#import", "#load", "#export", "#embed";
+        return syntax_import(parser, -1);
+    case "return";
+        node := syntax_node(parser, .Return);
+        syntax_advance(parser);
+        while syntax_text(parser) != "" && syntax_text(parser) != ";" &&
+            syntax_text(parser) != "}" {
+            before := parser.at;
+            syntax_child(parser, node, syntax_expression(parser, 0));
+            if parser.at == before break;
+            if !syntax_take(parser, ",") break;
+        }
+        _ := syntax_take(parser, ";");
+        syntax_finish(parser, node);
+        return node;
+    case "defer", "using", "context";
+        node := syntax_node(parser, .Statement);
+        if text == "using" parser.file.usings.push(node);
+        syntax_advance(parser);
+        syntax_child(parser, node, syntax_statement(parser));
+        syntax_finish(parser, node);
+        return node;
+    case "case";
+        node := syntax_node(parser, .Statement);
+        syntax_advance(parser);
+        while syntax_text(parser) != "" && syntax_text(parser) != ";" {
+            before := parser.at;
+            pattern := syntax_expression(parser, 0);
+            syntax_child(parser, node, pattern);
+            if parser.match_subject >= 0 && pattern >= 0 &&
+                parser.file.nodes[pattern].kind != .Identifier
+                syntax_capture(parser, pattern, parser.match_subject);
+            if parser.at == before break;
+            if !syntax_take(parser, ",") break;
+        }
+        _ := syntax_take(parser, ";");
+        syntax_finish(parser, node);
+        return node;
+    case "else", "break", "continue", ";";
+        node := syntax_node(parser, .Statement);
+        syntax_advance(parser);
+        _ := syntax_take(parser, ";");
+        syntax_finish(parser, node);
+        return node;
+    else;
     }
     next := syntax_next(parser, token);
     separator := syntax_text(parser, next);
     if parser.file.language.tokens[token].kind == 1 || text == "#empty" ||
-       (text.starts_with("'") && text.ends_with("'")) {
+        (text.starts_with("'") && text.ends_with("'")) {
         if separator == "," {
             cursor := next;
             while syntax_text(parser, cursor) == "," {
                 name := syntax_next(parser, cursor);
                 if name >= parser.file.language.tokens.count ||
-                   parser.file.language.tokens[name].kind != 1 break;
+                    parser.file.language.tokens[name].kind != 1 break;
                 cursor = syntax_next(parser, name);
             }
             end := syntax_text(parser, cursor);
@@ -1457,7 +1542,8 @@
 #public parse_file :: (source: str) -> Parsed_File {
     parser: Syntax_Parser = .{
         .file = .{ .source = source, .language = tokenize_language(source) },
-        .scope = 0, .at = 0,
+        .scope = 0,
+        .at = 0,
     };
     parser.file.scopes.push(.{ .start = 0, .end = source.count });
     if parser.file.language.tokens.count > 0 && parser.file.language.tokens[0].kind == 4
@@ -1476,12 +1562,20 @@
     }
     for symbol: parser.file.symbols.view() {
         scope := parser.file.scopes[symbol.scope];
-        parser.file.language.symbols.push(.{
-            .name = symbol.name, .detail = symbol.detail, .documentation = symbol.documentation,
-            .start = symbol.start, .end = symbol.end, .selection_start = symbol.selection_start,
-            .selection_end = symbol.selection_end, .kind = symbol.kind,
-            .scope_start = scope.start, .scope_end = scope.end,
-        });
+        parser.file.language.symbols.push(
+            .{
+                .name = symbol.name,
+                .detail = symbol.detail,
+                .documentation = symbol.documentation,
+                .start = symbol.start,
+                .end = symbol.end,
+                .selection_start = symbol.selection_start,
+                .selection_end = symbol.selection_end,
+                .kind = symbol.kind,
+                .scope_start = scope.start,
+                .scope_end = scope.end,
+            }
+        );
     }
     return .{
         .source = source,
@@ -1490,8 +1584,10 @@
             .symbols = parser.file.language.symbols.take(),
             .diagnostics = parser.file.language.diagnostics.take(),
         },
-        .nodes = parser.file.nodes.take(), .symbols = parser.file.symbols.take(),
-        .scopes = parser.file.scopes.take(), .imports = parser.file.imports.take(),
+        .nodes = parser.file.nodes.take(),
+        .symbols = parser.file.symbols.take(),
+        .scopes = parser.file.scopes.take(),
+        .imports = parser.file.imports.take(),
         .usings = parser.file.usings.take(),
     };
 }

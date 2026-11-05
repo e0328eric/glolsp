@@ -35,8 +35,13 @@
     // editor-readable definition target. Never expose an unusable file URI.
     document := &workspace.files[file];
     if document.generated && document.path.starts_with("<") && document.generated_origin >= 0 {
-        ide_write_occurrence(out, workspace, document.generated_origin,
-            document.generated_start, document.generated_end);
+        ide_write_occurrence(
+            out,
+            workspace,
+            document.generated_origin,
+            document.generated_start,
+            document.generated_end
+        );
         return;
     }
     out.write_string("{\"uri\":");
@@ -139,7 +144,10 @@
 // A token that rename rewrites: bound to `id` and spelled as its name. Uses
 // of an alias stay bound to the alias, but never rewrite another spelling.
 #public ide_renamed_token :: (
-    workspace: *Workspace, file: ssize, token: ssize, id: Symbol_Id,
+    workspace: *Workspace,
+    file: ssize,
+    token: ssize,
+    id: Symbol_Id,
 ) -> bool {
     if !analysis_same_symbol(workspace.files[file].semantic.bindings[token], id) return false;
     span := workspace.files[file].syntax.language.tokens[token];
@@ -153,7 +161,7 @@
 #public ide_read_only_file :: (workspace: *Workspace, file: ssize) -> bool {
     path := workspace.files[file].path;
     if workspace.std_path.count == 0 || path.count == 0 ||
-       !path_lexically_contains(workspace.std_path, path) return false;
+        !path_lexically_contains(workspace.std_path, path) return false;
     for root: workspace.roots.view() {
         if path_lexically_contains(workspace.std_path, root) && path_lexically_contains(root, path)
             return false;
@@ -201,13 +209,20 @@
     if analysis_valid(workspace, analysis_lookup(workspace, file, scope, name, offset)) return true;
     if syntax.usings.count == 0 return false;
     owner: Type_Id = 0;
-    return analysis_valid(workspace, analysis_using_field(workspace, file, scope, name, offset, &owner));
+    return analysis_valid(
+        workspace,
+        analysis_using_field(workspace, file, scope, name, offset, &owner)
+    );
 }
 
 // Whether `id` would be visible by its new name at `offset`, ignoring
 // declarations that share its current name. `uses` marks files referring to it.
 #public ide_rename_reaches :: (
-    workspace: *Workspace, file: ssize, scope: ssize, offset: ssize, id: Symbol_Id,
+    workspace: *Workspace,
+    file: ssize,
+    scope: ssize,
+    offset: ssize,
+    id: Symbol_Id,
     uses: []const bool,
 ) -> bool {
     renamed := workspace.files[id.file].syntax.symbols[id.symbol];
@@ -215,8 +230,10 @@
         // A field is a bare name only where a `using` opens its structure.
         if workspace.files[file].syntax.usings.count == 0 return false;
         owner: Type_Id = 0;
-        return analysis_same_symbol(id, analysis_using_field(workspace, file, scope,
-            renamed.name, offset, &owner));
+        return analysis_same_symbol(
+            id,
+            analysis_using_field(workspace, file, scope, renamed.name, offset, &owner)
+        );
     }
     if renamed.scope > 0 {
         if id.file != file return false;
@@ -226,7 +243,7 @@
         while current >= 0 && current < syntax.scopes.count {
             if current == renamed.scope {
                 if crossed && analysis_in_procedure(syntax, current) &&
-                   !analysis_outer_visible(renamed.kind) return false;
+                    !analysis_outer_visible(renamed.kind) return false;
                 return renamed.kind != 13 || analysis_local_ready(syntax, id.symbol, offset);
             }
             if analysis_procedure_scope(syntax, current) crossed = true;
@@ -244,14 +261,18 @@
 // Whether renaming `id` would make the bare use `token`, now bound to
 // `bound`, resolve to `id` instead.
 #public ide_rename_captures :: (
-    workspace: *Workspace, file: ssize, token: ssize, id: Symbol_Id, bound: Symbol_Id,
+    workspace: *Workspace,
+    file: ssize,
+    token: ssize,
+    id: Symbol_Id,
+    bound: Symbol_Id,
     uses: []const bool,
 ) -> bool {
     if ide_member_token(workspace, file, token) return false;
     syntax := &workspace.files[file].syntax;
     span := syntax.language.tokens[token];
     if analysis_valid(workspace, bound) && bound.file == file &&
-       syntax.symbols[bound.symbol].token == token return false;
+        syntax.symbols[bound.symbol].token == token return false;
     scope := analysis_scope_at(syntax, span.start);
     if !ide_rename_reaches(workspace, file, scope, span.start, id, uses) return false;
     // A use the server cannot resolve would start naming the declaration.
@@ -261,7 +282,7 @@
         analysis_local_scope(syntax, scope, renamed.scope);
     existing := workspace.files[bound.file].syntax.symbols[bound.symbol];
     if bound.file == file && existing.kind != 8 &&
-       analysis_local_scope(syntax, scope, existing.scope) {
+        analysis_local_scope(syntax, scope, existing.scope) {
         // Locals win over fields and top-level names; an inner local over an outer one.
         return renamed_local && !ide_scope_inside(syntax, existing.scope, renamed.scope);
     }
@@ -302,7 +323,7 @@
         for token: 0..workspace.files[file].semantic.bindings.count {
             span := language.tokens[token];
             if span.kind != 1 || span.end - span.start != name.count ||
-               workspace.files[file].source.substring(span.start, span.end) != name continue;
+                workspace.files[file].source.substring(span.start, span.end) != name continue;
             bound := workspace.files[file].semantic.bindings[token];
             if analysis_same_symbol(bound, id) continue;
             if ide_rename_captures(workspace, file, token, id, bound, uses.view()) return true;
@@ -321,7 +342,7 @@
     documents: ssize = 0;
     for file: 0..workspace.files.count {
         if !workspace.files[file].relevant || workspace.files[file].generated ||
-           ide_read_only_file(workspace, file) continue;
+            ide_read_only_file(workspace, file) continue;
         count: ssize = 0;
         for token: 0..workspace.files[file].semantic.bindings.count {
             if !ide_renamed_token(workspace, file, token, id) continue;
@@ -360,15 +381,19 @@
 }
 
 ide_write_outline_symbol :: (
-    out: *String_Builder, workspace: *Workspace, file: ssize, symbol: ssize,
-    children: []const ssize, siblings: []const ssize,
+    out: *String_Builder,
+    workspace: *Workspace,
+    file: ssize,
+    symbol: ssize,
+    children: []const ssize,
+    siblings: []const ssize,
 ) {
     declaration := workspace.files[file].syntax.symbols[symbol];
     source := workspace.files[file].source;
     out.write_string("{\"name\":");
     write_json_string(out, declaration.name);
     out.write_string(",\"kind\":");
-    write_json_integer(out, cast(ssize)declaration.kind);
+    write_json_integer(out, cast(ssize) declaration.kind);
     out.write_string(",\"detail\":");
     write_json_string(out, declaration.detail);
     out.write_string(",\"range\":");
@@ -391,7 +416,10 @@ ide_write_outline_symbol :: (
 // Hierarchical document symbols: parameters, locals and nested declarations
 // are children of the declaration around them.
 #public ide_write_outline :: (
-    out: *String_Builder, workspace: *Workspace, file: ssize, count: *ssize,
+    out: *String_Builder,
+    workspace: *Workspace,
+    file: ssize,
+    count: *ssize,
 ) {
     syntax := &workspace.files[file].syntax;
     children: [..]ssize;
@@ -444,7 +472,7 @@ ide_write_outline_symbol :: (
         out.write_string("{\"name\":");
         write_json_string(out, symbol.name);
         out.write_string(",\"kind\":");
-        write_json_integer(out, cast(ssize)symbol.kind);
+        write_json_integer(out, cast(ssize) symbol.kind);
         if hierarchical {
             out.write_string(",\"detail\":");
             write_json_string(out, symbol.detail);
@@ -459,13 +487,7 @@ ide_write_outline_symbol :: (
             );
         } else {
             out.write_string(",\"location\":");
-            ide_write_occurrence(
-                out,
-                workspace,
-                file,
-                symbol.selection_start,
-                symbol.selection_end
-            );
+            ide_write_occurrence(out, workspace, file, symbol.selection_start, symbol.selection_end);
         }
         out.write_byte(#char "}");
     }
@@ -473,21 +495,21 @@ ide_write_outline_symbol :: (
 
 #public ide_completion_kind :: (kind: s32) -> ssize {
     if kind == {
-        case 2;
+    case 2;
         return 9;
-        case 12;
+    case 12;
         return 3;
-        case 23;
+    case 23;
         return 22;
-        case 10;
+    case 10;
         return 13;
-        case 14;
+    case 14;
         return 21;
-        case 8;
+    case 8;
         return 5;
-        case 22;
+    case 22;
         return 20;
-        else;
+    else;
         return 6;
     }
 }
@@ -520,7 +542,10 @@ ide_write_outline_symbol :: (
 }
 
 #public ide_write_import_completion :: (
-    out: *String_Builder, workspace: *Workspace, file: ssize, offset: ssize,
+    out: *String_Builder,
+    workspace: *Workspace,
+    file: ssize,
+    offset: ssize,
 ) -> bool {
     syntax := &workspace.files[file].syntax;
     source := workspace.files[file].source;
@@ -538,7 +563,7 @@ ide_write_outline_symbol :: (
             // Stop unfinished paths at the line boundary so an edit cannot swallow later code.
             while end < token.end {
                 if source[end] == #char "\"" || source[end] == #char "\n" ||
-                   source[end] == #char "\r" break;
+                    source[end] == #char "\r" break;
                 if source[end] == #char "\\" && end + 1 < token.end end += 1;
                 end += 1;
             }
@@ -554,8 +579,7 @@ ide_write_outline_symbol :: (
         }
         if offset < start || offset > end continue;
         // `#export "Module"` names a module like `#import`; only `#load` takes a file.
-        paths := workspace_complete_import(workspace, file, source[start..offset],
-            dependency.load);
+        paths := workspace_complete_import(workspace, file, source[start..offset], dependency.load);
         defer {
             for path: paths.paths.view() path.free();
             paths.paths.free();
@@ -580,17 +604,32 @@ ide_write_outline_symbol :: (
             if !quoted escaped.write_byte(#char "\"");
             for byte: path.bytes() {
                 if byte == {
-                    case #char "\\"; escaped.write_string("\\\\");
-                    case #char "\""; escaped.write_string("\\\"");
-                    case #char "\n"; escaped.write_string("\\n");
-                    case #char "\r"; escaped.write_string("\\r");
-                    case #char "\t"; escaped.write_string("\\t");
-                    else; escaped.write_byte(byte);
+                case #char "\\";
+                    escaped.write_string("\\\\");
+                case #char "\"";
+                    escaped.write_string("\\\"");
+                case #char "\n";
+                    escaped.write_string("\\n");
+                case #char "\r";
+                    escaped.write_string("\\r");
+                case #char "\t";
+                    escaped.write_string("\\t");
+                else;
+                    escaped.write_byte(byte);
                 }
             }
             if !quoted escaped.write_byte(#char "\"");
-            ide_completion_item(out, source, start, end, path, detail, kind, &count,
-                escaped.to_string());
+            ide_completion_item(
+                out,
+                source,
+                start,
+                end,
+                path,
+                detail,
+                kind,
+                &count,
+                escaped.to_string()
+            );
         }
         out.write_string("]}");
         return true;
@@ -624,14 +663,15 @@ ide_write_outline_symbol :: (
             token := syntax.language.tokens[previous];
             text := source[token.start..token.end];
             if token.kind == {
-                case 1, 5, 7;
+            case 1, 5, 7;
                 index = previous;
-                case 4;
+            case 4;
                 if text.starts_with("//") || !text.ends_with("*/") index = previous;
-                case 3;
+            case 3;
                 {
                     if text.starts_with("\\\\") index = previous;
-                } else;
+                }
+            else;
             }
             if token.kind == 3 || token.kind == 4 {
                 for diagnostic: syntax.language.diagnostics.view() {
@@ -862,7 +902,7 @@ ide_write_outline_symbol :: (
     while best >= 0 && depth < 64 {
         node := syntax.nodes[best];
         if (node.start != previous_start || node.end != previous_end) &&
-           (previous_start < 0 || (node.start <= previous_start && node.end >= previous_end)) {
+            (previous_start < 0 || (node.start <= previous_start && node.end >= previous_end)) {
             if depth > 0 out.write_string(",\"parent\":");
             out.write_string("{\"range\":");
             write_range(out, source, node.start, node.end);
@@ -902,7 +942,10 @@ ide_write_outline_symbol :: (
 // Whether `offset` is between a call's parentheses. An unclosed call extends
 // over the whitespace after it, such as at the end of the file while typing.
 #public ide_inside_arguments :: (
-    syntax: *const Parsed_File, source: str, call: ssize, offset: ssize,
+    syntax: *const Parsed_File,
+    source: str,
+    call: ssize,
+    offset: ssize,
 ) -> bool {
     open := ide_call_open(syntax, call);
     if open < 0 return false;
@@ -910,8 +953,9 @@ ide_write_outline_symbol :: (
     if offset < opening.end return false;
     if opening.matching > open return offset <= syntax.language.tokens[opening.matching].start;
     end := syntax.nodes[call].end;
-    while end < offset && end < source.count && (source[end] == #char " " ||
-          source[end] == #char "\t" || source[end] == #char "\n" || source[end] == #char "\r")
+    while end < offset && end < source.count && (
+        source[end] == #char " " || source[end] == #char "\t" || source[end] == #char "\n" || source[end] == #char "\r"
+    )
         end += 1;
     return offset <= end;
 }
@@ -1006,7 +1050,7 @@ ide_write_outline_symbol :: (
         current[0] = row;
         for column: 1..right.count + 1 {
             substitution := previous[column - 1];
-            if left[row - 1] != right[column - 1]substitution += 1;
+            if left[row - 1] != right[column - 1] substitution += 1;
             value := previous[column] + 1;
             if current[column - 1] + 1 < value value = current[column - 1] + 1;
             if substitution < value value = substitution;
@@ -1033,25 +1077,28 @@ ide_write_outline_symbol :: (
         if root.count == 0 || !path_lexically_contains(root, path) continue;
         // Only a module's entry file is importable by name; files it loads are not.
         if path_lexically_relative(path, root) == {
-            case .Err; return null;
-            case .Ok(relative);
-                defer relative.free();
-                name: str = relative;
-                if name.ends_with("/module.glo") name = name.substring(0, name.count - 11);
-                else if name.ends_with(".glo") name = name.substring(0, name.count - 4);
-                else return null;
-                found, conflict := workspace_find_module(workspace, name);
-                defer found.free();
-                if conflict || found != path return null;
-                return ?name.clone();
+        case .Err;
+            return null;
+        case .Ok(relative);
+            defer relative.free();
+            name: str = relative;
+            if name.ends_with("/module.glo") name = name.substring(0, name.count - 11);
+            else if name.ends_with(".glo") name = name.substring(0, name.count - 4);
+            else return null;
+            found, conflict := workspace_find_module(workspace, name);
+            defer found.free();
+            if conflict || found != path return null;
+            return ?name.clone();
         }
     }
     // A relative import from an untitled buffer would resolve in the temporary directory.
     if ide_path_less(workspace, file) return null;
     base := path_dirname(workspace.files[file].path);
     if path_lexically_relative(path, base) == {
-        case .Ok(relative); return ?relative;
-        case .Err; return null;
+    case .Ok(relative);
+        return ?relative;
+    case .Err;
+        return null;
     }
 }
 
@@ -1081,10 +1128,7 @@ ide_write_outline_symbol :: (
         else _ := visible.replace(analysis_visible_symbols(workspace, file, span.start));
         for candidate: visible.view() {
             symbol := workspace.files[candidate.file].syntax.symbols[candidate.symbol];
-            if symbol.name == misspelled || ide_spelling_distance(
-                misspelled,
-                symbol.name
-            ) > 2 continue;
+            if symbol.name == misspelled || ide_spelling_distance(misspelled, symbol.name) > 2 continue;
             if count > 0 out.write_byte(#char ",");
             count += 1;
             title := tprint("Change '{}' to '{}'", misspelled, symbol.name);

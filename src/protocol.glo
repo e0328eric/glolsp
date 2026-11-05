@@ -8,467 +8,475 @@
 #import "File_System/Types";
 
 #public {
-    Json :: Serialization_Value;
-    // JSON escaping can double a document, so stay well above the 16 MiB
-    // source limit. Larger declared bodies are skipped, not allocated.
-    MAX_MESSAGE_BYTES :: 64 * 1024 * 1024;
-    // A longer Content-Length cannot be a message; the header is malformed.
-    MAX_SKIPPED_BYTES :: 1024 * 1024 * 1024 * 1024;
 
-    Rpc_Frame :: struct {
-        body: str;
-        // 1: body read; 2: a complete message was skipped; 0: input ended
-        // between messages; -1: framing failed and the stream is unusable.
-        status: s32;
-        // Static text explaining statuses 2 and -1; never freed.
-        reason: str;
-        length: ssize;
+Json :: Serialization_Value;
+// JSON escaping can double a document, so stay well above the 16 MiB
+// source limit. Larger declared bodies are skipped, not allocated.
+MAX_MESSAGE_BYTES :: 64 * 1024 * 1024;
+// A longer Content-Length cannot be a message; the header is malformed.
+MAX_SKIPPED_BYTES :: 1024 * 1024 * 1024 * 1024;
+
+Rpc_Frame :: struct {
+    body: str;
+    // 1: body read; 2: a complete message was skipped; 0: input ended
+    // between messages; -1: framing failed and the stream is unusable.
+    status: s32;
+    // Static text explaining statuses 2 and -1; never freed.
+    reason: str;
+    length: ssize;
+}
+
+Rpc_Header :: struct {
+    length: ssize = -1;
+    // Empty when the body can be read. With a length, why the body is
+    // skipped; without one, why the header is malformed.
+    reason: str;
+}
+
+// A line on stderr; stdout carries only LSP frames.
+rpc_report :: (message: str) {
+    output := File.stderr();
+    _ = output.write(tprint("glolsp: {}\n", message));
+}
+
+json_parse_document :: (source: str) -> Serialization_Error!Serialization_Document {
+    // The parser reads source during this call and owns every decoded value.
+    // Its internal container operations require trust in the current standard library.
+    {
+        return Serialization_Document.json_document_from_string(source, .max_depth = 128);
     }
+}
 
-    Rpc_Header :: struct {
-        length: ssize = -1;
-        // Empty when the body can be read. With a length, why the body is
-        // skipped; without one, why the header is malformed.
-        reason: str;
-    }
+json_field :: (value: ?*Json, name: str) -> ?*Json {
+    if #pattern ?pointer = value return pointer.field_value(name);
+    return null;
+}
 
-    // A line on stderr; stdout carries only LSP frames.
-    rpc_report :: (message: str) {
-        output := File.stderr();
-        _ = output.write(tprint("glolsp: {}\n", message));
-    }
-
-    json_parse_document :: (source: str) -> Serialization_Error!Serialization_Document {
-        // The parser reads source during this call and owns every decoded value.
-        // Its internal container operations require trust in the current standard library.
-        {
-            return Serialization_Document.json_document_from_string(source, .max_depth = 128);
+json_text :: (value: ?*Json) -> str {
+    if #pattern ?pointer = value {
+        if #partial pointer.* == {
+        case .text(text);
+            return text;
         }
     }
+    return "";
+}
 
-    json_field :: (value: ?*Json, name: str) -> ?*Json {
-        if #pattern ?pointer = value return pointer.field_value(name);
-        return null;
-    }
-
-    json_text :: (value: ?*Json) -> str {
-        if #pattern ?pointer = value {
-            if #partial pointer.* == {
-                case .text(text);
-                return text;
-            }
-        }
-        return "";
-    }
-
-    json_is_text :: (value: ?*Json) -> bool {
-        if #pattern ?pointer = value {
-            if #partial pointer.* == {
-                case .text;
-                return true;
-            }
-        }
-        return false;
-    }
-
-    json_is_object :: (value: ?*Json) -> bool {
-        if #pattern ?pointer = value {
-            if #partial pointer.* == {
-                case .map;
-                return true;
-                case .structure;
-                return true;
-            }
-        }
-        return false;
-    }
-
-    json_is_integer :: (value: ?*Json) -> bool {
-        if #pattern ?pointer = value {
-            if #partial pointer.* == {
-                case .signed_integer(n);
-                return n >= -2147483648 && n <= 2147483647;
-                case .unsigned_integer(n);
-                return n <= 2147483647;
-            }
-        }
-        return false;
-    }
-
-    json_integer :: (value: ?*Json, fallback: ssize = -1) -> ssize {
-        if !json_is_integer(value) return fallback;
-        if #pattern ?pointer = value {
-            if #partial pointer.* == {
-                case .signed_integer(n);
-                return cast(ssize)n;
-                case .unsigned_integer(n);
-                return cast(ssize)n;
-            }
-        }
-        return fallback;
-    }
-
-    json_boolean :: (value: ?*Json, fallback: bool = false) -> bool {
-        if #pattern ?pointer = value {
-            if #partial pointer.* == {
-                case .boolean(flag);
-                return flag;
-            }
-        }
-        return fallback;
-    }
-
-    json_array :: (value: ?*Json) -> ?*[..]Json {
-        if #pattern ?pointer = value {
-            if #partial pointer.* == {
-                case .sequence(*items);
-                return ?items;
-            }
-        }
-        return null;
-    }
-
-    write_json_string :: (out: *String_Builder, text: str) {
-        hex :: "0123456789abcdef";
-        out.write_byte(#char "\"");
-        for byte: text.bytes() {
-            if byte == {
-                case #char "\"";
-                out.write_string("\\\"");
-                case #char "\\";
-                out.write_string("\\\\");
-                case ..(#char " ");
-                out.write_string("\\u00");
-                out.write_byte(hex[cast(ssize)(byte / 16)]);
-                out.write_byte(hex[cast(ssize)(byte % 16)]);
-                else;
-                out.write_byte(byte);
-            }
-        }
-        out.write_byte(#char "\"");
-    }
-
-    write_json_integer :: (out: *String_Builder, number: ssize) {
-        out.writef("{}", number);
-    }
-
-    write_json_value :: (out: *String_Builder, value: ?*Json) {
-        if #pattern ?pointer = value {
-            if pointer.to_json_string() == {
-                case .Ok(text);
-                defer text.free();
-                out.write_string(text);
-                return;
-                case .Err;
-            }
-        }
-        out.write_string("null");
-    }
-
-    rpc_send :: (output: *File, body: str) -> bool {
-        header := tprint("Content-Length: {}\r\n\r\n", body.count);
-        for text: .[header, body] {
-            offset: ssize = 0;
-            while offset < text.count {
-                if output.write(text[offset..]) == {
-                    case .Err;
-                    return false;
-                    case .Ok(count);
-                    if count <= 0 return false;
-                    offset += count;
-                }
-            }
-        }
-        return true;
-    }
-
-    rpc_response :: (output: *File, id: ?*Json, result: str) -> bool {
-        out: String_Builder;
-        defer out.free();
-        out.write_string("{\"jsonrpc\":\"2.0\",\"id\":");
-        write_json_value(&out, id);
-        out.write_string(",\"result\":");
-        out.write_string(result);
-        out.write_byte(#char "}");
-        return rpc_send(output, out.to_string());
-    }
-
-    rpc_error :: (output: *File, id: ?*Json, code: ssize, message: str) -> bool {
-        out: String_Builder;
-        defer out.free();
-        out.write_string("{\"jsonrpc\":\"2.0\",\"id\":");
-        write_json_value(&out, id);
-        out.write_string(",\"error\":{\"code\":");
-        write_json_integer(&out, code);
-        out.write_string(",\"message\":");
-        write_json_string(&out, message);
-        out.write_string("}}");
-        return rpc_send(output, out.to_string());
-    }
-
-    rpc_read_frame :: (input: *File) -> Rpc_Frame {
-        header: String_Builder;
-        defer header.free();
-        while header.buf.count < 16384 {
-            if input.read_byte() == {
-                case .Err(failure);
-                if header.buf.count == 0 && failure.kind == .End_Of_File return .{ .status = 0 };
-                if failure.kind == .End_Of_File
-                    return .{ .status = -1, .reason = "input ended inside a message header" };
-                return .{ .status = -1, .reason = "could not read standard input" };
-                case .Ok(byte);
-                header.write_byte(byte);
-            }
-            size := header.buf.count;
-            if size >= 4 && header.to_string()[size - 4..] == "\r\n\r\n" break;
-        }
-        text := header.to_string();
-        if text.count < 4 || text[text.count - 4..] != "\r\n\r\n"
-            return .{ .status = -1, .reason = "message header exceeds 16384 bytes" };
-        parsed := rpc_parse_header(text);
-        if parsed.length < 0 return .{ .status = -1, .reason = parsed.reason };
-        if parsed.reason.count > 0 {
-            if !rpc_skip_body(input, parsed.length)
-                return .{ .status = -1, .reason = "input ended inside a skipped message" };
-            return .{ .status = 2, .reason = parsed.reason, .length = parsed.length };
-        }
-        length := parsed.length;
-        body := String_Builder.make_len_cap(length, length);
-        offset: ssize = 0;
-        while offset < length {
-            failed := false;
-            if input.read_into(body.buf[offset..]) == {
-                case .Err;
-                failed = true;
-                case .Ok(count);
-                if count <= 0 failed = true;
-                else offset += count;
-            }
-            if failed {
-                body.free();
-                return .{ .status = -1, .reason = "input ended inside a message body", .length = length };
-            }
-        }
-        return .{ .body = body.into_string(), .status = 1, .length = length };
-    }
-
-    // Reads and drops a body, keeping the stream aligned on the next header.
-    rpc_skip_body :: (input: *File, length: ssize) -> bool {
-        buffer: [65536]u8;
-        remaining := length;
-        while remaining > 0 {
-            request := buffer.count;
-            if remaining < request request = remaining;
-            if input.read_into(buffer[..request]) == {
-                case .Err;
-                return false;
-                case .Ok(count);
-                if count <= 0 return false;
-                remaining -= count;
-            }
-        }
-        return true;
-    }
-
-    // The body length, or -1 when the header cannot frame a readable body.
-    rpc_content_length :: (text: str) -> ssize {
-        parsed := rpc_parse_header(text);
-        if parsed.reason.count > 0 return -1;
-        return parsed.length;
-    }
-
-    // Validate the complete ASCII header before allocating its body. A
-    // malformed delimiter cannot make us skip a byte of the next header.
-    rpc_parse_header :: (text: str) -> Rpc_Header {
-        malformed: Rpc_Header = .{ .reason = "malformed message header" };
-        if text.count < 4 || text.count > 16384 || text[text.count - 4..] != "\r\n\r\n"
-            return malformed;
-        length: ssize = -1;
-        charset_supported := true;
-        cursor: ssize = 0;
-        while cursor < text.count - 2 {
-            end := cursor;
-            while end < text.count && text[end] != #char "\r" && text[end] != #char "\n" end += 1;
-            if end == cursor || end + 1 >= text.count || text[end] != #char "\r" || text[end + 1] !=
-                #char "\n" return malformed;
-            line := text[cursor..end];
-            colon: ssize = 0;
-            while colon < line.count && line[colon] != #char ":" colon += 1;
-            if colon == 0 || colon == line.count return malformed;
-            name := line[..colon];
-            for byte: name.bytes() {
-                if !rpc_header_name_byte(byte) return malformed;
-            }
-            for index: colon + 1..line.count {
-                byte := line[index];
-                if (byte < #char " " && byte != #char "\t") || byte > #char "~" return malformed;
-            }
-            start := colon + 1;
-            while start < line.count && (line[start] == #char " " || line[start] == #char "\t")
-                start += 1;
-            finish := line.count;
-            while finish > start &&
-                (line[finish - 1] == #char " " || line[finish - 1] == #char "\t") finish -= 1;
-            if ascii_equal_fold(name, "Content-Length") {
-                if start == finish || length >= 0 return .{ .reason = "invalid Content-Length" };
-                parsed: ssize = 0;
-                for i: start..finish {
-                    if line[i] < #char "0" || line[i] > #char "9" return .{ .reason = "invalid Content-Length" };
-                    parsed = parsed * 10 + cast(ssize)(line[i] - #char "0");
-                    if parsed > MAX_SKIPPED_BYTES return .{ .reason = "invalid Content-Length" };
-                }
-                length = parsed;
-            } else if ascii_equal_fold(name, "Content-Type") {
-                if !rpc_content_type_utf8(line[start..finish]) charset_supported = false;
-            }
-            cursor = end + 2;
-        }
-        if length < 0 return .{ .reason = "missing Content-Length" };
-        if length > MAX_MESSAGE_BYTES return .{ .length = length, .reason = "message exceeds the 64 MiB limit" };
-        if !charset_supported return .{ .length = length, .reason = "unsupported Content-Type charset" };
-        return .{ .length = length };
-    }
-
-    rpc_hex_unit :: (text: str, at: ssize) -> ssize {
-        if at < 0 || at + 4 > text.count return -1;
-        value: ssize = 0;
-        for i: at..at + 4 {
-            byte := text[i];
-            digit: ssize = -1;
-            if byte >= #char "0" && byte <= #char "9" digit = cast(ssize)(byte - #char "0");
-            else if byte >= #char "a" && byte <= #char "f" digit = cast(ssize)(byte - #char "a") + 10;
-            else if byte >= #char "A" && byte <= #char "F" digit = cast(ssize)(byte - #char "A") + 10;
-            if digit < 0 return -1;
-            value = value * 16 + digit;
-        }
-        return value;
-    }
-
-    // Editors serialize JavaScript strings, which may hold unpaired UTF-16
-    // surrogates. The JSON parser rejects their escapes, which would drop the
-    // whole message, so replace each one with U+FFFD. Returns an owned copy,
-    // or an empty string when the text needs no change.
-    rpc_repair_surrogates :: (text: str) -> str {
-        out: String_Builder;
-        copied: ssize = 0;
-        quoted := false;
-        cursor: ssize = 0;
-        while cursor < text.count {
-            byte := text[cursor];
-            if !quoted || byte != #char "\\" {
-                if byte == #char "\"" quoted = !quoted;
-                cursor += 1;
-                continue;
-            }
-            unit: ssize = -1;
-            if cursor + 1 < text.count && text[cursor + 1] == #char "u"
-                unit = rpc_hex_unit(text, cursor + 2);
-            if unit < 0 {
-                cursor += 2;
-                continue;
-            }
-            if unit >= 55296 && unit <= 56319 {
-                low: ssize = -1;
-                if cursor + 7 < text.count && text[cursor + 6] == #char "\\" &&
-                   text[cursor + 7] == #char "u" low = rpc_hex_unit(text, cursor + 8);
-                if low >= 56320 && low <= 57343 {
-                    cursor += 12;
-                    continue;
-                }
-            } else if unit < 56320 || unit > 57343 {
-                cursor += 6;
-                continue;
-            }
-            out.write_string(text[copied..cursor]);
-            out.write_string("\\ufffd");
-            cursor += 6;
-            copied = cursor;
-        }
-        if copied == 0 {
-            unchanged: str;
-            return unchanged;
-        }
-        out.write_string(text[copied..]);
-        return out.into_string();
-    }
-
-    // Content-Type parameters are ASCII and case insensitive. LSP also
-    // accepts the historical "utf8" spelling for UTF-8.
-    rpc_content_type_utf8 :: (value: str) -> bool {
-        if value.count == 0 return false;
-        cursor: ssize = 0;
-        while cursor < value.count && value[cursor] != #char ";" cursor += 1;
-        while cursor < value.count {
-            cursor += 1;
-            end := cursor;
-            quoted := false;
-            while end < value.count {
-                if value[end] == #char "\\" && quoted {
-                    if end + 1 >= value.count return false;
-                    end += 2;
-                    continue;
-                }
-                if value[end] == #char "\"" quoted = !quoted;
-                if value[end] == #char ";" && !quoted break;
-                end += 1;
-            }
-            if quoted return false;
-            start := cursor;
-            while start < end && (value[start] == #char " " || value[start] == #char "\t") start +=
-                1;
-            equals := start;
-            while equals < end && value[equals] != #char "=" equals += 1;
-            name_end := equals;
-            while name_end > start &&
-                (value[name_end - 1] == #char " " || value[name_end - 1] == #char "\t") name_end -=
-                1;
-            if ascii_equal_fold(value[start..name_end], "charset") {
-                if equals == end return false;
-                encoding_start := equals + 1;
-                while encoding_start < end &&
-                    (value[encoding_start] == #char " " || value[encoding_start] == #char "\t")
-                    encoding_start += 1;
-                encoding_end := end;
-                while encoding_end > encoding_start &&
-                    (value[encoding_end - 1] == #char " " || value[encoding_end - 1] == #char "\t")
-                    encoding_end -= 1;
-                if encoding_end - encoding_start >= 2 && value[encoding_start] == #char "\"" &&
-                    value[encoding_end - 1] == #char "\"" {
-                    encoding_start += 1;
-                    encoding_end -= 1;
-                }
-                encoding := value[encoding_start..encoding_end];
-                if !ascii_equal_fold(encoding, "utf-8") && !ascii_equal_fold(
-                    encoding,
-                    "utf8"
-                ) return false;
-            }
-            cursor = end;
-        }
-        return true;
-    }
-
-    rpc_header_name_byte :: (byte: u8) -> bool {
-        if byte == {
-            case (#char "A")..=(#char "Z"), (#char "a")..=(#char "z"), (#char "0")..=(#char "9"),
-                #char "!", #char "#", #char "$", #char "%", #char "&", #char "'", #char "*",
-                #char "+", #char "-", #char ".", #char "^", #char "_", #char "`", #char "|",
-                #char "~";
+json_is_text :: (value: ?*Json) -> bool {
+    if #pattern ?pointer = value {
+        if #partial pointer.* == {
+        case .text;
             return true;
-            else;
-            return false;
         }
     }
+    return false;
+}
 
-    ascii_equal_fold :: (left: str, right: str) -> bool {
-        if left.count != right.count return false;
-        for i: 0..left.count {
-            a := left[i];
-            b := right[i];
-            if a >= #char "A" && a <= #char "Z" a += (#char "a") - (#char "A");
-            if b >= #char "A" && b <= #char "Z" b += (#char "a") - (#char "A");
-            if a != b return false;
+json_is_object :: (value: ?*Json) -> bool {
+    if #pattern ?pointer = value {
+        if #partial pointer.* == {
+        case .map;
+            return true;
+        case .structure;
+            return true;
         }
-        return true;
     }
+    return false;
+}
+
+json_is_integer :: (value: ?*Json) -> bool {
+    if #pattern ?pointer = value {
+        if #partial pointer.* == {
+        case .signed_integer(n);
+            return n >= -2147483648 && n <= 2147483647;
+        case .unsigned_integer(n);
+            return n <= 2147483647;
+        }
+    }
+    return false;
+}
+
+json_integer :: (value: ?*Json, fallback: ssize = -1) -> ssize {
+    if !json_is_integer(value) return fallback;
+    if #pattern ?pointer = value {
+        if #partial pointer.* == {
+        case .signed_integer(n);
+            return cast(ssize) n;
+        case .unsigned_integer(n);
+            return cast(ssize) n;
+        }
+    }
+    return fallback;
+}
+
+json_boolean :: (value: ?*Json, fallback: bool = false) -> bool {
+    if #pattern ?pointer = value {
+        if #partial pointer.* == {
+        case .boolean(flag);
+            return flag;
+        }
+    }
+    return fallback;
+}
+
+json_array :: (value: ?*Json) -> ?*[..]Json {
+    if #pattern ?pointer = value {
+        if #partial pointer.* == {
+        case .sequence(*items);
+            return ?items;
+        }
+    }
+    return null;
+}
+
+write_json_string :: (out: *String_Builder, text: str) {
+    hex :: "0123456789abcdef";
+    out.write_byte(#char "\"");
+    for byte: text.bytes() {
+        if byte == {
+        case #char "\"";
+            out.write_string("\\\"");
+        case #char "\\";
+            out.write_string("\\\\");
+        case ..(#char " ");
+            out.write_string("\\u00");
+            out.write_byte(hex[cast(ssize)(byte / 16)]);
+            out.write_byte(hex[cast(ssize)(byte % 16)]);
+        else;
+            out.write_byte(byte);
+        }
+    }
+    out.write_byte(#char "\"");
+}
+
+write_json_integer :: (out: *String_Builder, number: ssize) {
+    out.writef("{}", number);
+}
+
+write_json_value :: (out: *String_Builder, value: ?*Json) {
+    if #pattern ?pointer = value {
+        if pointer.to_json_string() == {
+        case .Ok(text);
+            defer text.free();
+            out.write_string(text);
+            return;
+        case .Err;
+        }
+    }
+    out.write_string("null");
+}
+
+rpc_send :: (output: *File, body: str) -> bool {
+    header := tprint("Content-Length: {}\r\n\r\n", body.count);
+    for text: .[header, body] {
+        offset: ssize = 0;
+        while offset < text.count {
+            if output.write(text[offset..]) == {
+            case .Err;
+                return false;
+            case .Ok(count);
+                if count <= 0 return false;
+                offset += count;
+            }
+        }
+    }
+    return true;
+}
+
+rpc_response :: (output: *File, id: ?*Json, result: str) -> bool {
+    out: String_Builder;
+    defer out.free();
+    out.write_string("{\"jsonrpc\":\"2.0\",\"id\":");
+    write_json_value(&out, id);
+    out.write_string(",\"result\":");
+    out.write_string(result);
+    out.write_byte(#char "}");
+    return rpc_send(output, out.to_string());
+}
+
+rpc_error :: (output: *File, id: ?*Json, code: ssize, message: str) -> bool {
+    out: String_Builder;
+    defer out.free();
+    out.write_string("{\"jsonrpc\":\"2.0\",\"id\":");
+    write_json_value(&out, id);
+    out.write_string(",\"error\":{\"code\":");
+    write_json_integer(&out, code);
+    out.write_string(",\"message\":");
+    write_json_string(&out, message);
+    out.write_string("}}");
+    return rpc_send(output, out.to_string());
+}
+
+rpc_read_frame :: (input: *File) -> Rpc_Frame {
+    header: String_Builder;
+    defer header.free();
+    while header.buf.count < 16384 {
+        if input.read_byte() == {
+        case .Err(failure);
+            if header.buf.count == 0 && failure.kind == .End_Of_File return .{ .status = 0 };
+            if failure.kind == .End_Of_File
+                return .{ .status = -1, .reason = "input ended inside a message header" };
+            return .{ .status = -1, .reason = "could not read standard input" };
+        case .Ok(byte);
+            header.write_byte(byte);
+        }
+        size := header.buf.count;
+        if size >= 4 && header.to_string()[size - 4..] == "\r\n\r\n" break;
+    }
+    text := header.to_string();
+    if text.count < 4 || text[text.count - 4..] != "\r\n\r\n"
+        return .{ .status = -1, .reason = "message header exceeds 16384 bytes" };
+    parsed := rpc_parse_header(text);
+    if parsed.length < 0 return .{ .status = -1, .reason = parsed.reason };
+    if parsed.reason.count > 0 {
+        if !rpc_skip_body(input, parsed.length)
+            return .{ .status = -1, .reason = "input ended inside a skipped message" };
+        return .{ .status = 2, .reason = parsed.reason, .length = parsed.length };
+    }
+    length := parsed.length;
+    body := String_Builder.make_len_cap(length, length);
+    offset: ssize = 0;
+    while offset < length {
+        failed := false;
+        if input.read_into(body.buf[offset..]) == {
+        case .Err;
+            failed = true;
+        case .Ok(count);
+            if count <= 0 failed = true;
+            else offset += count;
+        }
+        if failed {
+            body.free();
+            return .{
+                .status = -1,
+                .reason = "input ended inside a message body",
+                .length = length
+            };
+        }
+    }
+    return .{ .body = body.into_string(), .status = 1, .length = length };
+}
+
+// Reads and drops a body, keeping the stream aligned on the next header.
+rpc_skip_body :: (input: *File, length: ssize) -> bool {
+    buffer: [65536]u8;
+    remaining := length;
+    while remaining > 0 {
+        request := buffer.count;
+        if remaining < request request = remaining;
+        if input.read_into(buffer[..request]) == {
+        case .Err;
+            return false;
+        case .Ok(count);
+            if count <= 0 return false;
+            remaining -= count;
+        }
+    }
+    return true;
+}
+
+// The body length, or -1 when the header cannot frame a readable body.
+rpc_content_length :: (text: str) -> ssize {
+    parsed := rpc_parse_header(text);
+    if parsed.reason.count > 0 return -1;
+    return parsed.length;
+}
+
+// Validate the complete ASCII header before allocating its body. A
+// malformed delimiter cannot make us skip a byte of the next header.
+rpc_parse_header :: (text: str) -> Rpc_Header {
+    malformed: Rpc_Header = .{ .reason = "malformed message header" };
+    if text.count < 4 || text.count > 16384 || text[text.count - 4..] != "\r\n\r\n"
+        return malformed;
+    length: ssize = -1;
+    charset_supported := true;
+    cursor: ssize = 0;
+    while cursor < text.count - 2 {
+        end := cursor;
+        while end < text.count && text[end] != #char "\r" && text[end] != #char "\n" end += 1;
+        if end == cursor || end + 1 >= text.count || text[end] != #char "\r" || text[end + 1] !=
+            #char "\n" return malformed;
+        line := text[cursor..end];
+        colon: ssize = 0;
+        while colon < line.count && line[colon] != #char ":" colon += 1;
+        if colon == 0 || colon == line.count return malformed;
+        name := line[..colon];
+        for byte: name.bytes() {
+            if !rpc_header_name_byte(byte) return malformed;
+        }
+        for index: colon + 1..line.count {
+            byte := line[index];
+            if (byte < #char " " && byte != #char "\t") || byte > #char "~" return malformed;
+        }
+        start := colon + 1;
+        while start < line.count && (line[start] == #char " " || line[start] == #char "\t")
+            start += 1;
+        finish := line.count;
+        while finish > start &&
+            (line[finish - 1] == #char " " || line[finish - 1] == #char "\t") finish -= 1;
+        if ascii_equal_fold(name, "Content-Length") {
+            if start == finish || length >= 0 return .{ .reason = "invalid Content-Length" };
+            parsed: ssize = 0;
+            for i: start..finish {
+                if line[i] < #char "0" || line[i] > #char "9" return .{
+                    .reason = "invalid Content-Length"
+                };
+                parsed = parsed * 10 + cast(ssize)(line[i] - #char "0");
+                if parsed > MAX_SKIPPED_BYTES return .{ .reason = "invalid Content-Length" };
+            }
+            length = parsed;
+        } else if ascii_equal_fold(name, "Content-Type") {
+            if !rpc_content_type_utf8(line[start..finish]) charset_supported = false;
+        }
+        cursor = end + 2;
+    }
+    if length < 0 return .{ .reason = "missing Content-Length" };
+    if length > MAX_MESSAGE_BYTES return .{
+        .length = length,
+        .reason = "message exceeds the 64 MiB limit"
+    };
+    if !charset_supported return .{ .length = length, .reason = "unsupported Content-Type charset" };
+    return .{ .length = length };
+}
+
+rpc_hex_unit :: (text: str, at: ssize) -> ssize {
+    if at < 0 || at + 4 > text.count return -1;
+    value: ssize = 0;
+    for i: at..at + 4 {
+        byte := text[i];
+        digit: ssize = -1;
+        if byte >= #char "0" && byte <= #char "9" digit = cast(ssize)(byte - #char "0");
+        else if byte >= #char "a" && byte <= #char "f" digit = cast(ssize)(byte - #char "a") + 10;
+        else if byte >= #char "A" && byte <= #char "F" digit = cast(ssize)(byte - #char "A") + 10;
+        if digit < 0 return -1;
+        value = value * 16 + digit;
+    }
+    return value;
+}
+
+// Editors serialize JavaScript strings, which may hold unpaired UTF-16
+// surrogates. The JSON parser rejects their escapes, which would drop the
+// whole message, so replace each one with U+FFFD. Returns an owned copy,
+// or an empty string when the text needs no change.
+rpc_repair_surrogates :: (text: str) -> str {
+    out: String_Builder;
+    copied: ssize = 0;
+    quoted := false;
+    cursor: ssize = 0;
+    while cursor < text.count {
+        byte := text[cursor];
+        if !quoted || byte != #char "\\" {
+            if byte == #char "\"" quoted = !quoted;
+            cursor += 1;
+            continue;
+        }
+        unit: ssize = -1;
+        if cursor + 1 < text.count && text[cursor + 1] == #char "u"
+            unit = rpc_hex_unit(text, cursor + 2);
+        if unit < 0 {
+            cursor += 2;
+            continue;
+        }
+        if unit >= 55296 && unit <= 56319 {
+            low: ssize = -1;
+            if cursor + 7 < text.count && text[cursor + 6] == #char "\\" &&
+                text[cursor + 7] == #char "u" low = rpc_hex_unit(text, cursor + 8);
+            if low >= 56320 && low <= 57343 {
+                cursor += 12;
+                continue;
+            }
+        } else if unit < 56320 || unit > 57343 {
+            cursor += 6;
+            continue;
+        }
+        out.write_string(text[copied..cursor]);
+        out.write_string("\\ufffd");
+        cursor += 6;
+        copied = cursor;
+    }
+    if copied == 0 {
+        unchanged: str;
+        return unchanged;
+    }
+    out.write_string(text[copied..]);
+    return out.into_string();
+}
+
+// Content-Type parameters are ASCII and case insensitive. LSP also
+// accepts the historical "utf8" spelling for UTF-8.
+rpc_content_type_utf8 :: (value: str) -> bool {
+    if value.count == 0 return false;
+    cursor: ssize = 0;
+    while cursor < value.count && value[cursor] != #char ";" cursor += 1;
+    while cursor < value.count {
+        cursor += 1;
+        end := cursor;
+        quoted := false;
+        while end < value.count {
+            if value[end] == #char "\\" && quoted {
+                if end + 1 >= value.count return false;
+                end += 2;
+                continue;
+            }
+            if value[end] == #char "\"" quoted = !quoted;
+            if value[end] == #char ";" && !quoted break;
+            end += 1;
+        }
+        if quoted return false;
+        start := cursor;
+        while start < end && (value[start] == #char " " || value[start] == #char "\t") start +=
+            1;
+        equals := start;
+        while equals < end && value[equals] != #char "=" equals += 1;
+        name_end := equals;
+        while name_end > start &&
+            (value[name_end - 1] == #char " " || value[name_end - 1] == #char "\t") name_end -=
+            1;
+        if ascii_equal_fold(value[start..name_end], "charset") {
+            if equals == end return false;
+            encoding_start := equals + 1;
+            while encoding_start < end &&
+                (value[encoding_start] == #char " " || value[encoding_start] == #char "\t")
+                encoding_start += 1;
+            encoding_end := end;
+            while encoding_end > encoding_start &&
+                (value[encoding_end - 1] == #char " " || value[encoding_end - 1] == #char "\t")
+                encoding_end -= 1;
+            if encoding_end - encoding_start >= 2 && value[encoding_start] == #char "\"" &&
+                value[encoding_end - 1] == #char "\"" {
+                encoding_start += 1;
+                encoding_end -= 1;
+            }
+            encoding := value[encoding_start..encoding_end];
+            if !ascii_equal_fold(encoding, "utf-8") && !ascii_equal_fold(encoding, "utf8") return false;
+        }
+        cursor = end;
+    }
+    return true;
+}
+
+rpc_header_name_byte :: (byte: u8) -> bool {
+    if byte == {
+    case (#char "A")..=(#char "Z"), (#char "a")..=(#char "z"), (#char "0")..=(#char "9"),
+    #char "!", #char "#", #char "$", #char "%", #char "&", #char "'", #char "*",
+    #char "+", #char "-", #char ".", #char "^", #char "_", #char "`", #char "|",
+    #char "~";
+        return true;
+    else;
+        return false;
+    }
+}
+
+ascii_equal_fold :: (left: str, right: str) -> bool {
+    if left.count != right.count return false;
+    for i: 0..left.count {
+        a := left[i];
+        b := right[i];
+        if a >= #char "A" && a <= #char "Z" a += (#char "a") - (#char "A");
+        if b >= #char "A" && b <= #char "Z" b += (#char "a") - (#char "A");
+        if a != b return false;
+    }
+    return true;
+}
+
 }
